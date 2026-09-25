@@ -1,6 +1,27 @@
 // Rotas /api/lists: listas de referência (termos procurados no nome e no conteúdo dos arquivos).
 import { Router } from 'express';
 import { HttpError, parseList, parseTerms } from './validate.js';
+import { Worker } from 'node:worker_threads';
+
+/** Roda o teste em uma worker thread com tempo limite. */
+function testTerms(terms, text, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('../scan/sample-worker.js', import.meta.url), { workerData: { terms, text } });
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new HttpError(422, 'O teste demorou demais. Revise as expressões regulares (podem ter retrocesso excessivo).'));
+    }, timeoutMs);
+    worker.once('message', (matches) => {
+      clearTimeout(timer);
+      worker.terminate();
+      resolve(matches);
+    });
+    worker.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
 
 const summary = (list) => ({
   id: list.id,
@@ -38,9 +59,11 @@ export function listsRouter({ store }) {
     res.status(204).end();
   });
 
-  // Valida termos sem salvar (usado pela tela de edição).
-  router.post('/validate', (req, res) => {
-    res.json({ terms: parseTerms(req.body?.terms || []) });
+  // Testa os termos (ainda não salvos) contra um texto de exemplo.
+  router.post('/test', async (req, res) => {
+    const terms = parseTerms(req.body?.terms || []);
+    const text = String(req.body?.text || '').slice(0, 200000);
+    res.json({ matches: await testTerms(terms, text) });
   });
 
   return router;

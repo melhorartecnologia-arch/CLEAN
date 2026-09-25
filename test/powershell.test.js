@@ -4,7 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { OWNER_SCRIPT } from '../src/scan/owner.js';
-import { AUDIT_SCRIPT, AuditIndex, describeAccess, normalizeWinPath, pickLastUser } from '../src/scan/audit.js';
+import os from 'node:os';
+import { AUDIT_SCRIPT, AuditIndex, describeAccess, normalizeWinPath, pickLastUser, ignoredAccounts } from '../src/scan/audit.js';
 import { runPowerShell, parseJsonLines, powershellPath } from '../src/scan/powershell.js';
 
 const hasPowerShell = spawnSync(powershellPath(), ['-NoProfile', '-Command', 'exit 0'], { windowsHide: true }).status === 0;
@@ -56,6 +57,8 @@ function Get-WinEvent {
     [pscustomobject]@{ Id = $id; TimeCreated = [datetime]::Parse($t).ToUniversalTime(); Properties = @($vals | ForEach-Object { [pscustomobject]@{ Value = $_ } }) }
   }
   # Mais recentes primeiro, como o Get-WinEvent real
+  ev 5145 '2026-09-20T16:00:00Z' @('S-9', 'svc-backup', 'EMPRESA', '0x9', 'File', '10.0.0.9', '5000', '\\\\*\\Financeiro', '\\??\\E:\\Shares\\Financeiro', 'RH\\salarios.xlsx', '0x120089', '%%4416', '')
+  ev 4663 '2026-09-20T15:30:00Z' @('S-8', 'svc-av', 'EMPRESA', '0x8', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\salarios.xlsx', '0x10', '%%4416', '0x1', '0x4', 'av.exe', '')
   ev 5145 '2026-09-20T15:00:00Z' @('S-1', 'ana', 'EMPRESA', '0x1', 'File', '10.0.0.5', '5000', '\\\\*\\Financeiro', '\\??\\E:\\Shares\\Financeiro', 'RH\\salarios.xlsx', '0x120089', '%%4416', '')
   ev 4663 '2026-09-20T14:00:00Z' @('S-2', 'bruno', 'EMPRESA', '0x2', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\salarios.xlsx', '0x10', '%%4417', '0x2', '0x4', 'EXCEL.EXE', '')
   ev 4663 '2026-09-20T13:00:00Z' @('S-3', 'SERVIDOR$', 'EMPRESA', '0x3', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\outro.docx', '0x10', '%%4417', '0x2', '0x4', 'x.exe', '')
@@ -67,9 +70,12 @@ function Get-WinEvent {
 
 test('auditoria: último acesso, última alteração e mapeamento de compartilhamentos', { skip }, async () => {
   const events = parseJsonLines(
-    await runPowerShell(MOCK_EVENTS + AUDIT_SCRIPT, { env: { CLEAN_COMPUTER: 'srv', CLEAN_DAYS: '30', CLEAN_MAX: '1000' } }),
+    await runPowerShell(MOCK_EVENTS + AUDIT_SCRIPT, {
+      env: { CLEAN_COMPUTER: 'srv', CLEAN_DAYS: '30', CLEAN_MAX: '1000', CLEAN_IGNORE: 'SVC-Backup;empresa\\svc-av' },
+    }),
   );
-  // salarios.xlsx: acesso (ana, leitura) + alteração (bruno); conta de máquina e registro ignorados
+  // salarios.xlsx: acesso (ana, leitura) + alteração (bruno); contas ignoradas (backup e antivírus
+  // pelo nome ou por DOMÍNIO\usuário), conta de máquina e registro não contam
   assert.equal(events.length, 3);
   const index = new AuditIndex(events);
   const hit = index.lookup('\\\\srv\\Financeiro', 'RH\\salarios.xlsx');
@@ -103,4 +109,6 @@ test('funções auxiliares de auditoria', () => {
   assert.deepEqual(pickLastUser({ metadata: { lastModifiedBy: 'B' }, owner: 'C' }), { user: 'B', source: 'metadata' });
   assert.deepEqual(pickLastUser({ owner: 'C' }), { user: 'C', source: 'owner' });
   assert.deepEqual(pickLastUser({}), { user: null, source: null });
+  const self = os.userInfo().username;
+  assert.deepEqual(ignoredAccounts(['svc-backup', ' ', 'a;b']), ['svc-backup', 'ab', self]);
 });

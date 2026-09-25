@@ -6,16 +6,23 @@
 //     Compartilhamento de Arquivos).
 // A conta que executa o CLEAN precisa ler o log de Segurança (Administradores ou "Leitores de Log
 // de Eventos") do computador consultado.
+import os from 'node:os';
 import path from 'node:path';
 import { runPowerShell, parseJsonLines } from './powershell.js';
 
 // Percorre os eventos do mais recente para o mais antigo e emite, por arquivo, o último acesso
 // qualquer (a=1) e a última alteração (w=1). Usa Properties por posição (mais rápido que ToXml()).
+// Contas em CLEAN_IGNORE (a do próprio CLEAN, backup, antivírus...) não contam como "último usuário".
 export const AUDIT_SCRIPT = `
 $ErrorActionPreference = 'Stop'
 $filter = @{ LogName = 'Security'; Id = @(4663, 5145); StartTime = (Get-Date).AddDays(-[int]$env:CLEAN_DAYS) }
 $params = @{ FilterHashtable = $filter; MaxEvents = [int]$env:CLEAN_MAX; ErrorAction = 'Stop' }
 if ($env:CLEAN_COMPUTER) { $params['ComputerName'] = $env:CLEAN_COMPUTER }
+$ignore = @{}
+foreach ($name in (([string]$env:CLEAN_IGNORE) -split ';')) {
+  $n = $name.Trim().ToLowerInvariant()
+  if ($n) { $ignore[$n] = $true }
+}
 $seenAny = @{}
 $seenWrite = @{}
 $writeBits = 0xD0116
@@ -39,7 +46,9 @@ try {
       $mask = [string]$v[10].Value
     }
     $user = [string]$v[1].Value
+    $domain = [string]$v[2].Value
     if (-not $file -or -not $user -or $user -eq '-' -or $user.EndsWith('$')) { return }
+    if ($ignore.ContainsKey($user.ToLowerInvariant()) -or $ignore.ContainsKey(($domain + '\\' + $user).ToLowerInvariant())) { return }
     $key = $file.ToLowerInvariant()
     $isWrite = $false
     try { $isWrite = ([Convert]::ToInt64($mask, 16) -band $writeBits) -ne 0 } catch { }
@@ -49,7 +58,7 @@ try {
     if ($any) { $seenAny[$key] = $true }
     if ($write) { $seenWrite[$key] = $true }
     ConvertTo-Json -Compress -InputObject @{
-      t = $e.TimeCreated.ToUniversalTime().ToString('o'); id = $e.Id; u = $user; d = [string]$v[2].Value
+      t = $e.TimeCreated.ToUniversalTime().ToString('o'); id = $e.Id; u = $user; d = $domain
       f = $file; s = $share; sl = $shareLocal; m = $mask; a = [int]$any; w = [int]$write
     }
   }
@@ -85,13 +94,24 @@ export function normalizeWinPath(p) {
     .toLowerCase();
 }
 
+/** Contas ignoradas: as informadas no repositório e sempre a conta que executa o CLEAN. */
+export function ignoredAccounts(extra = []) {
+  const self = os.userInfo().username;
+  return [...new Set([...extra, self].map((u) => String(u).replace(/;/g, '').trim()).filter(Boolean))];
+}
+
 /** Consulta o log de Segurança. Retorna a lista de eventos já reduzida (um por arquivo e tipo). */
-export async function queryAuditEvents({ computer = '', days = 30, maxEvents = 200000 } = {}) {
+export async function queryAuditEvents({ computer = '', days = 30, maxEvents = 200000, ignoreUsers = [] } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('A consulta ao log de auditoria só está disponível quando o CLEAN roda no Windows.');
   }
   const lines = await runPowerShell(AUDIT_SCRIPT, {
-    env: { CLEAN_COMPUTER: computer, CLEAN_DAYS: String(days), CLEAN_MAX: String(maxEvents) },
+    env: {
+      CLEAN_COMPUTER: computer,
+      CLEAN_DAYS: String(days),
+      CLEAN_MAX: String(maxEvents),
+      CLEAN_IGNORE: ignoredAccounts(ignoreUsers).join(';'),
+    },
     timeoutMs: 30 * 60 * 1000,
   });
   return parseJsonLines(lines);

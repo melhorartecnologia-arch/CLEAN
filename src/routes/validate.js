@@ -58,6 +58,7 @@ export function parseRepository(body = {}) {
       localPath: localPath.replace(/\//g, '\\'),
       days: Math.min(Math.max(Math.round(days), 1), 365),
       maxEvents: Math.min(Math.max(Math.round(maxEvents), 100), 5_000_000),
+      ignoreUsers: lines(audit.ignoreUsers, 100).map((u) => u.replace(/;/g, '')),
     },
   };
 }

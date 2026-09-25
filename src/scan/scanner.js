@@ -182,12 +182,13 @@ export class Scanner {
     const computer = String(cfg.computer || uncHost(repo.path) || '').trim();
     const days = Math.min(Math.max(Number(cfg.days) || 30, 1), 365);
     const maxEvents = Math.min(Math.max(Number(cfg.maxEvents) || 200000, 100), 5_000_000);
-    const key = `${computer.toLowerCase()}|${days}|${maxEvents}`;
+    const ignoreUsers = Array.isArray(cfg.ignoreUsers) ? cfg.ignoreUsers : [];
+    const key = `${computer.toLowerCase()}|${days}|${maxEvents}|${ignoreUsers.join(';').toLowerCase()}`;
     if (!this.auditCache.has(key)) {
       this.log('info', `Consultando o log de auditoria de ${computer || 'este computador'} (últimos ${days} dias)...`);
       this.auditCache.set(
         key,
-        this.auditQuery({ computer, days, maxEvents }).then(
+        this.auditQuery({ computer, days, maxEvents, ignoreUsers }).then(
           (events) => {
             const index = new AuditIndex(events);
             this.log('info', `Log de auditoria de ${computer || 'este computador'}: ${index.any.size} arquivo(s) com eventos.`);

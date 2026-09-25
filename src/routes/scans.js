@@ -87,12 +87,19 @@ export function scansRouter({ store, manager }) {
     });
   });
 
+  // Resumo do recorte filtrado (gráficos) e opções de filtro calculadas sobre todos os resultados.
   router.get('/:id/summary', async (req, res) => {
     const scan = getScan(req);
     const records = await store.readResults(scan.id);
-    const summary = summarize(records);
-    const extensions = [...new Set(records.map((r) => r.extension))].filter(Boolean).sort();
-    res.json({ ...summary, extensions });
+    const all = summarize(records);
+    res.json({
+      ...summarize(filterRecords(records, req.query)),
+      options: {
+        terms: [...new Set(all.byTerm.map((t) => t.term))].sort((a, b) => a.localeCompare(b, 'pt-BR')),
+        users: all.byUser.filter((u) => u.identified).map((u) => u.user).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+        extensions: [...new Set(records.map((r) => r.extension).filter(Boolean))].sort(),
+      },
+    });
   });
 
   router.get('/:id/errors', async (req, res) => {

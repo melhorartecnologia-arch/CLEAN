@@ -114,9 +114,10 @@ test('log de auditoria tem prioridade sobre metadados e proprietário', async ()
     calls.push(params);
     return [event];
   };
-  const { byName } = await runScanner({}, { repo: { audit: { enabled: true, days: 7 } }, deps: { auditQuery } });
+  const { byName } = await runScanner({}, { repo: { audit: { enabled: true, days: 7, ignoreUsers: ['svc-backup'] } }, deps: { auditQuery } });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].days, 7);
+  assert.deepEqual(calls[0].ignoreUsers, ['svc-backup']);
   const docx = byName['relatorio.docx'];
   assert.equal(docx.lastUser, 'EMPRESA\\bruno');
   assert.equal(docx.lastUserSource, 'audit');
@@ -183,7 +184,8 @@ test('gerenciador executa a análise em uma worker thread e grava os resultados'
   assert.ok(results.every((r) => r.matches[0].termId.startsWith(`${list.id}:`)));
   assert.ok(done.log.some((l) => /concluída/.test(l.message)));
   await assert.rejects(manager.start({ repositoryIds: [], listIds: [list.id] }), /repositórios/);
-  await store.saveNow();
+  await store.close();
   const reloaded = await new Store(path.join(root, 'data')).init();
   assert.equal(reloaded.getScan(scan.id).status, 'completed');
+  await reloaded.close();
 });

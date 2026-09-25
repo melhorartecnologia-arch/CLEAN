@@ -185,6 +185,6 @@ export class ScanManager {
       entry.worker.terminate();
     }
     await Promise.all(exits);
-    await this.store.saveNow();
+    await this.store.close();
   }
 }

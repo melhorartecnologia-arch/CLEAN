@@ -13,9 +13,11 @@ let root;
 let server;
 let base;
 let store;
+const stores = [];
 
 async function startServer(config = {}) {
   const s = await new Store(path.join(root, `data-${Math.random().toString(36).slice(2)}`)).init();
+  stores.push(s);
   const manager = new ScanManager(s);
   const app = createApp({ store: s, manager, config: { authUser: '', authPassword: '', ...config } });
   const srv = await new Promise((resolve) => {
@@ -46,8 +48,9 @@ before(async () => {
   ({ srv: server, store, url: base } = await startServer());
 });
 
-after(() => {
+after(async () => {
   server?.close();
+  await Promise.all(stores.map((s) => s.close()));
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -95,6 +98,11 @@ test('fluxo completo pela API', async () => {
   const lists = await api('GET', '/api/lists');
   assert.equal(lists.data[0].termCount, 3);
 
+  const tried = await api('POST', '/api/lists/test', { terms: list.data.terms, text: 'CPF 529.982.247-25 e 111.111.111-11; salario' });
+  assert.deepEqual(tried.data.matches.map((m) => [m.term, m.count]).sort(), [['CPF', 1], ['salário', 1]]);
+  const slow = await api('POST', '/api/lists/test', { terms: [{ type: 'regex', value: '(a+)+$' }], text: `${'a'.repeat(40)}!` });
+  assert.equal(slow.status, 422);
+
   const scan = await api('POST', '/api/scans', { repositoryIds: [repo.data.id], listIds: [list.data.id], options: { checkName: true } });
   assert.equal(scan.status, 201);
   let current;
@@ -121,6 +129,11 @@ test('fluxo completo pela API', async () => {
 
   const summary = await api('GET', `/api/scans/${scan.data.id}/summary`);
   assert.equal(summary.data.files, 3);
+  assert.deepEqual(summary.data.options.terms, ['confidencial', 'CPF', 'salário']);
+  assert.deepEqual(summary.data.options.extensions, ['.pdf', '.txt', '.xlsx']);
+  const filteredSummary = await api('GET', `/api/scans/${scan.data.id}/summary?extension=.pdf`);
+  assert.equal(filteredSummary.data.files, 1);
+  assert.equal(filteredSummary.data.options.terms.length, 3, 'opções de filtro consideram todos os resultados');
   const cpf = summary.data.byTerm.find((t) => t.term === 'CPF');
   assert.equal(cpf.files, 2);
   assert.ok(summary.data.byUser.some((u) => u.user === 'Carlos Financeiro'));

@@ -85,6 +85,12 @@ export class Store {
     return this.saveChain;
   }
 
+  /** Grava as alterações pendentes (use antes de encerrar o processo). */
+  async close() {
+    await Promise.all([...this.appendChains.values()]);
+    await this.saveNow();
+  }
+
   // -- coleções genéricas ----------------------------------------------------------------------
 
   #list(kind) {
