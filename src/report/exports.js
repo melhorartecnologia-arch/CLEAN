@@ -167,13 +167,14 @@ function scanInfoRows(scan) {
     .join(' e ');
   return [
     ['Análise', scan.name],
+    ...(scan.scheduleId ? [['Agendamento', scan.scheduleName || '']] : []),
     ['Situação', SCAN_STATUS_LABELS[scan.status] || scan.status],
     ['Início', toDate(scan.startedAt)],
     ['Fim', toDate(scan.finishedAt)],
     ['Repositórios', (scan.summary?.repositories || []).map((r) => `${r.name} (${r.path})`).join('; ')],
     ['Listas de referência', (scan.summary?.lists || []).map((l) => `${l.name} (${l.termCount} termos)`).join('; ')],
     ['Verificações', verifications],
-    ['Modificados a partir de', opts.modifiedAfter ? toDate(opts.modifiedAfter) : 'todos'],
+    ['Alterados a partir de', opts.modifiedAfter ? toDate(opts.modifiedAfter) : 'todos'],
     ['Arquivos verificados', s.filesSeen ?? 0],
     ['Arquivos com ocorrências', s.filesMatched ?? 0],
     ['Total de ocorrências', s.occurrences ?? 0],

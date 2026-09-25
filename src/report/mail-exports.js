@@ -120,6 +120,7 @@ function scanInfoRows(scan) {
   ].filter(Boolean);
   return [
     ['Análise', scan.name],
+    ...(scan.scheduleId ? [['Agendamento', scan.scheduleName || '']] : []),
     ['Situação', SCAN_STATUS_LABELS[scan.status] || scan.status],
     ['Início', toDate(scan.startedAt)],
     ['Fim', toDate(scan.finishedAt)],
