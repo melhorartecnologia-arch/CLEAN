@@ -3,13 +3,15 @@ import { loadConfig } from './config.js';
 import { Store } from './store.js';
 import { ScanManager } from './scan/manager.js';
 import { createApp } from './app.js';
+import { Scheduler } from './schedule/scheduler.js';
 import { cleanupTempFiles } from './scan/powershell.js';
 
 const config = loadConfig();
 const store = await new Store(config.dataDir).init();
 await cleanupTempFiles();
 const manager = new ScanManager(store, { maxConcurrent: config.maxConcurrentScans });
-const app = createApp({ store, manager, config });
+const scheduler = new Scheduler({ store, manager });
+const app = createApp({ store, manager, config, scheduler });
 
 const server = app.listen(config.port, config.host, () => {
   const host = config.host === '0.0.0.0' || config.host === '::' ? 'localhost' : config.host;
@@ -19,6 +21,9 @@ const server = app.listen(config.port, config.host, () => {
   if (!local && !(config.authUser && config.authPassword)) {
     console.warn('[CLEAN] ATENÇÃO: o servidor aceita conexões da rede sem senha. Defina AUTH_USER e AUTH_PASSWORD.');
   }
+  // Agendamentos: a primeira verificação executa (ou registra como perdidos) os horários que
+  // passaram enquanto o CLEAN estava parado.
+  scheduler.start();
 });
 
 server.on('error', (err) => {
@@ -37,6 +42,7 @@ async function shutdown(signal) {
   closing = true;
   console.log(`[CLEAN] Encerrando (${signal})...`);
   server.close();
+  await scheduler.stop().catch(() => {});
   await manager.shutdown().catch(() => {});
   process.exit(0);
 }

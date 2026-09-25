@@ -9,6 +9,8 @@ import { repositoriesRouter } from './routes/repositories.js';
 import { listsRouter } from './routes/lists.js';
 import { scansRouter } from './routes/scans.js';
 import { mailSourcesRouter } from './routes/mail-sources.js';
+import { schedulesRouter } from './routes/schedules.js';
+import { Scheduler } from './schedule/scheduler.js';
 import { HttpError } from './routes/validate.js';
 import { PRESETS, VALIDATORS } from './scan/presets.js';
 import { DEFAULT_OPTIONS } from './scan/scanner.js';
@@ -113,7 +115,8 @@ function csrfGuard(allowed) {
   };
 }
 
-export function createApp({ store, manager, config }) {
+/** scheduler: agendador das análises (o servidor o inicia; nos testes, as verificações são manuais). */
+export function createApp({ store, manager, config, scheduler = new Scheduler({ store, manager }) }) {
   const app = express();
   const allowed = allowedHostNames(config.allowedHosts || []);
   app.disable('x-powered-by');
@@ -136,6 +139,8 @@ export function createApp({ store, manager, config }) {
       version: VERSION,
       platform: process.platform,
       hostname: os.hostname(),
+      // Fuso do servidor: os horários dos agendamentos valem nele.
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
       user: os.userInfo().username,
       node: process.version,
       dataDir: store.dataDir,
@@ -152,6 +157,7 @@ export function createApp({ store, manager, config }) {
   api.use('/lists', listsRouter({ store }));
   api.use('/mail-sources', mailSourcesRouter({ store, manager, endpoints: config.mailEndpoints }));
   api.use('/scans', scansRouter({ store, manager, endpoints: config.mailEndpoints }));
+  api.use('/schedules', schedulesRouter({ store, manager, scheduler }));
   api.use((req, res, next) => next(new HttpError(404, 'Rota não encontrada.')));
   // eslint-disable-next-line no-unused-vars
   api.use((err, req, res, next) => {

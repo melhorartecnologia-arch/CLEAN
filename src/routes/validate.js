@@ -15,6 +15,19 @@ export class HttpError extends Error {
 
 export const bad = (message) => new HttpError(400, message);
 
+/**
+ * Impede excluir um repositório ('files'), uma conexão de e-mail ('mail') ou uma lista ('list')
+ * usado por agendamentos (eles passariam a falhar). what: ex.: 'O repositório'.
+ */
+export function assertUnused(store, kind, id, what) {
+  const using = store.schedulesUsing(kind, id);
+  if (!using.length) return;
+  const names = using.map((s) => `"${s.name}"`).join(', ');
+  const one = using.length === 1;
+  const it = what.startsWith('A ') ? 'a' : 'o';
+  throw new HttpError(409, `${what} está em uso ${one ? 'no agendamento' : 'nos agendamentos'} ${names}. Retire-${it} ${one ? 'do agendamento' : 'dos agendamentos'} (ou exclua ${one ? 'o agendamento' : 'os agendamentos'}) antes de excluir.`, 'in-use');
+}
+
 export const EMAIL_RE = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+$/;
 export const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const DOMAIN_RE = /^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/i;

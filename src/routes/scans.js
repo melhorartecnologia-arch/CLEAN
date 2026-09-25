@@ -186,8 +186,8 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   const router = Router();
   const memo = new Memo();
   // Itens com exclusão manual em andamento ("análise:item"): um segundo pedido é recusado.
-  const deleting = new Set();
-  const deletingIn = (scanId) => [...deleting].some((key) => key.startsWith(`${scanId}:`));
+  const deleting = manager.itemDeletions;
+  const deletingIn = (scanId) => manager.hasItemDeletion(scanId);
 
   /**
    * Como cada item pode ser excluído ({ method }) ou por que não pode ({ blocked: 'removed' quando o

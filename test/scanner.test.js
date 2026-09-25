@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Scanner } from '../src/scan/scanner.js';
+import { Scanner, changedAt, cloudChangedAt } from '../src/scan/scanner.js';
 import { ScanManager, sanitizeOptions } from '../src/scan/manager.js';
 import { Store } from '../src/store.js';
 import { PRESETS } from '../src/scan/presets.js';
@@ -90,13 +90,27 @@ test('análise completa: nome, conteúdo, exclusões e último usuário', async 
   assert.equal(messages.at(-1).type, 'done');
 });
 
-test('filtro por data de modificação e somente nomes', async () => {
+test('filtro por data e somente nomes', async () => {
+  // "antigo-salario.txt" tem data de modificação de 2010, mas chegou agora ao repositório (como um
+  // arquivo copiado de outro lugar): continua entrando na análise.
   const { byName, stats } = await runScanner({ checkContent: false, modifiedAfter: '2020-01-01' });
-  assert.equal(stats.filesSkippedByDate, 1);
-  assert.deepEqual(Object.keys(byName).sort(), ['demissao.txt', 'salarios_2025.xlsx']);
+  assert.equal(stats.filesSkippedByDate, 0);
+  assert.deepEqual(Object.keys(byName).sort(), ['antigo-salario.txt', 'demissao.txt', 'salarios_2025.xlsx']);
   // Mesmo sem ler o conteúdo, os metadados do documento informam o último usuário
   assert.equal(byName['salarios_2025.xlsx'].lastUser, 'Carlos Financeiro');
   assert.equal(byName['salarios_2025.xlsx'].contentStatus, 'not-requested');
+  assert.equal(byName['antigo-salario.txt'].modified, '2010-01-01T00:00:00.000Z', 'o relatório mostra a data de modificação');
+
+  const tomorrow = new Date(Date.now() + 86400000).toISOString();
+  const later = await runScanner({ checkContent: false, modifiedAfter: tomorrow });
+  assert.equal(later.stats.filesSkippedByDate, later.stats.filesSeen);
+  assert.equal(later.records.length, 0);
+
+  // A data considerada é a mais recente entre modificação, criação e alteração do registro.
+  assert.equal(changedAt({ mtimeMs: 1000, birthtimeMs: 5000, ctimeMs: 3000 }), 5000);
+  assert.equal(changedAt({ mtimeMs: 1000, birthtimeMs: 0, ctimeMs: 3000 }), 3000);
+  assert.equal(cloudChangedAt({ lastModifiedDateTime: '2019-05-01T00:00:00Z', createdDateTime: '2026-09-01T00:00:00Z' }), Date.parse('2026-09-01T00:00:00Z'));
+  assert.equal(cloudChangedAt({ lastModifiedDateTime: '2026-09-02T00:00:00Z' }), Date.parse('2026-09-02T00:00:00Z'));
 });
 
 test('caminho completo como nome e sem proprietário', async () => {

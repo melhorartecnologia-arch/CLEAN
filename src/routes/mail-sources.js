@@ -3,7 +3,7 @@
 // voltam para o navegador: a API informa apenas se cada um está salvo.
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import { HttpError, bad, text, lines, email, emailList, graphCredentials } from './validate.js';
+import { HttpError, bad, text, lines, email, emailList, graphCredentials, assertUnused } from './validate.js';
 import { createConnector, MAIL_TYPES } from '../mail/connectors.js';
 import { friendlyError } from '../scan/errors.js';
 
@@ -227,6 +227,7 @@ export function mailSourcesRouter({ store, manager = null, endpoints = {} }) {
 
   router.delete('/:id', (req, res) => {
     const existing = find(req.params.id);
+    assertUnused(store, 'mail', existing.id, 'A conexão de e-mail');
     store.deleteMailSource(existing.id);
     syncLinkedRepositories({ ...existing, deleted: true });
     if (existing.allowDelete) manager?.revokeDeletion('mail', existing.id, 'a conexão foi removida do cadastro');

@@ -20,6 +20,14 @@ export function deletionScope(repo) {
   return `${repo.type}|${String(repo.graph?.tenantId || '').toLowerCase()}|${c.scope}|${list.join(',')}`;
 }
 
+/** O que a exclusão de e-mails alcança: tipo, conta ou servidor, alcance e caixas da conexão. */
+export function mailDeletionScope(source) {
+  const s = source || {};
+  const account = s.type === 'graph' ? s.graph?.tenantId : s.type === 'gmail' ? `${s.gmail?.clientEmail}|${s.gmail?.adminEmail}` : `${s.imap?.host}:${s.imap?.port}`;
+  const boxes = (s.mailboxes || []).map((m) => `${m.address}${m.login ? `>${m.login}` : ''}`.toLowerCase()).sort();
+  return `${s.type}|${String(account || '').toLowerCase()}|${s.scope}|${boxes.join(',')}`;
+}
+
 /** Indica se `target` está dentro da pasta `root` (sem sair dela com "..", nem em outra unidade). */
 export function isInside(root, target) {
   if (!root || !target) return false;

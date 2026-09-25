@@ -92,6 +92,14 @@ export class ScanManager {
     this.workerUrl = workerUrl;
     this.running = new Map();
     this.queue = [];
+    // Exclusões manuais em andamento pelo relatório ("análise:item"): o relatório não pode ser
+    // excluído (nem pela limpeza dos agendamentos) enquanto houver uma.
+    this.itemDeletions = new Set();
+  }
+
+  hasItemDeletion(scanId) {
+    for (const key of this.itemDeletions) if (key.startsWith(`${scanId}:`)) return true;
+    return false;
   }
 
   /** Termos das listas escolhidas (o identificador do termo inclui o da lista). */
@@ -112,10 +120,12 @@ export class ScanManager {
 
   /**
    * Inicia uma análise. body.kind = 'mail' para caixas de e-mail; senão, repositórios de arquivos.
-   * by: quem iniciou (registrado nas exclusões automáticas).
+   * by: quem iniciou (registrado nas exclusões automáticas); schedule: { id, name } do agendamento
+   * que iniciou a análise.
    */
-  async start(body = {}, { by = null } = {}) {
-    if (body?.kind === 'mail') return this.#startMail(body, by);
+  async start(body = {}, { by = null, schedule = null } = {}) {
+    const origin = { startedBy: by, ...(schedule ? { scheduleId: schedule.id, scheduleName: schedule.name } : {}) };
+    if (body?.kind === 'mail') return this.#startMail(body, origin);
     const { name, repositoryIds, listIds, options } = body || {};
     const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
     if (repositories.length === 0 || repositories.some((r) => !r)) throw new ScanError('Selecione repositórios válidos.');
@@ -129,7 +139,7 @@ export class ScanManager {
       repositoryIds: repositories.map((r) => r.id),
       listIds: lists.map((l) => l.id),
       options: opts,
-      startedBy: by,
+      ...origin,
       summary: {
         repositories: repositories.map((r) => ({ id: r.id, name: r.name, path: r.path, type: r.type || 'local' })),
         lists: lists.map((l) => ({ id: l.id, name: l.name, termCount: (l.terms || []).length })),
@@ -147,7 +157,7 @@ export class ScanManager {
     return scan;
   }
 
-  async #startMail(body, by) {
+  async #startMail(body, origin) {
     const { name, sourceIds, listIds, options } = body;
     const sources = ids(sourceIds).map((id) => this.store.getMailSource(id));
     if (sources.length === 0 || sources.some((s) => !s)) throw new ScanError('Selecione conexões de e-mail válidas.');
@@ -161,7 +171,7 @@ export class ScanManager {
       sourceIds: sources.map((s) => s.id),
       listIds: lists.map((l) => l.id),
       options: opts,
-      startedBy: by,
+      ...origin,
       summary: {
         sources: sources.map((s) => ({ id: s.id, name: s.name, type: s.type, scope: s.scope, mailboxCount: s.scope === 'all' ? null : (s.mailboxes || []).length })),
         lists: lists.map((l) => ({ id: l.id, name: l.name, termCount: (l.terms || []).length })),

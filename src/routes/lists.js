@@ -1,6 +1,6 @@
 // Rotas /api/lists: listas de referência (termos procurados no nome e no conteúdo dos arquivos).
 import { Router } from 'express';
-import { HttpError, parseList, parseTerms } from './validate.js';
+import { HttpError, parseList, parseTerms, assertUnused } from './validate.js';
 import { Worker } from 'node:worker_threads';
 
 /** Roda o teste em uma worker thread com tempo limite. */
@@ -55,7 +55,9 @@ export function listsRouter({ store }) {
   });
 
   router.delete('/:id', (req, res) => {
-    if (!store.deleteList(req.params.id)) throw new HttpError(404, 'Lista não encontrada.');
+    if (!store.getList(req.params.id)) throw new HttpError(404, 'Lista não encontrada.');
+    assertUnused(store, 'list', req.params.id, 'A lista');
+    store.deleteList(req.params.id);
     res.status(204).end();
   });
 

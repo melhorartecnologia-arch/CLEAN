@@ -3,7 +3,7 @@
 // volta para o navegador: a API informa apenas se ele está salvo.
 import fs from 'node:fs/promises';
 import { Router } from 'express';
-import { HttpError, parseRepository, normalizeRepoPath } from './validate.js';
+import { HttpError, parseRepository, normalizeRepoPath, assertUnused } from './validate.js';
 import { friendlyError } from '../scan/errors.js';
 import { DrivesConnector } from '../cloud/drives.js';
 import { isCloudRepo, deletionScope } from '../scan/delete.js';
@@ -51,6 +51,7 @@ export function repositoriesRouter({ store, manager = null, endpoints = {} }) {
   router.delete('/:id', (req, res) => {
     const existing = store.getRepository(req.params.id);
     if (!existing) throw new HttpError(404, 'Repositório não encontrado.');
+    assertUnused(store, 'files', existing.id, 'O repositório');
     store.deleteRepository(existing.id);
     if (existing.allowDelete) manager?.revokeDeletion('repository', existing.id, 'o repositório foi removido do cadastro');
     res.status(204).end();

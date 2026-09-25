@@ -71,6 +71,21 @@ function iso(date) {
   return date instanceof Date && !Number.isNaN(date.getTime()) && date.getTime() > 0 ? date.toISOString() : null;
 }
 
+/**
+ * Data usada no filtro "a partir de": a mais recente entre a modificação, a criação (um arquivo
+ * copiado para o repositório mantém a data de modificação original) e a alteração do registro do
+ * arquivo (movido ou renomeado). Assim, as análises incrementais dos agendamentos não deixam de
+ * ver arquivos que chegaram ao repositório com uma data de modificação antiga.
+ */
+export function changedAt(st) {
+  return Math.max(st.mtimeMs || 0, st.birthtimeMs || 0, st.ctimeMs || 0);
+}
+
+/** O mesmo para os arquivos do OneDrive/SharePoint (modificação ou envio para a biblioteca). */
+export function cloudChangedAt(item) {
+  return Math.max(Date.parse(item.lastModifiedDateTime) || 0, Date.parse(item.createdDateTime) || 0);
+}
+
 function uncHost(p) {
   return /^\\\\([^\\]+)\\/.exec(String(p).replace(/\//g, '\\'))?.[1] || '';
 }
@@ -362,8 +377,7 @@ export class Scanner {
     const { item, relativePath } = entry;
     const label = `${drive.label} › ${relativePath}`;
     this.current = { repository: repo.name, path: label };
-    const modified = new Date(item.lastModifiedDateTime);
-    if (this.modifiedAfter && modified.getTime() < this.modifiedAfter) {
+    if (this.modifiedAfter && cloudChangedAt(item) < this.modifiedAfter) {
       this.stats.filesSkippedByDate++;
       return;
     }
@@ -406,7 +420,7 @@ export class Scanner {
       extension: path.extname(item.name).toLowerCase(),
       size,
       created: iso(new Date(item.createdDateTime)),
-      modified: iso(modified),
+      modified: iso(new Date(item.lastModifiedDateTime)),
       accessed: null,
       contentType: content?.type || null,
       contentStatus: options.checkContent ? content?.status || null : 'not-requested',
@@ -480,7 +494,7 @@ export class Scanner {
       this.error(entry.path, err);
       return;
     }
-    if (this.modifiedAfter && st.mtimeMs < this.modifiedAfter) {
+    if (this.modifiedAfter && changedAt(st) < this.modifiedAfter) {
       this.stats.filesSkippedByDate++;
       return;
     }

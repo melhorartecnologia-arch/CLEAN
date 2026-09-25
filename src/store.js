@@ -5,7 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { SecretBox } from './secrets.js';
 
-const EMPTY_DB = { version: 1, repositories: [], lists: [], mailSources: [], scans: [] };
+const EMPTY_DB = { version: 1, repositories: [], lists: [], mailSources: [], scans: [], schedules: [] };
 const MAX_LOG = 200;
 
 function now() {
@@ -52,7 +52,7 @@ export class Store {
       if (err.code !== 'ENOENT') throw new Error(`Não foi possível ler ${this.dbFile}: ${err.message}`);
       this.db = structuredClone(EMPTY_DB);
     }
-    for (const key of ['repositories', 'lists', 'mailSources', 'scans']) if (!Array.isArray(this.db[key])) this.db[key] = [];
+    for (const key of ['repositories', 'lists', 'mailSources', 'scans', 'schedules']) if (!Array.isArray(this.db[key])) this.db[key] = [];
     this.secrets = await SecretBox.open(this.dataDir);
     // Análises que estavam em andamento quando o servidor parou
     for (const scan of this.db.scans) {
@@ -195,6 +195,31 @@ export class Store {
   openRepositorySecrets(repo) {
     const value = repo?.secrets?.clientSecret;
     return { clientSecret: value ? this.secrets.open(value) : '' };
+  }
+
+  listSchedules() {
+    return this.#list('schedules');
+  }
+  getSchedule(id) {
+    return this.#get('schedules', id);
+  }
+  createSchedule(data) {
+    return this.#create('schedules', data);
+  }
+  updateSchedule(id, data) {
+    return this.#update('schedules', id, data);
+  }
+  /** Estado mantido pelo agendador (próxima execução, histórico): não muda a data de alteração. */
+  updateScheduleState(id, patch) {
+    return this.#update('schedules', id, patch, { touch: false });
+  }
+  deleteSchedule(id) {
+    return this.#delete('schedules', id);
+  }
+
+  /** Agendamentos que usam um repositório ('files'), uma conexão de e-mail ('mail') ou uma lista ('list'). */
+  schedulesUsing(kind, id) {
+    return this.#list('schedules').filter((s) => (kind === 'list' ? s.listIds : s.kind === kind ? s.targetIds : [])?.includes(id));
   }
 
   listScans() {
