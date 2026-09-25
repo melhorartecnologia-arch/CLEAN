@@ -17,8 +17,19 @@ export function go(path) {
 
 /** Destaca o item do menu (data-nav) correspondente à tela atual. */
 export function setActiveNav(key) {
+  let active = null;
   document.querySelectorAll('.nav a').forEach((a) => {
-    if (key && a.dataset.nav === key) a.setAttribute('aria-current', 'page');
-    else a.removeAttribute('aria-current');
+    if (key && a.dataset.nav === key) {
+      a.setAttribute('aria-current', 'page');
+      active = a;
+    } else {
+      a.removeAttribute('aria-current');
+    }
   });
+  // Em telas estreitas o menu fica numa faixa horizontal com rolagem: centraliza o item ativo.
+  const bar = active?.closest('.sidebar');
+  if (bar && bar.scrollWidth > bar.clientWidth) {
+    const offset = active.getBoundingClientRect().left - bar.getBoundingClientRect().left;
+    bar.scrollLeft += offset - (bar.clientWidth - active.offsetWidth) / 2;
+  }
 }

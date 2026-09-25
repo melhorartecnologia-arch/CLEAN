@@ -423,6 +423,18 @@ test('API: segredos cifrados, nunca devolvidos, e mantidos quando o campo fica v
     const otherHost = await app.api('PUT', `/api/mail-sources/${imapSource.data.id}`, { ...imapSource.data, imap: { host: 'outro.exemplo.com' }, mailboxes: [{ address: 'a@empresa.com' }] });
     assert.equal(otherHost.status, 400);
     assert.match(otherHost.data.error, /Informe a senha da caixa a@empresa\.com/);
+    // Porta, segurança ou certificado não confiável também exigem a senha de novo (nada de enviar
+    // a senha salva sem criptografia ou para quem apresentar qualquer certificado).
+    for (const imap of [
+      { host: 'imap.empresa.com', security: 'tls', port: 1993 },
+      { host: 'imap.empresa.com', security: 'none' },
+      { host: 'imap.empresa.com', security: 'tls', allowSelfSigned: true },
+    ]) {
+      const changed = await app.api('PUT', `/api/mail-sources/${imapSource.data.id}`, { ...imapSource.data, imap, mailboxes: [{ address: 'a@empresa.com' }] });
+      assert.equal(changed.status, 400, JSON.stringify(imap));
+      const tested = await app.api('POST', '/api/mail-sources/test', { ...imapSource.data, id: imapSource.data.id, imap, mailboxes: [{ address: 'a@empresa.com' }] });
+      assert.equal(tested.status, 400, 'o teste também não usa a senha salva');
+    }
   } finally {
     await app.close();
   }

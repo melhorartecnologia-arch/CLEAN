@@ -1063,6 +1063,7 @@ mark {
 }
 table.mailbox-rows {
   width: 100%;
+  min-width: 560px; /* no celular, a tabela rola dentro do quadro */
   border-collapse: collapse;
 }
 table.mailbox-rows th {

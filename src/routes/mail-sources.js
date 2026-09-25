@@ -36,6 +36,17 @@ function addressList(value, field) {
   return out;
 }
 
+/** Mesmo servidor, porta e segurança, sem relaxar a verificação do certificado. */
+export function sameImapEndpoint(before, after) {
+  if (!before || !after) return false;
+  return (
+    before.host === after.host &&
+    Number(before.port) === Number(after.port) &&
+    before.security === after.security &&
+    (Boolean(before.allowSelfSigned) || !after.allowSelfSigned)
+  );
+}
+
 /** Lê o JSON da chave da conta de serviço do Google (baixado no Google Cloud). */
 function serviceAccount(value) {
   let data;
@@ -116,10 +127,10 @@ export function parseMailSource(body = {}, existing = null, box, { forTest = fal
     const port = Number(i.port) || (security === 'tls' ? 993 : 143);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw bad('Porta inválida.');
     data.imap = { host, port, security, allowSelfSigned: Boolean(i.allowSelfSigned) };
-    // Senhas salvas só valem para o mesmo servidor: trocar o servidor exige informá-las de novo
-    // (evita que uma senha salva seja enviada a outro endereço).
-    const sameHost = sameType && existing.imap?.host === host;
-    const kept = sameHost ? prev : {};
+    // Senhas salvas só valem para o mesmo destino e a mesma proteção: trocar o servidor, a porta
+    // ou a segurança (ou passar a aceitar certificado não confiável) exige informá-las de novo, para
+    // que uma senha salva não seja enviada a outro endereço nem sem a proteção com que foi cadastrada.
+    const kept = sameType && sameImapEndpoint(existing.imap, data.imap) ? prev : {};
     const defaultPassword = text(i.defaultPassword, 'a senha padrão', { max: 1000 });
     secrets.defaultPassword = defaultPassword ? seal(defaultPassword) : kept.defaultPassword;
     secrets.passwords = {};

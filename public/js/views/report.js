@@ -75,7 +75,7 @@ const FILES = {
   defaultSort: 'path',
   noun: ['arquivo', 'arquivos'],
   resultsTitle: 'Arquivos com ocorrências',
-  charts: { terms: 'chart', users: 'chart' },
+  views: { terms: 'chart', users: 'chart' }, // forma inicial de exibição de cada gráfico
 
   subtitle: (scan) => {
     const s = scan.summary || {};
@@ -238,7 +238,7 @@ const MAIL = {
   defaultSort: 'date',
   noun: ['mensagem', 'mensagens'],
   resultsTitle: 'Mensagens com ocorrências',
-  charts: { terms: 'chart', mailboxes: 'chart', senders: 'chart', locations: 'chart' },
+  views: { terms: 'chart', mailboxes: 'chart', senders: 'chart', locations: 'chart' },
 
   subtitle: (scan) => {
     const s = scan.summary || {};
@@ -435,9 +435,10 @@ const MAIL = {
 
 // ---------------------------------------------------------------------------------------------
 
-export async function render(root, { params, query }) {
+export async function render(root, { params, query, isCurrent = () => true }) {
   const id = params[0];
   let scan = await get(`/api/scans/${id}`);
+  if (!isCurrent()) return null; // o usuário já foi para outra tela
   const P = scan.kind === 'mail' ? MAIL : FILES;
   // Endereço e menu de acordo com o tipo da análise (ex.: link antigo para uma análise de e-mail).
   if (!location.hash.startsWith(`${P.base}/`)) history.replaceState(null, '', `${P.base}/${id}${query.toString() ? `?${query}` : ''}`);
@@ -449,7 +450,7 @@ export async function render(root, { params, query }) {
   let summary = null;
   let errors = null;
   const expanded = new Set();
-  const chartView = { ...P.charts };
+  const chartView = { ...P.views };
   let stopped = false;
   let timer = null;
   let lastResults = 0;
@@ -612,8 +613,8 @@ export async function render(root, { params, query }) {
       <figcaption>
         <div><h2>${title}</h2><p>${subtitle}</p></div>
         <div class="segmented" role="group" aria-label="Forma de exibição">
-          <button type="button" data-chart-view="chart" aria-pressed="${view === 'chart'}">Gráfico</button>
-          <button type="button" data-chart-view="table" aria-pressed="${view === 'table'}">Tabela</button>
+          <button type="button" data-chart-view="chart" aria-pressed="${view === 'chart' ? 'true' : 'false'}">Gráfico</button>
+          <button type="button" data-chart-view="table" aria-pressed="${view === 'table' ? 'true' : 'false'}">Tabela</button>
         </div>
       </figcaption>
       ${body}
@@ -652,8 +653,9 @@ export async function render(root, { params, query }) {
             <tbody>
               ${results.items.map((r) => {
                 const open = expanded.has(r.id);
-                return html`<tr data-id="${r.id}" aria-expanded="${open}">
-                    <td><button type="button" class="icon-btn" data-action="toggle" aria-label="${open ? 'Ocultar' : 'Mostrar'} detalhes de ${P.rowLabel(r)}" aria-expanded="${open}"><span class="row-toggle">${icon('chevron')}</span></button></td>
+                const expandedText = open ? 'true' : 'false';
+                return html`<tr data-id="${r.id}" aria-expanded="${expandedText}">
+                    <td><button type="button" class="icon-btn" data-action="toggle" aria-label="${open ? 'Ocultar' : 'Mostrar'} detalhes de ${P.rowLabel(r)}" aria-expanded="${expandedText}"><span class="row-toggle">${icon('chevron')}</span></button></td>
                     ${P.row(r)}
                   </tr>
                   ${open ? html`<tr class="detail"><td colspan="5">${P.detail(r)}</td></tr>` : ''}`;

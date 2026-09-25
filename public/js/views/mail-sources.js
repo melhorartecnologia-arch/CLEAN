@@ -19,7 +19,7 @@ function mailboxRow(m = {}) {
   return html`<tr data-mailbox-row>
     <td><input type="email" name="mbAddress" value="${m.address || ''}" placeholder="nome@empresa.com.br" aria-label="E-mail da caixa" /></td>
     <td><input type="text" name="mbLogin" value="${m.login || ''}" placeholder="igual ao e-mail" aria-label="Login da caixa" /></td>
-    <td><input type="password" name="mbPassword" autocomplete="new-password" placeholder="${m.hasPassword ? 'salva' : 'usa a senha padrão'}" aria-label="Senha da caixa" /></td>
+    <td><input type="password" name="mbPassword" autocomplete="new-password" placeholder="${m.hasPassword ? 'salva' : 'usa a senha padrão'}" data-saved="${m.hasPassword ? '1' : ''}" aria-label="Senha da caixa" /></td>
     <td><button type="button" class="icon-btn danger" data-action="remove-row" aria-label="Remover caixa" title="Remover">${icon('x')}</button></td>
   </tr>`;
 }
@@ -128,6 +128,7 @@ function sourceForm(src) {
           <input type="password" name="defaultPassword" autocomplete="new-password" placeholder="${im.hasDefaultPassword ? SAVED : 'usada nas caixas sem senha própria'}" />
           <small>Útil com uma conta de serviço que acessa todas as caixas (ex.: Exchange local com login DOMINIO\\servico\\caixa; Dovecot com caixa*mestre).</small>
         </label>
+        <p class="alert full" data-reenter hidden>${icon('alert')}<span>Servidor, porta ou segurança alterados: por proteção, as senhas salvas não serão usadas. Informe-as novamente.</span></p>
       </div>
     </fieldset>
 
@@ -217,8 +218,32 @@ function showTest(box, result) {
   paint(box, html`${result.message}${result.details?.length ? html`<ul class="test-details">${result.details.map((d) => html`<li>${d}</li>`)}</ul>` : ''}`);
 }
 
+/** Mesma regra do servidor: as senhas salvas valem só para o mesmo servidor, porta e segurança. */
+function sameEndpoint(saved, form) {
+  const security = form.elements.security.value;
+  const port = Number(form.elements.port.value) || SECURITY[security]?.port;
+  return (
+    saved.host === form.elements.host.value.trim().toLowerCase() &&
+    Number(saved.port) === port &&
+    saved.security === security &&
+    (Boolean(saved.allowSelfSigned) || !form.elements.allowSelfSigned.checked)
+  );
+}
+
 function wireForm(form, existing) {
   const rows = form.querySelector('[data-rows]');
+  const saved = existing?.type === 'imap' ? existing.imap : null;
+  // Com outro servidor, porta ou segurança, as senhas salvas deixam de valer: os avisos acompanham.
+  const syncSaved = () => {
+    if (!saved) return;
+    const same = form.elements.type.value === 'imap' && sameEndpoint(saved, form);
+    const anySaved = saved.hasDefaultPassword || rows.querySelector('[data-saved="1"]');
+    form.querySelector('[data-reenter]').hidden = same || !anySaved;
+    if (saved.hasDefaultPassword) form.elements.defaultPassword.placeholder = same ? SAVED : 'informe novamente';
+    rows.querySelectorAll('[name="mbPassword"][data-saved="1"]').forEach((input) => {
+      input.placeholder = same ? 'salva' : 'informe novamente';
+    });
+  };
   const sync = () => {
     const type = form.elements.type.value;
     form.querySelectorAll('[data-type]').forEach((el) => {
@@ -240,6 +265,10 @@ function wireForm(form, existing) {
       if (!port.value || defaults.includes(port.value)) port.value = SECURITY[event.target.value].port;
     }
     sync();
+    syncSaved();
+  });
+  form.addEventListener('input', (event) => {
+    if (['host', 'port'].includes(event.target.name)) syncSaved();
   });
   form.querySelector('[data-sa-file]').addEventListener('change', async (event) => {
     const file = event.target.files[0];
@@ -270,15 +299,23 @@ function wireForm(form, existing) {
       if (!box.hidden) box.querySelector('textarea').focus();
     } else if (action === 'bulk-add') {
       const area = form.querySelector('#bulk-list');
-      const existingAddresses = new Set([...rows.querySelectorAll('[name="mbAddress"]')].map((i) => i.value.trim().toLowerCase()).filter(Boolean));
-      const added = area.value
-        .split(/[\s,;]+/)
-        .map((v) => v.trim())
-        .filter((v) => v && !existingAddresses.has(v.toLowerCase()));
+      const known = new Set([...rows.querySelectorAll('[name="mbAddress"]')].map((i) => i.value.trim().toLowerCase()).filter(Boolean));
+      const added = [];
+      for (const value of area.value.split(/[\s,;]+/)) {
+        const address = value.trim();
+        if (!address || known.has(address.toLowerCase())) continue;
+        known.add(address.toLowerCase());
+        added.push(address);
+      }
+      if (added.length === 0) {
+        toast('Nenhum e-mail novo para incluir.', 'error');
+        return;
+      }
+      // As linhas em branco dão lugar às caixas incluídas.
       [...rows.querySelectorAll('[data-mailbox-row]')].forEach((row) => {
-        if (!row.querySelector('[name="mbAddress"]').value.trim()) row.remove();
+        if (!row.querySelector('[name="mbAddress"]').value.trim() && !row.querySelector('[name="mbLogin"]').value.trim()) row.remove();
       });
-      for (const address of new Set(added)) rows.insertAdjacentHTML('beforeend', mailboxRow({ address }).toString());
+      for (const address of added) rows.insertAdjacentHTML('beforeend', mailboxRow({ address }).toString());
       area.value = '';
       form.querySelector('[data-bulk]').hidden = true;
       toast(`${plural(added.length, 'caixa incluída', 'caixas incluídas')}.`, 'success');
@@ -297,6 +334,7 @@ function wireForm(form, existing) {
     }
   });
   sync();
+  syncSaved();
 }
 
 function scopeText(s) {
@@ -390,6 +428,11 @@ export async function render(root) {
     toast(`Testando "${source.name}"…`);
     try {
       const result = await post('/api/mail-sources/test', { ...source, id: source.id, mailboxes: source.type === 'imap' ? source.mailboxes : source.mailboxes.map((m) => m.address) });
+      // Se outro diálogo foi aberto enquanto o teste rodava, não o substitui: mostra só um aviso.
+      if (document.getElementById('modal').open || !root.isConnected) {
+        toast(`Teste de "${source.name}": ${result.message}`, result.ok ? 'success' : 'error');
+        return;
+      }
       await openDialog({
         title: `Teste: ${source.name}`,
         body: html`<div class="test-result ${result.ok ? 'ok' : 'fail'}">${result.message}${result.details?.length ? html`<ul class="test-details">${result.details.map((d) => html`<li>${d}</li>`)}</ul>` : ''}</div>`,
