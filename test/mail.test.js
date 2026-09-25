@@ -141,9 +141,9 @@ after(async () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-async function runMail(sources, options = {}) {
+async function runMail(sources, options = {}, endpoints = mocks.endpoints) {
   const messages = [];
-  const scanner = new MailScanner({ sources, terms: TERMS, options, endpoints: mocks.endpoints }, (m) => messages.push(m));
+  const scanner = new MailScanner({ sources, terms: TERMS, options, endpoints }, (m) => messages.push(m));
   const stats = await scanner.run();
   const records = messages.filter((m) => m.type === 'results').flatMap((m) => m.records);
   const errors = messages.filter((m) => m.type === 'errors').flatMap((m) => m.items);
@@ -354,6 +354,158 @@ test('IMAP: senha padrão e individual, falha de login, mensagem grande e pasta 
     assert.deepEqual(recent.records.map((r) => r.subject).sort(), ['Anexo enorme', 'Promoção', 'Salário']);
   } finally {
     await imap.close();
+  }
+});
+
+// ---------- Regressões encontradas na revisão ----------
+
+test('Microsoft 365: pasta com erro não interrompe a caixa; caixas fora do RBAC são ignoradas', async () => {
+  const folders = [
+    { id: 'inbox', displayName: 'Caixa de Entrada', wellKnown: 'inbox' },
+    { id: 'sumiu', displayName: 'Removida durante a análise' },
+    { id: 'depois', displayName: 'Z – depois da pasta com erro' },
+  ];
+  const mock = await startMockApis({
+    graph: {
+      tenant: GRAPH_TENANT,
+      clientId: GRAPH_CLIENT,
+      secret: GRAPH_SECRET,
+      failFolders: new Set(['sumiu']),
+      users: [
+        {
+          id: 'u1',
+          mail: 'ana@contoso.com',
+          displayName: 'Ana',
+          folders,
+          messages: {
+            inbox: [{ id: 'a1', received: '2026-09-20T10:00:00Z', raw: mail({ subject: 'Salário', body: 'x' }) }],
+            sumiu: [{ id: 'a2', received: '2026-09-20T10:00:00Z', raw: mail({ subject: 'Salário 2', body: 'x' }) }],
+            depois: [{ id: 'a3', received: '2026-09-20T10:00:00Z', raw: mail({ subject: 'Salário 3', body: 'x' }) }],
+          },
+        },
+        { id: 'u2', mail: 'fora.do.escopo@contoso.com', displayName: 'Fora', accessDenied: true, folders, messages: {} },
+      ],
+    },
+  });
+  try {
+    const { records, errors, stats, logs } = await runMail([graphSource({ excludeFolders: [] })], {}, mock.endpoints);
+    assert.deepEqual(records.map((r) => r.subject).sort(), ['Salário', 'Salário 3']);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].path, 'ana@contoso.com › Removida durante a análise');
+    assert.equal(stats.mailboxesSkipped, 1);
+    assert.ok(logs.some((l) => /fora\.do\.escopo@contoso\.com ignorada: acesso à caixa não liberado/.test(l.message)));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('Google Workspace: limite de taxa (403) repetido e mensagem acima do limite sem baixar os anexos', async () => {
+  const body = Buffer.from('Corpo com o CPF 529.982.247-25.', 'utf8').toString('base64url');
+  const mock = await startMockApis({
+    google: {
+      ...google.data,
+      rateLimitOnce: new Set(['r1']),
+      users: [
+        {
+          mail: 'caio@empresa.com',
+          name: 'Caio',
+          labels: [{ id: 'INBOX', name: 'INBOX', type: 'system' }],
+          messages: [
+            { id: 'r1', labelIds: ['INBOX'], internalDate: Date.parse('2026-09-01'), raw: mail({ subject: 'Salário', body: 'x' }) },
+            {
+              id: 'big',
+              labelIds: ['INBOX'],
+              internalDate: Date.parse('2026-09-02'),
+              size: 3_000_000,
+              raw: Buffer.alloc(10),
+              payload: {
+                mimeType: 'multipart/mixed',
+                headers: [
+                  { name: 'From', value: 'Ana <ana@empresa.com>' },
+                  { name: 'To', value: 'caio@empresa.com' },
+                  { name: 'Subject', value: 'Relatório grande' },
+                  { name: 'Content-Type', value: 'multipart/mixed; boundary="original"' },
+                ],
+                parts: [
+                  { mimeType: 'text/plain', headers: [{ name: 'Content-Type', value: 'text/plain; charset=UTF-8' }], body: { size: 30, data: body } },
+                  {
+                    mimeType: 'application/pdf',
+                    filename: 'confidencial.pdf',
+                    headers: [
+                      { name: 'Content-Type', value: 'application/pdf; name="confidencial.pdf"' },
+                      { name: 'Content-Disposition', value: 'attachment; filename="confidencial.pdf"' },
+                    ],
+                    body: { size: 2_900_000, attachmentId: 'A1' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  });
+  try {
+    const source = {
+      id: 'g',
+      name: 'Google',
+      type: 'gmail',
+      scope: 'list',
+      mailboxes: [{ address: 'caio@empresa.com' }],
+      excludeMailboxes: [],
+      excludeFolders: [],
+      gmail: { clientEmail: 'clean@projeto.iam.gserviceaccount.com' },
+      secrets: { privateKey: google.privateKeyPem },
+    };
+    const { records, errors, logs, bySubject } = await runMail([source], { maxMessageSizeMB: 1 }, mock.endpoints);
+    assert.deepEqual(errors, []);
+    assert.ok(logs.some((l) => /limite de requisições do Google/.test(l.message)));
+    assert.deepEqual(records.map((r) => r.subject).sort(), ['Relatório grande', 'Salário']);
+    const big = bySubject['Relatório grande'];
+    assert.equal(big.contentStatus, 'partial');
+    assert.match(big.contentNote, /acima do limite/);
+    assert.deepEqual(big.attachments.map((a) => [a.name, a.status, a.size]), [['confidencial.pdf', 'skipped-size', 2_900_000]]);
+    assert.deepEqual(big.matches.map((m) => [m.term, m.location]).sort(), [['CPF', 'body'], ['confidencial', 'attachmentName']]);
+    assert.ok(!mock.calls.some((c) => c.includes('/attachments/')), 'o anexo não é baixado');
+  } finally {
+    await mock.close();
+  }
+});
+
+test('IMAP: filtro por data sem comando longo (Exchange) e tamanho estimado maior que o real', async () => {
+  const messages = Array.from({ length: 600 }, (_, i) => ({
+    raw: mail({ subject: `Mensagem ${i}`, body: i % 2 ? 'salário' : 'nada' }),
+    date: new Date(i % 2 ? '2026-09-10T12:00:00Z' : '2020-01-01T12:00:00Z'),
+  }));
+  const imap = await startFakeImap({ 'ana@empresa.com': { password: 'p', folders: { INBOX: messages } } }, { maxLine: 1000 });
+  const estimated = await startFakeImap(
+    { 'bia@empresa.com': { password: 'p', folders: { INBOX: [{ raw: mail({ subject: 'Contrato', attachments: [{ name: 'contrato.docx', data: DOCX }] }), date: new Date('2026-09-10T12:00:00Z') }] } } },
+    { sizeOffset: 5_000_000 },
+  );
+  const source = (port, address) => ({
+    id: 'i',
+    name: 'IMAP',
+    type: 'imap',
+    scope: 'list',
+    imap: { host: '127.0.0.1', port, security: 'none' },
+    mailboxes: [{ address }],
+    excludeMailboxes: [],
+    excludeFolders: [],
+    secrets: { defaultPassword: 'p' },
+  });
+  try {
+    const recent = await runMail([source(imap.port, 'ana@empresa.com')], { receivedAfter: '2026-01-01T00:00:00Z' });
+    assert.deepEqual(recent.errors, []);
+    assert.equal(recent.stats.messagesSeen, 300);
+    assert.equal(recent.records.length, 300);
+    const big = await runMail([source(estimated.port, 'bia@empresa.com')], { maxMessageSizeMB: 1 });
+    assert.equal(big.records.length, 1);
+    assert.equal(big.records[0].contentStatus, 'ok', 'veio inteira: não está cortada');
+    assert.equal(big.records[0].attachments[0].status, 'ok');
+    assert.ok(big.records[0].matches.some((m) => m.term === 'CPF' && m.location === 'attachment'));
+  } finally {
+    await imap.close();
+    await estimated.close();
   }
 });
 

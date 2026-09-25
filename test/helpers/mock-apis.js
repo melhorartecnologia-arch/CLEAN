@@ -65,6 +65,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
         if (!user) return json(res, 404, { error: { code: 'Request_ResourceNotFound', message: 'Usuário não encontrado' } });
         const rest = m[2];
         if (user.noMailbox) return json(res, 404, { error: { code: 'MailboxNotEnabledForRESTAPI', message: 'The mailbox is either inactive, soft-deleted, or is hosted on-premise.' } });
+        if (user.accessDenied) return json(res, 403, { error: { code: 'ErrorAccessDenied', message: 'Access is denied. Check credentials and try again.' } });
         const folderJson = (f) => ({
           id: f.id,
           displayName: f.displayName,
@@ -81,6 +82,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
         if (m) return json(res, 200, { value: user.folders.filter((f) => f.parent === m[1]).map(folderJson) });
         m = /^mailFolders\/([^/]+)\/messages$/.exec(rest);
         if (m) {
+          if (graph.failFolders?.has(m[1])) return json(res, 404, { error: { code: 'ErrorItemNotFound', message: 'The specified object was not found in the store.' } });
           const list = user.messages[m[1]] || [];
           const filter = url.searchParams.get('$filter');
           const since = filter ? new Date(/receivedDateTime ge (\S+)/.exec(filter)[1]) : null;
@@ -140,11 +142,15 @@ export function startMockApis({ graph = null, google = null } = {}) {
           const spamTrash = url.searchParams.get('includeSpamTrash') === 'true';
           const q = url.searchParams.get('q') || '';
           const after = Number(/after:(\d+)/.exec(q)?.[1] || 0) * 1000;
+          const smaller = Number(/smaller:(\d+)/.exec(q)?.[1] || Infinity);
+          const larger = Number(/larger:(\d+)/.exec(q)?.[1] || -1);
           const list = user.messages.filter((m) => {
             const labels = m.labelIds || [];
             if (!spamTrash && (labels.includes('SPAM') || labels.includes('TRASH'))) return false;
             if (q.includes('-in:spam') && labels.includes('SPAM')) return false;
             if (q.includes('-in:trash') && labels.includes('TRASH')) return false;
+            const size = m.size ?? m.raw.length;
+            if (!(size < smaller) || !(size > larger)) return false;
             return Number(m.internalDate) >= after;
           });
           const start = Number(url.searchParams.get('pageToken') || 0);
@@ -154,7 +160,13 @@ export function startMockApis({ graph = null, google = null } = {}) {
         const msg = /^messages\/([^/]+)$/.exec(g[2]);
         if (msg) {
           const m = user.messages.find((x) => x.id === msg[1]);
-          return json(res, 200, { id: m.id, threadId: m.id, labelIds: m.labelIds, sizeEstimate: m.raw.length, internalDate: String(m.internalDate), raw: m.raw.toString('base64url') });
+          if (google.rateLimitOnce?.has(m.id) && !throttled.has(m.id)) {
+            throttled.add(m.id);
+            return json(res, 403, { error: { code: 403, message: 'User Rate Limit Exceeded', errors: [{ reason: 'userRateLimitExceeded', domain: 'usageLimits' }], status: 'PERMISSION_DENIED' } });
+          }
+          const common = { id: m.id, threadId: m.id, labelIds: m.labelIds, sizeEstimate: m.size ?? m.raw.length, internalDate: String(m.internalDate) };
+          if (url.searchParams.get('format') === 'full') return json(res, 200, { ...common, payload: m.payload });
+          return json(res, 200, { ...common, raw: m.raw.toString('base64url') });
         }
       }
       return json(res, 404, { error: { code: 'NotFound', message: `Rota do simulador não implementada: ${url.pathname}` } });

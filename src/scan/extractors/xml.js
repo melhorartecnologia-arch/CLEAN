@@ -129,14 +129,60 @@ export function tidyParagraphs(text) {
   return text.replace(/\u0001(?=\t)/g, '').replace(/\u0001/g, '\n').replace(/\t+\n/g, '\n');
 }
 
-/** Converte HTML em texto simples. */
+const BLOCK_CLOSE = new Set(['p', 'div', 'tr', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'section', 'article', 'blockquote', 'pre', 'dd', 'dt', 'title']);
+const RAW_TEXT = new Set(['style', 'script']);
+const TAG_START = /^<(\/?)([a-zA-Z][a-zA-Z0-9:-]*)/;
+
+/**
+ * Converte HTML em texto simples. Percorre o texto uma única vez (tempo linear mesmo com HTML
+ * malformado ou malicioso, ex.: milhares de "<!--" sem fechamento).
+ */
 export function htmlToText(html) {
-  const body = html
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<style\b[\s\S]*?<\/style\s*>/gi, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|tr|li|h[1-6]|table|section|article|blockquote|pre|dd|dt|title)\s*>/gi, '\n')
-    .replace(/<\/(td|th)\s*>/gi, '\t')
-    .replace(/<[^>]*>/g, '');
-  return decodeHtmlEntities(body);
+  const out = [];
+  const n = html.length;
+  let i = 0;
+  let nextGt = -1; // posição do próximo ">" (reaproveitada entre tags)
+  let lower = null; // cópia em minúsculas, só se houver <style> ou <script>
+  while (i < n) {
+    const lt = html.indexOf('<', i);
+    if (lt === -1) {
+      out.push(html.slice(i));
+      break;
+    }
+    if (lt > i) out.push(html.slice(i, lt));
+    if (html.startsWith('<!--', lt)) {
+      const end = html.indexOf('-->', lt + 4);
+      out.push(' ');
+      i = end === -1 ? n : end + 3;
+      continue;
+    }
+    if (nextGt !== -2 && nextGt <= lt) nextGt = html.indexOf('>', lt + 1);
+    if (nextGt === -1) nextGt = -2; // não há mais ">": o restante é texto
+    const m = nextGt >= 0 ? TAG_START.exec(html.slice(lt, Math.min(nextGt + 1, lt + 80))) : null;
+    const first = html.charCodeAt(lt + 1);
+    if (!m && nextGt >= 0 && (first === 33 || first === 63 || first === 47)) {
+      i = nextGt + 1; // <!doctype>, <?xml ?>, </ ...>
+      continue;
+    }
+    if (!m) {
+      out.push('<'); // "<" solto é texto (ex.: "a < b")
+      i = lt + 1;
+      continue;
+    }
+    i = nextGt + 1;
+    const closing = m[1] === '/';
+    const name = m[2].toLowerCase();
+    if (!closing && RAW_TEXT.has(name)) {
+      lower ||= html.toLowerCase();
+      const close = lower.indexOf(`</${name}`, i);
+      const gt = close === -1 ? -1 : html.indexOf('>', close);
+      i = gt === -1 ? n : gt + 1;
+      out.push(' ');
+      continue;
+    }
+    if (name === 'br') out.push('\n');
+    else if (closing && BLOCK_CLOSE.has(name)) out.push('\n');
+    else if (closing && (name === 'td' || name === 'th')) out.push('\t');
+  }
+  return decodeHtmlEntities(out.join(''));
 }

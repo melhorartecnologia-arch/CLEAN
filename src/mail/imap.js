@@ -204,23 +204,20 @@ export class ImapConnector {
         try {
           if (!client.mailbox?.exists) continue;
           const validity = String(client.mailbox.uidValidity ?? '');
-          let range = '1:*';
-          if (since) {
-            const uids = await client.search({ since }, { uid: true });
-            if (!uids || uids.length === 0) continue;
-            range = packUids(uids);
-          }
           const meta = [];
-          for await (const m of client.fetch(range, { uid: true, size: true, internalDate: true, labels: Boolean(gmail && folder.all) }, { uid: true })) {
+          for await (const m of client.fetch('1:*', { uid: true, size: true, internalDate: true, labels: Boolean(gmail && folder.all) }, { uid: true })) {
+            // O filtro por data é feito aqui, e não com SEARCH SINCE: a lista de UIDs de uma busca
+            // pode passar do tamanho máximo de comando do servidor (10 KB no Exchange).
+            if (since && m.internalDate instanceof Date && m.internalDate < since) continue;
             meta.push({ uid: m.uid, size: Number(m.size) || 0, date: m.internalDate, labels: m.labels });
           }
           const small = meta.filter((m) => m.size <= maxBytes);
           const large = meta.filter((m) => m.size > maxBytes);
-          const make = (info, source) => ({
+          const make = (info, source, truncated) => ({
             folder: (folder.all && labelsText(info.labels)) || folder.display,
             id: `${folder.path}:${validity}:${info.uid}`,
             raw: source || Buffer.alloc(0),
-            truncated: info.size > maxBytes,
+            truncated,
             size: info.size,
             receivedAt: info.date instanceof Date && !Number.isNaN(info.date.getTime()) ? info.date.toISOString() : null,
           });
@@ -229,12 +226,13 @@ export class ImapConnector {
             const byUid = new Map(batch.map((m) => [m.uid, m]));
             const items = [];
             for await (const m of client.fetch(packUids(batch.map((b) => b.uid)), { uid: true, source: true }, { uid: true })) items.push(m);
-            for (const m of items) if (byUid.has(m.uid)) yield make(byUid.get(m.uid), m.source);
+            for (const m of items) if (byUid.has(m.uid)) yield make(byUid.get(m.uid), m.source, false);
           }
           for (const info of large) {
             if (this.signal?.aborted) return;
             const m = await client.fetchOne(String(info.uid), { uid: true, source: { start: 0, maxLength: maxBytes } }, { uid: true });
-            if (m) yield make(info, m.source);
+            // O Exchange informa um tamanho estimado: só está cortada se veio até o limite.
+            if (m) yield make(info, m.source, (m.source?.length || 0) >= maxBytes);
           }
         } catch (err) {
           if (this.signal?.aborted) throw this.signal.reason;

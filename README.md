@@ -243,10 +243,12 @@ New-ManagementScope -Name 'Caixas analisadas pelo CLEAN' -RecipientRestrictionFi
 New-ManagementRoleAssignment -App <ID do aplicativo> -Role 'Application Mail.Read' -CustomResourceScope 'Caixas analisadas pelo CLEAN'
 ```
 
-Observações: usuários sem licença do Exchange (sem caixa) são ignorados e aparecem no registro da
-análise; o **arquivo morto online** (In-Place Archive) não é acessível pela API; o Exchange Online
-aceita até 4 downloads simultâneos por caixa e, ao atingir o limite de requisições, o CLEAN espera o
-tempo indicado pelo serviço e continua (aviso no registro).
+Observações: usuários sem licença do Exchange (sem caixa) e, com o RBAC para aplicativos, caixas
+fora do escopo liberado são ignorados e aparecem como aviso no registro da análise; o **arquivo
+morto online** (In-Place Archive) não é acessível pela API; o Exchange Online aceita até 4 downloads
+simultâneos por caixa e, ao atingir o limite de requisições, o CLEAN espera o tempo indicado pelo
+serviço e continua (aviso no registro). Uma pasta que não pode ser lida vai para a aba *Erros* e as
+demais pastas da caixa continuam sendo analisadas.
 
 ### Google Workspace (Gmail)
 
@@ -269,7 +271,9 @@ tempo indicado pelo serviço e continua (aviso no registro).
    analisadas). *Testar conexão* confere a delegação e o acesso a até três caixas.
 
 A "pasta" de cada mensagem são os seus **marcadores** (ex.: `Caixa de entrada; Clientes/2026`); as
-pastas ignoradas valem para os marcadores. Usuários sem Gmail habilitado são ignorados.
+pastas ignoradas valem para os marcadores. Usuários sem Gmail habilitado são ignorados. Mensagens
+maiores que o limite de tamanho da análise não são baixadas inteiras: o corpo e os nomes dos
+anexos são verificados, mas o conteúdo dos anexos não.
 
 ### Servidores IMAP
 
@@ -307,6 +311,10 @@ sem repetir as mensagens de cada marcador.
   Se a rede exige **proxy**, defina, antes de iniciar o CLEAN (Node.js 22.21 ou superior), as
   variáveis de ambiente `NODE_USE_ENV_PROXY=1` e `HTTPS_PROXY=http://proxy.empresa.local:3128` — por
   exemplo, retirando o `rem` das linhas correspondentes no `iniciar.bat`.
+- Se o proxy faz **inspeção de HTTPS** (o erro fala em certificado não reconhecido, como
+  `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`), exporte o certificado raiz da empresa em formato PEM
+  (Base-64) e defina, também antes de iniciar, `NODE_EXTRA_CA_CERTS=C:\CLEAN\certificado-empresa.pem`
+  (há uma linha pronta no `iniciar.bat`).
 
 ## Executando como serviço
 

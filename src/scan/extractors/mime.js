@@ -150,6 +150,11 @@ export function parseStructuredHeader(value) {
   }
   for (const [name, list] of Object.entries(sections)) {
     list.sort((a, b) => a.n - b.n);
+    if (!list.some((section) => section.extended)) {
+      // Continuações simples (name*0=, name*1=): o texto unido ainda pode ter palavras RFC 2047.
+      params[name] = list.map((section) => section.value).join('');
+      continue;
+    }
     let charset = 'utf-8';
     const bytes = [];
     list.forEach((section, i) => {
@@ -355,9 +360,11 @@ const EXTENSIONS = {
   'text/xml': '.xml',
   'message/rfc822': '.eml',
   'message/global': '.eml',
+  'application/pkcs7-signature': '.p7s',
+  'application/x-pkcs7-signature': '.p7s',
+  'application/pkcs7-mime': '.p7m',
+  'application/x-pkcs7-mime': '.p7m',
 };
-
-const SIGNATURE_TYPES = new Set(['application/pkcs7-signature', 'application/x-pkcs7-signature', 'application/pgp-signature']);
 
 function nestedSubject(bytes) {
   const raw = bytes.subarray(0, 64 * 1024).toString('latin1');
@@ -412,13 +419,15 @@ function walk(ctx, start, end, depth, defaultType) {
     return;
   }
 
-  if (type === 'application/pkcs7-mime' || type === 'application/x-pkcs7-mime') {
+  // Na raiz, application/pkcs7-mime é a própria mensagem em S/MIME. Dentro de outra parte, é um
+  // arquivo assinado ou cifrado anexado (ex.: contrato.pdf.p7m da ICP-Brasil) e entra como anexo,
+  // assim como as assinaturas .p7s anexadas (a assinatura de um multipart/signed nem é visitada).
+  if ((type === 'application/pkcs7-mime' || type === 'application/x-pkcs7-mime') && depth === 0) {
     const smime = String(ct.params['smime-type'] || '').toLowerCase();
     if (smime === 'signed-data' || smime === 'certs-only') ctx.opaqueSigned = true;
     else ctx.encrypted = true;
     return;
   }
-  if (SIGNATURE_TYPES.has(type)) return;
 
   const incomplete = ctx.truncated && entity.bodyEnd >= raw.length;
   const filename = cleanName(disposition.params.filename || ct.params.name);
@@ -433,7 +442,13 @@ function walk(ctx, start, end, depth, defaultType) {
   }
 
   const message = type === 'message/rfc822' || type === 'message/global';
-  const inline = disposition.value === 'inline' || (!disposition.value && Boolean(h['content-id']));
+  // Só imagens contam como "embutidas no corpo": o Apple Mail envia anexos comuns (PDF etc.)
+  // com Content-Disposition: inline.
+  const inline = type.startsWith('image/') && (disposition.value === 'inline' || (!disposition.value && Boolean(h['content-id'])));
+  // Parte omitida pelo conector (anexo de mensagem acima do limite de tamanho, não baixado). O
+  // cabeçalho só vale com o código gerado pelo próprio conector: uma mensagem recebida não consegue
+  // usá-lo para esconder um anexo da análise.
+  const omitted = Boolean(ctx.omittedToken) && h['x-clean-omitted']?.[0] === ctx.omittedToken;
   let data = null;
   let size;
   if (ctx.decodeAttachments || message) {
@@ -443,6 +458,7 @@ function walk(ctx, start, end, depth, defaultType) {
     const length = entity.bodyEnd - entity.bodyStart;
     size = String(encoding || '').toLowerCase().includes('base64') ? Math.floor(length * 0.74) : length;
   }
+  if (omitted) size = Number(h['x-clean-size']?.[0]) || size;
   let name = filename;
   if (!name && message && data) name = nestedSubject(data);
   if (!name) {
@@ -457,7 +473,7 @@ function walk(ctx, start, end, depth, defaultType) {
     size,
     inline,
     message,
-    incomplete,
+    incomplete: incomplete || omitted,
     contentId: String(h['content-id']?.[0] || '').replace(/^<|>$/g, '') || null,
     data: ctx.decodeAttachments ? data : null,
   });
@@ -470,12 +486,13 @@ function walk(ctx, start, end, depth, defaultType) {
  *     encrypted, opaqueSigned, headers }
  * truncated: a mensagem foi cortada (a última parte fica marcada como incompleta).
  * decodeAttachments: false dispensa a decodificação dos anexos (só nomes e tamanhos aproximados).
+ * omittedToken: código das partes marcadas pelo conector como não baixadas (X-Clean-Omitted).
  */
-export function parseMime(buf, { truncated = false, decodeAttachments = true } = {}) {
+export function parseMime(buf, { truncated = false, decodeAttachments = true, omittedToken = null } = {}) {
   let raw = Buffer.isBuffer(buf) ? buf.toString('latin1') : String(buf);
   // Arquivos no formato mbox começam com a linha "From remetente data".
   if (raw.startsWith('From ')) raw = raw.slice(raw.indexOf('\n') + 1);
-  const ctx = { raw, truncated, decodeAttachments, parts: 0, texts: [], attachments: [], encrypted: false, opaqueSigned: false };
+  const ctx = { raw, truncated, decodeAttachments, omittedToken, parts: 0, texts: [], attachments: [], encrypted: false, opaqueSigned: false };
   const top = readEntity(raw, 0, raw.length);
   walk(ctx, 0, raw.length, 0, 'text/plain');
   const h = top.headers;

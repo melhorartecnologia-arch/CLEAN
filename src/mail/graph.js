@@ -177,6 +177,9 @@ export class GraphConnector {
       if (sync) skip.add(sync); // registros de sincronização do Outlook
     } catch (err) {
       if (NO_MAILBOX.has(err.code) || err.status === 404) throw new SkipMailboxError('usuário sem caixa de correio no Exchange Online (sem licença, desativada ou local).');
+      // Com "todas as caixas" e o acesso limitado pelo RBAC para aplicativos, as caixas fora do
+      // escopo respondem 403: são ignoradas (com aviso), não contadas como erro.
+      if (err.status === 403 && this.source.scope === 'all') throw new SkipMailboxError('acesso à caixa não liberado para o aplicativo (permissão Mail.Read ou escopo do RBAC para aplicativos).');
       throw err;
     }
     const excluded = folderMatcher(this.source.excludeFolders);
@@ -215,22 +218,30 @@ export class GraphConnector {
         onFolder?.(folder.path);
         if (!folder.total) continue;
         let url = `${userPath}/mailFolders/${enc(folder.id)}/messages?$select=id,receivedDateTime,webLink&$top=100${size}${filter}`;
-        while (url) {
-          const page = await self.api(url);
-          for (const m of page?.value || []) {
-            yield {
-              folder: folder.path,
-              id: m.id,
-              receivedAt: m.receivedDateTime || null,
-              webLink: m.webLink || null,
-              size: Number(m.singleValueExtendedProperties?.[0]?.value) || 0,
-            };
+        try {
+          while (url) {
+            const page = await self.api(url);
+            for (const m of page?.value || []) {
+              yield {
+                folder: folder.path,
+                id: m.id,
+                receivedAt: m.receivedDateTime || null,
+                webLink: m.webLink || null,
+                size: Number(m.singleValueExtendedProperties?.[0]?.value) || 0,
+              };
+            }
+            url = self.next(page);
           }
-          url = self.next(page);
+        } catch (err) {
+          // Uma pasta que não pôde ser lida (removida durante a análise, erro do serviço...) vira
+          // erro dela: as demais pastas da caixa continuam.
+          if (self.signal?.aborted) throw err;
+          yield { folder: folder.path, id: null, error: err };
         }
       }
     }
     yield* pool(list(), Math.max(1, Math.min(concurrency, MAX_CONCURRENCY)), async (item) => {
+      if (item.error) return item;
       try {
         const res = await this.api(`${userPath}/messages/${enc(item.id)}/$value`, { type: 'buffer', maxBytes, retries: 4, headers: { Accept: '*/*' } });
         return { ...item, raw: res.data, truncated: res.truncated, size: item.size || res.size };
@@ -257,6 +268,7 @@ export class GraphConnector {
       if (boxes.length === 0) return { ok: false, message: 'Informe ao menos uma caixa de e-mail.', details };
     }
     let checked = 0;
+    let skipped = null;
     for (const box of boxes) {
       if (checked >= 3) break;
       try {
@@ -265,11 +277,18 @@ export class GraphConnector {
         details.push(`${box.address}: ${Number(inbox?.totalItemCount) || 0} mensagem(ns) em "${inbox?.displayName || 'Caixa de Entrada'}".`);
         checked++;
       } catch (err) {
-        if (this.source.scope === 'all' && (NO_MAILBOX.has(err.code) || err.status === 404)) continue; // usuário sem caixa
+        // Em "todas as caixas", usuários sem caixa ou fora do escopo do RBAC são pulados.
+        if (this.source.scope === 'all' && (NO_MAILBOX.has(err.code) || err.status === 404 || err.status === 403)) {
+          skipped = err;
+          continue;
+        }
         return { ok: false, message: `${box.address}: ${err.message}`, details };
       }
     }
-    if (checked === 0) return { ok: false, message: 'Nenhuma das caixas testadas está disponível no Exchange Online.', details };
+    if (checked === 0) {
+      const reason = skipped ? ` Último erro: ${skipped.message}` : '';
+      return { ok: false, message: `Nenhuma das caixas testadas está disponível para o aplicativo.${reason}`, details };
+    }
     return { ok: true, message: 'Conexão com o Microsoft 365 funcionando.', details };
   }
 

@@ -53,7 +53,7 @@ function tokenize(text) {
  * accounts: { login: { password, folders: { 'INBOX': [{ raw: Buffer, date: Date }], ... },
  *             flags?: { folder: '\\Trash' } } }
  */
-export function startFakeImap(accounts, { log = [] } = {}) {
+export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffset = 0 } = {}) {
   const server = net.createServer((socket) => {
     let buffer = Buffer.alloc(0);
     let user = null;
@@ -65,6 +65,8 @@ export function startFakeImap(accounts, { log = [] } = {}) {
     const handle = (line, literals) => {
       const space = line.indexOf(' ');
       const tag = line.slice(0, space);
+      // Como o Exchange (MaxCommandSize = 10240): comandos longos demais são recusados.
+      if (line.length > maxLine) return socket.write(`${tag} BAD Command Error. 10\r\n`);
       const rest = line.slice(space + 1);
       const args = tokenize(rest);
       let command = (args.shift() || '').toUpperCase();
@@ -129,7 +131,8 @@ export function startFakeImap(accounts, { log = [] } = {}) {
             if (!set.has(uid)) continue;
             const m = messages[i];
             const parts = [`UID ${uid}`];
-            if (items.includes('RFC822.SIZE')) parts.push(`RFC822.SIZE ${m.raw.length}`);
+            // sizeOffset simula o tamanho estimado do Exchange (EnableExactRFC822Size = false).
+            if (items.includes('RFC822.SIZE')) parts.push(`RFC822.SIZE ${m.raw.length + sizeOffset}`);
             if (items.includes('INTERNALDATE')) parts.push(`INTERNALDATE "${imapDate(m.date)}"`);
             const partial = /BODY\.PEEK\[\]<(\d+)\.(\d+)>/.exec(items);
             const head = `* ${uid} FETCH (${parts.join(' ')}`;

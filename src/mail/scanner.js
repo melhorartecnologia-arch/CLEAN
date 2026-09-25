@@ -247,7 +247,7 @@ export class MailScanner {
       let message;
       try {
         message = await withTimeout(
-          extractMessage(item.raw, { limits: this.limits, truncated: item.truncated, attachments: options.checkAttachments }),
+          extractMessage(item.raw, { limits: this.limits, truncated: item.truncated, attachments: options.checkAttachments, omittedToken: item.omittedToken }),
           this.messageTimeoutMs,
           'Tempo esgotado ao ler a mensagem.',
         );
@@ -257,7 +257,8 @@ export class MailScanner {
       }
       item.raw = null;
       const unreadable = message.encrypted || message.opaqueSigned;
-      if (message.partial) stats.messagesPartial++;
+      const partial = message.partial || Boolean(item.partial);
+      if (partial) stats.messagesPartial++;
       if (unreadable) stats.messagesEncrypted++;
       const attachments = message.attachments;
       this.countAttachments(attachments);
@@ -287,9 +288,11 @@ export class MailScanner {
       if (unreadable && !message.body) {
         status = 'encrypted';
         note = 'Mensagem criptografada (S/MIME ou PGP): apenas o assunto e os remetentes foram verificados.';
-      } else if (message.partial) {
+      } else if (partial) {
         status = 'partial';
-        note = item.truncated ? `Mensagem com ${mb(item.size)}: apenas os primeiros ${mb(this.maxBytes)} foram analisados.` : 'Mensagem incompleta: apenas parte foi analisada.';
+        note =
+          item.note ||
+          (item.truncated ? `Mensagem com ${mb(item.size)}: apenas os primeiros ${mb(this.maxBytes)} foram analisados.` : 'Mensagem incompleta: apenas parte foi analisada.');
       }
       this.pendingResults.push({
         id: ++this.seq,

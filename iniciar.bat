@@ -7,6 +7,8 @@ rem Se este servidor acessa a internet por um proxy (analise de e-mail do Micros
 rem Google Workspace), retire o "rem" das duas linhas abaixo e informe o endereco do proxy:
 rem set NODE_USE_ENV_PROXY=1
 rem set HTTPS_PROXY=http://proxy.empresa.local:3128
+rem Se o proxy inspeciona o HTTPS, informe tambem o certificado raiz da empresa (arquivo .pem):
+rem set NODE_EXTRA_CA_CERTS=C:\CLEAN\certificado-empresa.pem
 
 where node >NUL 2>NUL
 if errorlevel 1 (

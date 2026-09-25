@@ -161,9 +161,10 @@ async function readAttachments(list, { limits, depth, used = 0 }) {
  * anexos passa pelos leitores de arquivos, inclusive mensagens encaminhadas como anexo).
  * truncated: a mensagem foi cortada no limite de tamanho (a parte cortada não é lida).
  * attachments: false lista os anexos sem ler o conteúdo.
+ * omittedToken: código das partes que o conector não baixou (anexos de mensagens acima do limite).
  */
-export async function extractMessage(buf, { limits = DEFAULT_LIMITS, depth = 0, truncated = false, attachments = true } = {}) {
-  const parsed = parseMime(buf, { truncated, decodeAttachments: attachments });
+export async function extractMessage(buf, { limits = DEFAULT_LIMITS, depth = 0, truncated = false, attachments = true, omittedToken = null } = {}) {
+  const parsed = parseMime(buf, { truncated, decodeAttachments: attachments, omittedToken });
   let body = parsed.texts
     .map((t) => t.text.trim())
     .filter(Boolean)

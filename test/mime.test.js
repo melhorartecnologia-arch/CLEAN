@@ -5,6 +5,7 @@ import path from 'node:path';
 import CFB from 'cfb';
 import { parseMime, decodeHeader, parseAddresses, parseStructuredHeader, formatAddress } from '../src/scan/extractors/mime.js';
 import { extractMessage, extractBuffer } from '../src/scan/extractors/index.js';
+import { htmlToText } from '../src/scan/extractors/xml.js';
 
 const FIXTURES = path.join(import.meta.dirname, 'fixtures');
 const DOCX = fs.readFileSync(path.join(FIXTURES, 'doc.docx'));
@@ -210,4 +211,58 @@ test('limite de texto por mensagem vale para a soma dos anexos', async () => {
   const m = await extractMessage(raw, { limits: { maxChars: 100 } });
   assert.equal(m.attachments[0].status, 'partial');
   assert.equal(m.attachments[1].status, 'skipped-size');
+});
+
+// ---------- Regressões encontradas na revisão ----------
+
+test('assinaturas e arquivos assinados anexados (.p7s/.p7m) entram como anexos', async () => {
+  const p7 = 'MIAGCSqGSIb3DQEHAqCAMIACAQE=';
+  const raw = message({
+    parts: [
+      textPart('Segue o contrato assinado.'),
+      ['Content-Type: application/pkcs7-signature; name="contrato.pdf.p7s"', 'Content-Disposition: attachment; filename="contrato.pdf.p7s"', 'Content-Transfer-Encoding: base64', '', p7],
+      ['Content-Type: application/pkcs7-mime; name="nota.pdf.p7m"', 'Content-Disposition: attachment; filename="nota.pdf.p7m"', 'Content-Transfer-Encoding: base64', '', p7],
+    ],
+  });
+  const m = await extractMessage(raw);
+  assert.deepEqual(m.attachments.map((a) => a.name), ['contrato.pdf.p7s', 'nota.pdf.p7m']);
+  assert.equal(m.encrypted, false, 'um .p7m anexado não torna a mensagem criptografada');
+  assert.equal(m.opaqueSigned, false);
+});
+
+test('anexo com disposition inline (Apple Mail) não é imagem embutida', () => {
+  const raw = message({
+    parts: [
+      textPart('Oi'),
+      ['Content-Type: application/pdf; name="relatorio.pdf"', 'Content-Disposition: inline; filename="relatorio.pdf"', 'Content-Transfer-Encoding: base64', '', b64(PDF)],
+      ['Content-Type: image/png; name="logo.png"', 'Content-Disposition: inline; filename="logo.png"', 'Content-ID: <logo>', 'Content-Transfer-Encoding: base64', '', 'iVBORw0KGgo='],
+    ],
+  });
+  const m = parseMime(raw);
+  assert.deepEqual(m.attachments.map((a) => [a.name, a.inline]), [['relatorio.pdf', false], ['logo.png', true]]);
+});
+
+test('continuações RFC 2231 com palavras RFC 2047 (JavaMail)', () => {
+  const word = (text) => `=?UTF-8?B?${Buffer.from(text, 'utf8').toString('base64')}?=`;
+  const ct = parseStructuredHeader(`attachment; filename*0="${word('relação de')}"; filename*1="${word(' salários.pdf')}"`);
+  assert.equal(ct.params.filename, 'relação de salários.pdf');
+});
+
+test('HTML malformado ou malicioso é convertido em tempo linear', () => {
+  const started = Date.now();
+  htmlToText('<!--'.repeat(500000));
+  htmlToText(`${'<'.repeat(1000000)}>`);
+  htmlToText('<style>'.repeat(200000));
+  htmlToText('<a>'.repeat(300000));
+  assert.ok(Date.now() - started < 3000, `levou ${Date.now() - started} ms`);
+  assert.equal(htmlToText('<p>Olá</p><script>x()</script><b>a</b> &lt; b<br>c<table><tr><td>1</td><td>2</td></tr></table>'), 'Olá\n a < b\nc1\t2\t\n\n');
+  assert.equal(htmlToText('a < b e c > d'), 'a < b e c > d');
+});
+
+test('marca de anexo não baixado só vale com o código do conector', async () => {
+  const raw = message({ parts: [textPart('x'), ['Content-Type: text/plain; name="a.txt"', 'X-Clean-Omitted: 123', '', 'conteúdo confidencial']] });
+  const forged = await extractMessage(raw);
+  assert.equal(forged.attachments[0].status, 'ok', 'uma mensagem recebida não consegue esconder o anexo');
+  const real = await extractMessage(raw, { omittedToken: '123' });
+  assert.equal(real.attachments[0].status, 'skipped-size');
 });

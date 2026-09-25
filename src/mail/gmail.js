@@ -14,7 +14,9 @@ export const GOOGLE_ENDPOINTS = {
 export const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 export const DIRECTORY_SCOPE = 'https://www.googleapis.com/auth/admin.directory.user.readonly';
 
-const MAX_CONCURRENCY = 8;
+// Downloads simultâneos por caixa: cada mensagem vem inteira no JSON (base64), então o limite
+// também controla o uso de memória.
+const MAX_CONCURRENCY = 4;
 
 // Marcadores do sistema exibidos como "pasta"; os demais (não lido, estrela, categorias) não.
 const SYSTEM_LABELS = { INBOX: 'Caixa de entrada', SENT: 'Enviados', DRAFT: 'Rascunhos', SPAM: 'Spam', TRASH: 'Lixeira' };
@@ -52,6 +54,34 @@ export function googleError(err, subject = '') {
   }
   const detail = err.code ? ` (${err.code})` : err.status ? ` (HTTP ${err.status})` : '';
   return new ApiError(`${err.message}${detail}`, err);
+}
+
+/**
+ * Monta uma mensagem MIME a partir da estrutura do formato "full" do Gmail: os textos vêm com o
+ * conteúdo; os anexos, só com os cabeçalhos e marcados como não baixados (X-Clean-Omitted com o
+ * código `token`, que só o conector conhece).
+ */
+export function payloadToMime(part, token) {
+  const header = (name) => (part.headers || []).find((h) => String(h.name).toLowerCase() === name)?.value;
+  const clean = (value) => String(value ?? '').replace(/[\r\n]+/g, ' ');
+  const lines = (part.headers || [])
+    .filter((h) => !/^(content-type|content-transfer-encoding|content-length)$/i.test(h.name))
+    .map((h) => `${clean(h.name)}: ${clean(h.value)}`);
+  const type = String(part.mimeType || 'text/plain').toLowerCase();
+  if (type.startsWith('multipart/') && part.parts?.length) {
+    const boundary = `clean-${crypto.randomUUID()}`;
+    lines.push(`Content-Type: ${type}; boundary="${boundary}"`);
+    const children = part.parts.map((child) => `--${boundary}\r\n${payloadToMime(child, token)}`);
+    return `${lines.join('\r\n')}\r\n\r\n${children.join('\r\n')}\r\n--${boundary}--\r\n`;
+  }
+  lines.push(`Content-Type: ${clean(header('content-type') || type)}`);
+  if (part.body?.data && !part.body?.attachmentId) {
+    const b64 = Buffer.from(part.body.data, 'base64url').toString('base64').replace(/.{76}/g, '$&\r\n');
+    lines.push('Content-Transfer-Encoding: base64');
+    return `${lines.join('\r\n')}\r\n\r\n${b64}\r\n`;
+  }
+  lines.push(`X-Clean-Omitted: ${token}`, `X-Clean-Size: ${Number(part.body?.size) || 0}`);
+  return `${lines.join('\r\n')}\r\n\r\n`;
 }
 
 function mailDisabled(err) {
@@ -128,7 +158,7 @@ export class GmailConnector {
   throttled(wait, error) {
     if (Date.now() - this.lastThrottleLog < 60000) return;
     this.lastThrottleLog = Date.now();
-    const reason = error.status === 429 ? 'limite de requisições do Google atingido' : `falha temporária (${error.message})`;
+    const reason = error.status === 429 || error.status === 403 ? 'limite de requisições do Google atingido' : `falha temporária (${error.message})`;
     this.log('warn', `Google Workspace: ${reason}; nova tentativa em ${Math.round(wait / 1000)}s.`);
   }
 
@@ -170,7 +200,8 @@ export class GmailConnector {
   /**
    * Mensagens da caixa (formato MIME original), com até `concurrency` downloads simultâneos.
    * A "pasta" de cada mensagem são os seus marcadores. Mensagens com marcador em uma pasta
-   * ignorada são descartadas.
+   * ignorada são descartadas. Mensagens maiores que maxBytes não são baixadas inteiras: vêm só o
+   * corpo e a lista de anexos (formato "full"), sem o conteúdo dos anexos.
    */
   async *messages(mailbox, { since = null, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
     const { address } = mailbox;
@@ -183,35 +214,51 @@ export class GmailConnector {
     const spamTrash = includeTrash || includeJunk;
     if (spamTrash && !includeJunk) terms.push('-in:spam');
     if (spamTrash && !includeTrash) terms.push('-in:trash');
-    const query = `&includeSpamTrash=${spamTrash}${terms.length ? `&q=${enc(terms.join(' '))}` : ''}`;
+    const limit = Math.max(2, Math.floor(maxBytes));
     const self = this;
-    async function* list() {
+    async function* list(sizeTerm, big) {
+      const query = `&includeSpamTrash=${spamTrash}&q=${enc([...terms, sizeTerm].join(' '))}`;
       let pageToken = '';
       do {
         const page = await self.api(address, GMAIL_SCOPE, `${base}/messages?maxResults=500${query}${pageToken ? `&pageToken=${enc(pageToken)}` : ''}`);
-        for (const m of page?.messages || []) yield m.id;
+        for (const m of page?.messages || []) yield { id: m.id, big };
         pageToken = page?.nextPageToken;
       } while (pageToken);
     }
-    yield* pool(list(), Math.max(1, Math.min(concurrency, MAX_CONCURRENCY)), async (id) => {
+    async function* all() {
+      yield* list(`smaller:${limit}`, false);
+      yield* list(`larger:${limit - 1}`, true);
+    }
+    yield* pool(all(), Math.max(1, Math.min(concurrency, MAX_CONCURRENCY)), async ({ id, big }) => {
       try {
-        const msg = await this.api(address, GMAIL_SCOPE, `${base}/messages/${enc(id)}?format=raw`, { retries: 4 });
+        const msg = await this.api(address, GMAIL_SCOPE, `${base}/messages/${enc(id)}?format=${big ? 'full' : 'raw'}`, { retries: 4 });
         const names = (msg?.labelIds || []).map((l) => labels.get(l)).filter(Boolean);
         if (names.some((n) => excluded(n))) return undefined;
-        let raw = Buffer.from(msg?.raw || '', 'base64url');
-        const size = Number(msg?.sizeEstimate) || raw.length;
-        const truncated = raw.length > maxBytes;
-        if (truncated) raw = raw.subarray(0, maxBytes);
         const received = Number(msg?.internalDate);
-        return {
+        const item = {
           folder: names.join('; ') || 'Todos os e-mails',
           id,
-          raw,
-          truncated,
-          size,
+          size: Number(msg?.sizeEstimate) || 0,
           receivedAt: Number.isFinite(received) && received > 0 ? new Date(received).toISOString() : null,
           webLink: null,
         };
+        if (big) {
+          const token = crypto.randomUUID();
+          const mb = (n) => `${Math.round((n / 1048576) * 10) / 10} MB`;
+          return {
+            ...item,
+            raw: Buffer.from(payloadToMime(msg?.payload || {}, token), 'utf8'),
+            truncated: false,
+            partial: true,
+            omittedToken: token,
+            note: `Mensagem com ${mb(item.size)}, acima do limite de ${mb(maxBytes)}: o corpo e os nomes dos anexos foram verificados, mas o conteúdo dos anexos não foi baixado.`,
+          };
+        }
+        let raw = Buffer.from(msg?.raw || '', 'base64url');
+        item.size ||= raw.length;
+        const truncated = raw.length > maxBytes;
+        if (truncated) raw = raw.subarray(0, maxBytes);
+        return { ...item, raw, truncated };
       } catch (err) {
         if (this.signal?.aborted) throw err;
         return { folder: '', id, raw: null, error: err };

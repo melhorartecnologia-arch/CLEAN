@@ -51,11 +51,20 @@ function describeError(status, body) {
   }
   const err = data?.error;
   if (err && typeof err === 'object') {
-    return { code: String(err.code || err.status || ''), message: String(err.message || err.status || '') };
+    // Google informa o motivo em errors[].reason (ex.: userRateLimitExceeded) ou details[].reason.
+    const reason = String(err.errors?.[0]?.reason || err.details?.find?.((d) => d?.reason)?.reason || '');
+    return { code: String(err.code || err.status || ''), message: String(err.message || err.status || ''), reason };
   }
-  if (typeof err === 'string') return { code: err, message: String(data.error_description || err) };
+  if (typeof err === 'string') return { code: err, message: String(data.error_description || err), reason: '' };
   const text = String(body || '').replace(/\s+/g, ' ').trim().slice(0, 300);
-  return { code: '', message: text || `HTTP ${status}` };
+  return { code: '', message: text || `HTTP ${status}`, reason: '' };
+}
+
+/** 429/5xx e o 403 de limite de taxa do Google (userRateLimitExceeded, rateLimitExceeded). */
+function isRetryable(status, { reason, message }) {
+  if (RETRY_STATUS.has(status)) return true;
+  const text = `${reason} ${message}`;
+  return status === 403 && /rate.?limit|too many requests/i.test(text) && !/daily/i.test(text);
 }
 
 function isAbort(err, signal) {
@@ -101,14 +110,14 @@ export async function request(url, options = {}) {
       res = await fetch(url, { method, headers, body, signal: combined, redirect: 'follow' });
       if (res.ok) {
         if (type === 'buffer') return await readLimited(res, maxBytes, arm);
-        if (type === 'text') return await res.text();
-        if (res.status === 204) return null;
-        const text = await res.text();
+        // Respostas JSON também renovam o tempo limite a cada parte (ex.: mensagens do Gmail).
+        const text = (await readLimited(res, Infinity, arm)).data.toString('utf8');
+        if (type === 'text') return text;
         return text ? JSON.parse(text) : null;
       }
       const text = await res.text().catch(() => '');
-      const { code, message } = describeError(res.status, text);
-      const error = new ApiError(message, { status: res.status, code, retryable: RETRY_STATUS.has(res.status) });
+      const described = describeError(res.status, text);
+      const error = new ApiError(described.message, { status: res.status, code: described.code, retryable: isRetryable(res.status, described) });
       if (!error.retryable || attempt >= retries) throw error;
       const wait = retryAfter(res, attempt);
       onRetry?.({ attempt: attempt + 1, wait, error });
@@ -131,14 +140,18 @@ export async function request(url, options = {}) {
 function networkMessage(err, url) {
   const code = err?.cause?.code || err?.code || '';
   const host = new URL(url).host;
+  const certificate = `Certificado de ${host} não reconhecido (${code}). Se a rede usa um proxy com inspeção de HTTPS, informe o certificado da empresa na variável NODE_EXTRA_CA_CERTS (veja "Credenciais e rede" no LEIA-ME).`;
   const known = {
     ENOTFOUND: `Endereço ${host} não encontrado (DNS). Verifique a conexão com a internet deste servidor.`,
     ECONNREFUSED: `Conexão recusada por ${host}.`,
     ECONNRESET: `A conexão com ${host} foi interrompida.`,
     ETIMEDOUT: `Tempo esgotado ao conectar em ${host}.`,
     UND_ERR_CONNECT_TIMEOUT: `Tempo esgotado ao conectar em ${host}. Se a rede exige proxy, veja a seção "Proxy" do LEIA-ME.`,
-    SELF_SIGNED_CERT_IN_CHAIN: `Certificado de ${host} não confiável (proxy com inspeção de HTTPS?).`,
-    UNABLE_TO_VERIFY_LEAF_SIGNATURE: `Certificado de ${host} não confiável (proxy com inspeção de HTTPS?).`,
+    SELF_SIGNED_CERT_IN_CHAIN: certificate,
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: certificate,
+    UNABLE_TO_GET_ISSUER_CERT_LOCALLY: certificate,
+    DEPTH_ZERO_SELF_SIGNED_CERT: certificate,
+    CERT_HAS_EXPIRED: certificate,
   };
   return known[code] || `Falha de rede ao acessar ${host}: ${err?.cause?.message || err?.message || err}`;
 }
