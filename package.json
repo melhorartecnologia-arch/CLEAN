@@ -1,0 +1,24 @@
+{
+  "name": "clean",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CLEAN - Aplicação web para análise de repositórios de arquivos Windows: procura termos de uma lista de referência no nome e no conteúdo dos arquivos e gera relatórios com o último usuário que interagiu com cada arquivo.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "demo": "node scripts/criar-dados-demo.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "cfb": "^1.2.2",
+    "express": "^5.2.1",
+    "fflate": "^0.8.3",
+    "unpdf": "^1.8.1"
+  }
+}
