@@ -128,14 +128,17 @@ export class GraphClient {
     return link;
   }
 
-  /** Todos os usuários do locatário: { id, address, name } (address = e-mail ou nome de logon). */
+  /**
+   * Todos os usuários do locatário: { id, address, mail, upn, name } (address = e-mail ou, sem ele,
+   * o nome de logon).
+   */
   async *allUsers() {
     let url = '/users?$select=id,displayName,mail,userPrincipalName&$top=999';
     while (url) {
       const page = await this.api(url);
       for (const u of page?.value || []) {
         const address = u.mail || u.userPrincipalName;
-        if (address) yield { id: u.id, address, name: u.displayName || '' };
+        if (address) yield { id: u.id, address, mail: u.mail || '', upn: u.userPrincipalName || '', name: u.displayName || '' };
       }
       url = this.next(page);
     }
@@ -147,10 +150,10 @@ export class GraphClient {
    */
   async resolveUser(mailbox, { signal, notFound = '' } = {}) {
     if (mailbox.id) return { id: mailbox.id, name: mailbox.name };
-    const select = '$select=id,displayName,mail';
+    const select = '$select=id,displayName,mail,userPrincipalName';
+    const found = (u) => ({ id: u.id, name: u.displayName || '', mail: u.mail || '', upn: u.userPrincipalName || '' });
     try {
-      const u = await this.api(`/users/${enc(mailbox.address)}?${select}`, { signal });
-      return { id: u.id, name: u.displayName || '' };
+      return found(await this.api(`/users/${enc(mailbox.address)}?${select}`, { signal }));
     } catch (err) {
       if (err.status !== 404) throw err;
     }
@@ -162,6 +165,6 @@ export class GraphClient {
       u = byAlias?.value?.[0];
     }
     if (!u) throw new ApiError(notFound || `${mailbox.address} não foi encontrado no Microsoft 365.`, { status: 404 });
-    return { id: u.id, name: u.displayName || '' };
+    return found(u);
   }
 }

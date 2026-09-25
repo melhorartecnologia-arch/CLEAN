@@ -17,8 +17,8 @@ function readBody(req) {
 
 // ---------------- OneDrive e SharePoint (Graph: drives, sites, itens) ----------------
 
-/** Item do simulador no formato do Graph (trail: nomes das pastas acima dele). */
-function itemJson(item, drive, trail = []) {
+/** Item do simulador no formato do Graph (trail: nomes das pastas acima dele; parentId: pasta). */
+function itemJson(item, drive, trail = [], parentId = `${drive.id}-root`) {
   const who = (p) => (p ? { user: { displayName: p.name, email: p.email } } : undefined);
   return {
     id: item.id,
@@ -31,17 +31,17 @@ function itemJson(item, drive, trail = []) {
     createdBy: who(item.createdBy),
     lastModifiedBy: who(item.lastModifiedBy),
     webUrl: `${drive.webUrl}/${encodeURI([...trail, item.name].join('/'))}`,
-    eTag: `"{${item.id}},${item.version || 1}"`,
+    eTag: `"{${item.id}},${item.version || 1}${item.renamed ? `,${item.name}` : ''}"`,
     cTag: `"c:{${item.id}},${item.version || 1}"`,
-    parentReference: { driveId: drive.id },
+    parentReference: { driveId: drive.id, id: parentId },
   };
 }
 
-function findItem(list, id, trail = []) {
+function findItem(list, id, trail = [], parentId = null) {
   for (const item of list) {
-    if (item.id === id) return { item, parent: list, trail };
+    if (item.id === id) return { item, parent: list, trail, parentId };
     if (item.children) {
-      const found = findItem(item.children, id, [...trail, item.name]);
+      const found = findItem(item.children, id, [...trail, item.name], item.id);
       if (found) return found;
     }
   }
@@ -93,15 +93,17 @@ function drivesApi({ req, res, path, url, base, graph, find, json }) {
   if (!m) return false;
   const drive = drives[m[1]];
   if (!drive) return json(res, 404, { error: { code: 'itemNotFound', message: 'Biblioteca não encontrada' } }), true;
-  const found = m[2] ? findItem(drive.items, m[2]) : { item: { id: 'root', children: drive.items }, parent: null, trail: [] };
+  const found = m[2] ? findItem(drive.items, m[2]) : { item: { id: `${drive.id}-root`, children: drive.items }, parent: null, trail: [] };
   if (!found) return json(res, 404, { error: { code: 'itemNotFound', message: 'The resource could not be found.' } }), true;
   const { item, parent } = found;
   const action = m[3] || '';
   if (action === '/children') {
     if (graph.failFolders?.has(item.id)) return json(res, 403, { error: { code: 'accessDenied', message: 'Access denied' } }), true;
+    // Falha só na 2ª página em diante da pasta (a 1ª já foi entregue).
+    if (graph.failPageOf === (m[2] || 'root') && Number(url.searchParams.get('$skiptoken') || 0) > 0) return json(res, 403, { error: { code: 'accessDenied', message: 'Access denied' } }), true;
     const nextBase = `${base}/graph/v1.0/drives/${drive.id}/${m[2] ? `items/${item.id}` : 'root'}/children`;
     const trail = m[2] ? [...found.trail, item.name] : [];
-    return json(res, 200, page(item.children.map((c) => itemJson(c, drive, trail)), nextBase)), true;
+    return json(res, 200, page(item.children.map((c) => itemJson(c, drive, trail, item.id)), nextBase)), true;
   }
   if (action === '/content') {
     res.writeHead(302, { Location: `${base}/download/${drive.id}/${item.id}` });
@@ -112,9 +114,15 @@ function drivesApi({ req, res, path, url, base, graph, find, json }) {
     graph.driveDeleted = [...(graph.driveDeleted || []), { drive: drive.id, id: item.id, how, ifMatch: req.headers['if-match'] || '' }];
     parent.splice(parent.indexOf(item), 1);
   };
+  const current = itemJson(item, drive, found.trail, found.parentId || `${drive.id}-root`);
+  const tagMismatch = () => {
+    const tag = req.headers['if-match'];
+    return tag && tag !== current.eTag && tag !== current.cTag;
+  };
   if (action === '/permanentDelete' && req.method === 'POST') {
     if (graph.readOnlyDrives?.has(drive.id)) return json(res, 403, { error: { code: 'accessDenied', message: 'Access denied' } }), true;
     if (graph.lockedItems?.has(item.id)) return json(res, 423, { error: { code: 'resourceLocked', message: 'The resource you are attempting to access is locked' } }), true;
+    if (tagMismatch()) return json(res, 412, { error: { code: 'resourceModified', message: 'ETag does not match current item\'s value' } }), true;
     record('permanent');
     res.writeHead(204);
     res.end();
@@ -123,16 +131,14 @@ function drivesApi({ req, res, path, url, base, graph, find, json }) {
   if (req.method === 'DELETE') {
     if (graph.readOnlyDrives?.has(drive.id)) return json(res, 403, { error: { code: 'accessDenied', message: 'Access denied' } }), true;
     if (graph.lockedItems?.has(item.id)) return json(res, 423, { error: { code: 'resourceLocked', message: 'The resource you are attempting to access is locked' } }), true;
-    const tag = req.headers['if-match'];
-    const current = itemJson(item, drive, found.trail);
-    if (tag && tag !== current.eTag && tag !== current.cTag) return json(res, 412, { error: { code: 'resourceModified', message: 'ETag does not match current item\'s value' } }), true;
+    if (tagMismatch()) return json(res, 412, { error: { code: 'resourceModified', message: 'ETag does not match current item\'s value' } }), true;
     record('trash');
     (graph.recycle ||= []).push({ drive: drive.id, item });
     res.writeHead(204);
     res.end();
     return true;
   }
-  if (req.method === 'GET' && !action) return json(res, 200, itemJson(item, drive, found.trail)), true;
+  if (req.method === 'GET' && !action) return json(res, 200, current), true;
   return false;
 }
 
@@ -174,13 +180,28 @@ export function startMockApis({ graph = null, google = null } = {}) {
         if (!found) return json(res, 404, { error: { code: 'itemNotFound', message: 'Não encontrado' } });
         graph.downloads = [...(graph.downloads || []), { id: download[2], auth: req.headers.authorization || '' }];
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': found.item.content.length });
+        if (graph.slowDownloads?.has(download[2])) {
+          // Download lento: metade agora, o resto depois; registra se o cliente desistiu antes.
+          const half = Math.floor(found.item.content.length / 2);
+          res.write(found.item.content.subarray(0, half));
+          let finished = false;
+          res.on('close', () => {
+            if (!finished) graph.abortedDownloads = [...(graph.abortedDownloads || []), download[2]];
+          });
+          setTimeout(() => {
+            finished = true;
+            if (!res.destroyed) res.end(found.item.content.subarray(half));
+          }, graph.slowMs || 3000);
+          return undefined;
+        }
         return res.end(found.item.content);
       }
       if (url.pathname.startsWith('/graph/v1.0/')) {
         if (req.headers.authorization !== 'Bearer graph-token') return json(res, 401, { error: { code: 'InvalidAuthenticationToken', message: 'Token inválido' } });
         const path = decodeURIComponent(url.pathname.slice('/graph/v1.0'.length));
         const users = graph.users;
-        const find = (key) => users.find((u) => u.id === key || u.mail.toLowerCase() === String(key).toLowerCase() && u.upnIsMail !== false);
+        const find = (key) =>
+          users.find((u) => u.id === key || (u.mail.toLowerCase() === String(key).toLowerCase() && u.upnIsMail !== false) || (u.upn && u.upn.toLowerCase() === String(key).toLowerCase()));
         if (drivesApi({ req, res, path, url, base, graph, find, json })) return;
         if (path === '/users') {
           const filter = url.searchParams.get('$filter');
@@ -189,14 +210,16 @@ export function startMockApis({ graph = null, google = null } = {}) {
             return json(res, 200, { value: users.filter((u) => u.mail === mail).map((u) => ({ id: u.id, mail: u.mail, displayName: u.displayName })) });
           }
           const skip = Number(url.searchParams.get('$skiptoken') || 0);
-          const page = users.slice(skip, skip + 2).map((u) => ({ id: u.id, mail: u.mail, displayName: u.displayName, userPrincipalName: u.mail }));
+          const page = users.slice(skip, skip + 2).map((u) => ({ id: u.id, mail: u.mail, displayName: u.displayName, userPrincipalName: u.upn || u.mail }));
           const next = skip + 2 < users.length ? { '@odata.nextLink': `${base}/graph/v1.0/users?$skiptoken=${skip + 2}` } : {};
           return json(res, 200, { value: page, ...next });
         }
         let m = /^\/users\/([^/]+)$/.exec(path);
         if (m) {
-          const u = users.find((x) => x.id === m[1] || (x.upnIsMail !== false && x.mail === m[1]));
-          return u ? json(res, 200, { id: u.id, mail: u.mail, displayName: u.displayName }) : json(res, 404, { error: { code: 'Request_ResourceNotFound', message: 'Não encontrado' } });
+          const u = users.find((x) => x.id === m[1] || (x.upnIsMail !== false && x.mail === m[1]) || (x.upn && x.upn.toLowerCase() === m[1].toLowerCase()));
+          return u
+            ? json(res, 200, { id: u.id, mail: u.mail, displayName: u.displayName, userPrincipalName: u.upn || u.mail })
+            : json(res, 404, { error: { code: 'Request_ResourceNotFound', message: 'Não encontrado' } });
         }
         m = /^\/users\/([^/]+)\/(.*)$/.exec(path);
         const user = m && find(m[1]);

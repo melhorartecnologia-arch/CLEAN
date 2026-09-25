@@ -16,7 +16,8 @@ import {
   MAIL_DELETION_LABELS,
 } from '../report/model.js';
 import { deleteFile, deletionEvent, cleanPaths, keptPaths, isCloudRepo } from '../scan/delete.js';
-import { DrivesConnector, keptCloud, keptCloudTarget } from '../cloud/drives.js';
+import { DrivesConnector, keptCloud, keptCloudTarget, coveredByRepo, cloudTarget } from '../cloud/drives.js';
+import { compileExclusions, DEFAULT_EXCLUDES } from '../scan/walker.js';
 import { createConnector } from '../mail/connectors.js';
 import { normalizeAddress } from '../mail/common.js';
 import { friendlyError } from '../scan/errors.js';
@@ -152,12 +153,33 @@ function mailboxFor(source, record) {
 }
 
 const METHOD_TEXT = { permanent: 'exclusão definitiva', trash: 'mover para a lixeira', file: 'exclusão definitiva' };
+const EXCLUDED_NOW = (repo) => `O arquivo está numa pasta (ou tem um nome) que o repositório "${repo.name}" passou a ignorar: ele não é excluído pelo relatório.`;
 
-/** O repositório mudou de tipo (pasta ↔ OneDrive/SharePoint) ou de locatário depois da análise. */
+/**
+ * O arquivo está numa pasta (ou tem um nome) que o repositório passou a ignorar depois da análise:
+ * ele não é excluído pelo relatório. No OneDrive/SharePoint, vale também o nome da biblioteca.
+ */
+function excludedNow(repo, record) {
+  const isExcluded = compileExclusions([...DEFAULT_EXCLUDES, ...(repo.exclude || [])]);
+  const parts = String(record.relativePath || record.name || '')
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  const check = (prefix) => parts.some((name, i) => isExcluded(name, [...prefix, ...parts.slice(0, i + 1)].join('/')));
+  if (!record.cloud) return check([]);
+  const library = record.cloud.library || '';
+  return isExcluded(library, library) || check([]) || check([library]);
+}
+
+/**
+ * O repositório mudou depois da análise: de tipo (pasta ↔ OneDrive/SharePoint), de locatário ou de
+ * alcance (a conta ou o site do arquivo saiu da lista ou passou a ser ignorado).
+ */
 function cloudChanged(record, repo) {
   if (Boolean(record.cloud) !== isCloudRepo(repo)) return true;
   if (!record.cloud) return false;
-  return record.cloud.kind !== repo.type || String(record.cloud.tenant || '').toLowerCase() !== String(repo.graph?.tenantId || '').toLowerCase();
+  if (record.cloud.kind !== repo.type) return true;
+  if (String(record.cloud.tenant || '').toLowerCase() !== String(repo.graph?.tenantId || '').toLowerCase()) return true;
+  return !coveredByRepo(repo, record.cloud);
 }
 
 export function scansRouter({ store, manager, endpoints = {} }) {
@@ -175,6 +197,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     const target = scan.kind === 'mail' ? store.getMailSource(record.sourceId) : store.getRepository(record.repositoryId);
     if (!target) return { blocked: 'removed' };
     if (scan.kind !== 'mail' && cloudChanged(record, target)) return { blocked: 'changed' };
+    if (scan.kind !== 'mail' && excludedNow(target, record)) return { blocked: 'excluded' };
     if (!target.allowDelete) return { blocked: 'not-allowed' };
     if (scan.kind === 'mail') return { method: target.deleteMode === 'trash' ? 'trash' : 'permanent' };
     if (record.cloud) return { method: target.deleteMode === 'permanent' ? 'permanent' : 'trash' };
@@ -326,25 +349,31 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     } else if (record.cloud) {
       const repo = store.getRepository(record.repositoryId);
       if (!repo) throw new HttpError(409, 'O repositório deste arquivo foi excluído do cadastro.');
-      if (cloudChanged(record, repo)) throw new HttpError(409, `O cadastro do repositório "${repo.name}" mudou depois da análise (tipo ou locatário): faça uma nova análise para excluir.`);
+      if (cloudChanged(record, repo)) {
+        throw new HttpError(409, `O cadastro do repositório "${repo.name}" mudou depois da análise (tipo, locatário, contas ou sites): faça uma nova análise para excluir.`);
+      }
       if (!repo.allowDelete) throw new HttpError(403, `A exclusão não está permitida no repositório "${repo.name}". Ative "Permitir exclusão" em Repositórios.`);
+      if (excludedNow(repo, record)) throw new HttpError(409, EXCLUDED_NOW(repo));
       method = repo.deleteMode === 'permanent' ? 'permanent' : 'trash';
       checkMethod(method);
       label = `do arquivo ${record.path}`;
       item = record.path;
-      const kept = keptCloudTarget(record.cloud, keptCloud(repo, store.listRepositories()));
-      if (kept) {
-        result = { status: 'failed', error: kept.error };
-      } else {
-        const connector = new DrivesConnector({ ...repo, secrets: store.openRepositorySecrets(repo) }, { signal: AbortSignal.timeout(120000), endpoints });
-        result = await connector.deleteItem(record.cloud, method, { force: req.body?.force === true });
+      let secrets;
+      try {
+        secrets = store.openRepositorySecrets(repo);
+      } catch (err) {
+        throw new HttpError(409, err.message);
       }
+      const connector = new DrivesConnector({ ...repo, secrets }, { signal: AbortSignal.timeout(120000), endpoints });
+      const kept = keptCloudTarget(record.cloud, await connector.resolveKept(keptCloud(repo, store.listRepositories())));
+      result = kept ? { status: 'failed', error: kept.error } : await connector.deleteItem(cloudTarget(record), method, { force: req.body?.force === true });
       if (result.status === 'changed') return res.status(409).json({ error: `${result.error} Confirme para excluir mesmo assim.`, code: 'changed' });
     } else {
       const repo = store.getRepository(record.repositoryId);
       if (!repo) throw new HttpError(409, 'O repositório deste arquivo foi excluído do cadastro.');
       if (cloudChanged(record, repo)) throw new HttpError(409, `O cadastro do repositório "${repo.name}" mudou depois da análise (agora é ${repo.type === 'sharepoint' ? 'SharePoint' : 'OneDrive'}): faça uma nova análise para excluir.`);
       if (!repo.allowDelete) throw new HttpError(403, `A exclusão não está permitida no repositório "${repo.name}". Ative "Permitir exclusão" em Repositórios.`);
+      if (excludedNow(repo, record)) throw new HttpError(409, EXCLUDED_NOW(repo));
       method = 'file';
       checkMethod(method);
       label = `do arquivo ${record.path}`;

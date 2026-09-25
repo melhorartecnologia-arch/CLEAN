@@ -68,7 +68,8 @@ const DELETION_WORDS = {
     removed: 'A conexão desta mensagem foi removida do cadastro: a exclusão pelo relatório não está disponível.',
   },
 };
-const CHANGED_REPO = 'O cadastro do repositório mudou depois da análise (tipo ou locatário): faça uma nova análise para excluir.';
+const CHANGED_REPO = 'O cadastro do repositório mudou depois da análise (tipo, locatário, contas ou sites): faça uma nova análise para excluir.';
+const EXCLUDED_REPO = 'O arquivo está numa pasta (ou tem um nome) que o repositório passou a ignorar: a exclusão pelo relatório não está disponível.';
 
 function deletionLabel(status, o) {
   const labels = {
@@ -115,7 +116,8 @@ function deletionBlock(r, noun, { active, deleting }) {
   } else if (r.canDelete) {
     action = html`<button type="button" class="btn small danger" data-action="delete-item" data-rid="${r.id}">${icon('trash')} ${d && !isGone(d) ? 'Tentar excluir de novo' : `Excluir ${noun}`}</button>`;
   } else if (!isGone(d)) {
-    const why = active ? 'A exclusão manual fica disponível ao fim da análise.' : r.deleteBlocked === 'removed' ? w.removed : r.deleteBlocked === 'changed' ? CHANGED_REPO : w.notAllowed;
+    const blocked = { removed: w.removed, changed: CHANGED_REPO, excluded: EXCLUDED_REPO };
+    const why = active ? 'A exclusão manual fica disponível ao fim da análise.' : blocked[r.deleteBlocked] || w.notAllowed;
     action = html`<p class="muted small">${why}</p>`;
   }
   return html`<h4 class="spaced">Exclusão</h4>${status}${action}`;
@@ -207,7 +209,7 @@ const FILES = {
   tiles: (st) => {
     const pct = st.filesSeen ? Math.round((st.filesMatched / st.filesSeen) * 1000) / 10 : 0;
     const notRead = (st.contentEncrypted || 0) + (st.contentSkippedSize || 0) + (st.contentErrors || 0);
-    return html`<div class="tile"><div class="label">Arquivos verificados</div><div class="value">${fmtCompact(st.filesSeen)}</div><div class="detail">em ${plural(st.directories || 0, 'pasta', 'pastas')}${st.libraries ? ` de ${plural(st.libraries, 'biblioteca', 'bibliotecas')}` : ''}${st.accountsSkipped ? ` · ${plural(st.accountsSkipped, 'conta sem OneDrive', 'contas sem OneDrive')}` : ''}${st.filesSkippedByDate ? ` · ${fmtNum(st.filesSkippedByDate)} fora do período` : ''}</div></div>
+    return html`<div class="tile"><div class="label">Arquivos verificados</div><div class="value">${fmtCompact(st.filesSeen)}</div><div class="detail">em ${plural(st.directories || 0, 'pasta', 'pastas')}${st.libraries ? ` · ${plural(st.libraries, 'biblioteca', 'bibliotecas')}` : ''}${st.accountsSkipped ? ` · ${plural(st.accountsSkipped, 'conta sem OneDrive', 'contas sem OneDrive')}` : ''}${st.filesSkippedByDate ? ` · ${fmtNum(st.filesSkippedByDate)} fora do período` : ''}</div></div>
       <div class="tile"><div class="label">Arquivos com ocorrências</div><div class="value">${fmtCompact(st.filesMatched)}</div><div class="detail">${pct.toLocaleString('pt-BR')}% dos verificados</div></div>
       <div class="tile"><div class="label">Ocorrências</div><div class="value">${fmtCompact(st.occurrences)}</div><div class="detail">somando nome e conteúdo</div></div>
       <div class="tile"><div class="label">Conteúdos lidos</div><div class="value">${fmtCompact(st.contentAnalyzed)}</div><div class="detail">${notRead ? `${fmtNum(st.contentEncrypted)} com senha · ${fmtNum(st.contentSkippedSize)} grandes · ${fmtNum(st.contentErrors)} com erro` : fmtBytes(st.bytesAnalyzed)}</div></div>

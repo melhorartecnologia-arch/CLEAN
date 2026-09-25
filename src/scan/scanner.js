@@ -10,7 +10,7 @@ import { OwnerResolver } from './owner.js';
 import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
 import { friendlyError, withTimeout } from './errors.js';
 import { deleteFile, deletionEvent, isWithin, isCloudRepo } from './delete.js';
-import { DrivesConnector, person, keptCloudTarget } from '../cloud/drives.js';
+import { DrivesConnector, person, keptCloudTarget, cloudTarget } from '../cloud/drives.js';
 
 // Tempo máximo para ler um arquivo (o que passar disso é registrado como erro e a análise segue).
 const FILE_TIMEOUT = 5 * 60 * 1000;
@@ -21,13 +21,18 @@ const TEXT_EXTENSIONS = new Set(['.txt', '.csv', '.tsv', '.log', '.md', '.json',
 
 export { isCloudRepo };
 
-/** Endereço web legível (sem os códigos %20 etc.). */
+/** Endereço web legível (sem os códigos %20 etc.), parte por parte. */
 function readableUrl(url) {
-  try {
-    return decodeURI(url);
-  } catch {
-    return url;
-  }
+  return String(url)
+    .split('/')
+    .map((part) => {
+      try {
+        return decodeURIComponent(part);
+      } catch {
+        return part;
+      }
+    })
+    .join('/');
 }
 
 export { friendlyError };
@@ -139,6 +144,7 @@ export class Scanner {
     this.endpoints = config.endpoints || {};
     this.cloudConnectorFactory = cloudConnectorFactory || ((repo, options) => new DrivesConnector(repo, options));
     this.cloudConnectors = new Map();
+    this.cloudKept = new Map(); // proteção por outros repositórios, conferida uma vez por repositório
     this.deletedBy = config.startedBy || null; // quem iniciou a análise com exclusão automática
   }
 
@@ -332,7 +338,7 @@ export class Scanner {
   }
 
   /** Conteúdo de um arquivo da nuvem: baixado para a memória (até o limite de tamanho) e lido. */
-  async cloudContent(connector, drive, item) {
+  async cloudContent(connector, drive, item, signal) {
     const size = Number(item.size) || 0;
     const ext = path.extname(item.name).toLowerCase();
     const type = ext.slice(1) || 'arquivo';
@@ -342,7 +348,7 @@ export class Scanner {
     if (tooBig && !TEXT_EXTENSIONS.has(ext)) {
       return { type, status: 'skipped-size', segments: [], metadata: {}, note: `Conteúdo não analisado: arquivo maior que ${mb} MB.` };
     }
-    const res = await connector.download(drive.id, item.id, { maxBytes: this.limits.maxBytes });
+    const res = await connector.download(drive.id, item.id, { maxBytes: this.limits.maxBytes, signal });
     const content = await extractBuffer(res.data, { name: item.name, limits: this.limits });
     if ((tooBig || res.truncated) && content.status === 'ok') {
       content.status = 'partial';
@@ -365,13 +371,13 @@ export class Scanner {
     const { options, matcher } = this;
     let content = null;
     if (options.checkContent) {
-      content = await withTimeout(this.cloudContent(connector, drive, item), this.fileTimeoutMs, 'Tempo esgotado ao baixar ou ler o conteúdo do arquivo.').catch((err) => ({
-        type: path.extname(item.name).slice(1),
-        status: 'error',
-        segments: [],
-        metadata: {},
-        note: `Falha ao ler o conteúdo: ${friendlyError(err)}`,
-      }));
+      // Cada download tem o seu sinal: no tempo esgotado (ou ao cancelar), ele é interrompido de fato.
+      const controller = new AbortController();
+      const job = this.cloudContent(connector, drive, item, AbortSignal.any([this.abort.signal, controller.signal]));
+      content = await withTimeout(job, this.fileTimeoutMs, 'Tempo esgotado ao baixar ou ler o conteúdo do arquivo.').catch((err) => {
+        controller.abort(err);
+        return { type: path.extname(item.name).slice(1), status: 'error', segments: [], metadata: {}, note: `Falha ao ler o conteúdo: ${friendlyError(err)}` };
+      });
       this.countContent(content, size);
       if (content.status === 'error') this.error(label, content.note);
     }
@@ -419,9 +425,11 @@ export class Scanner {
         itemId: item.id,
         cTag: item.cTag || null,
         eTag: item.eTag || null,
+        parentId: item.parentReference?.id || null,
         webUrl: item.webUrl || null,
         account: drive.account,
         accountName: drive.accountName || '',
+        aliases: drive.aliases || [],
         library: drive.library,
         lastModifiedBy: person(item.lastModifiedBy),
         createdBy,
@@ -605,9 +613,11 @@ export class Scanner {
       if (!repo?.allowDelete) {
         result = { status: 'failed', error: 'A exclusão não está permitida neste repositório.' };
       } else if (cloud) {
-        const kept = keptCloudTarget(record.cloud, repo.keep);
+        const connector = this.cloudConnector(repo);
+        if (!this.cloudKept.has(repo.id)) this.cloudKept.set(repo.id, connector.resolveKept(repo.keep));
+        const kept = keptCloudTarget(record.cloud, await this.cloudKept.get(repo.id));
         // O conector da análise usa o sinal de cancelamento; a exclusão em andamento termina mesmo assim.
-        result = kept ? { status: 'failed', error: kept.error } : await this.cloudConnector(repo).deleteItem(record.cloud, method, { signal: null });
+        result = kept ? { status: 'failed', error: kept.error } : await connector.deleteItem(cloudTarget(record), method, { signal: null });
       } else {
         result = await deleteFile(record.path, {
           root: repo.path,

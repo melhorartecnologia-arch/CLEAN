@@ -356,6 +356,7 @@ function wireForm(form, existing) {
       const box = form.querySelector('[data-test-result]');
       box.className = 'test-result';
       box.textContent = 'Testando a conexão… (pode levar alguns segundos)';
+      const hadFocus = document.activeElement === button;
       button.disabled = true;
       try {
         showTest(box, await post('/api/mail-sources/test', readForm(form, existing)));
@@ -363,6 +364,7 @@ function wireForm(form, existing) {
         showTest(box, { ok: false, message: err.message });
       } finally {
         button.disabled = false;
+        if (hadFocus) button.focus(); // o botão desabilitado perde o foco do teclado
       }
     }
   });

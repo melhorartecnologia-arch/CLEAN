@@ -5,6 +5,9 @@ import { go } from '../nav.js';
 
 const CLOUD_LABELS = { onedrive: 'OneDrive', sharepoint: 'SharePoint' };
 
+/** Forma de exclusão de cada repositório: pastas do Windows, sempre definitiva; na nuvem, a do cadastro. */
+const deletionChip = (r) => (CLOUD_LABELS[r.type] && r.deleteMode !== 'permanent' ? 'exclusão para a lixeira' : 'exclusão definitiva');
+
 export async function render(root, { ctx }) {
   const [repos, lists] = await Promise.all([get('/api/repositories'), get('/api/lists')]);
   const d = ctx.info.defaults || {};
@@ -46,7 +49,7 @@ export async function render(root, { ctx }) {
               ${repos.map(
                 (r) => html`<label class="check">
                   <input type="checkbox" name="repositoryIds" value="${r.id}" ${repos.length === 1 ? 'checked' : ''} />
-                  <span><b>${r.name}</b>${CLOUD_LABELS[r.type] ? html` <span class="chip">${CLOUD_LABELS[r.type]}</span>` : ''}${r.allowDelete ? html` <span class="chip danger">exclusão permitida</span>` : ''}<br /><span class="${CLOUD_LABELS[r.type] ? 'muted small' : 'mono muted'}">${r.path}</span></span>
+                  <span><b>${r.name}</b>${CLOUD_LABELS[r.type] ? html` <span class="chip">${CLOUD_LABELS[r.type]}</span>` : ''}${r.allowDelete ? html` <span class="chip danger">${deletionChip(r)}</span>` : ''}<br /><span class="${CLOUD_LABELS[r.type] ? 'muted small' : 'mono muted'}">${r.path}</span></span>
                 </label>`,
               )}
             </div>
@@ -118,7 +121,7 @@ export async function render(root, { ctx }) {
             <div class="alert error" data-delete-confirm hidden>
               ${icon('alert')}
               <div>
-                <b>Exclusão definitiva e sem volta.</b> Arquivos excluídos pela rede não vão para a Lixeira. Confira as listas de referência antes de continuar: tudo o que for encontrado será apagado.
+                <b>Exclusão sem volta nas pastas do Windows:</b> arquivos excluídos pela rede não vão para a Lixeira. No OneDrive e no SharePoint, vale a forma definida em cada repositório (para a lixeira ou definitiva). Confira as listas de referência antes de continuar: tudo o que for encontrado será excluído.
                 <p data-path-warning hidden><b>Atenção:</b> com "Caminho completo", um termo no nome de uma pasta faz todos os arquivos dela (e das subpastas) serem encontrados — e excluídos.</p>
                 <label class="field"><span>Digite EXCLUIR para confirmar</span><input type="text" name="confirmDelete" autocomplete="off" spellcheck="false" /></label>
               </div>

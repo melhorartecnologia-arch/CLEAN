@@ -84,6 +84,8 @@ de exemplo. Depois é só iniciar uma análise.
    O botão *Testar acesso* confirma se a conta do CLEAN consegue ler a pasta. É possível ignorar
    arquivos e pastas por padrões (`*.bak`, `Backup`, `Financeiro\Antigo`); `$RECYCLE.BIN`,
    `System Volume Information`, arquivos temporários do Office (`~$*`) e `Thumbs.db` já são ignorados.
+   Contas do **OneDrive** e sites do **SharePoint** também podem ser cadastrados como repositórios
+   (veja [OneDrive e SharePoint](#onedrive-e-sharepoint)).
 2. **Listas de referência** — crie uma lista e adicione termos:
    - **Texto**: ignora maiúsculas, acentos e espaços repetidos. Marque *Palavra inteira* para que
      "ana" não encontre "banana".
@@ -194,12 +196,15 @@ Microsoft Graph, com as permissões de um **registro de aplicativo** (sem usuár
 
 - **OneDrive**: todas as contas do locatário (usuários sem OneDrive — nunca acessado, sem licença,
   salas, caixas compartilhadas — são ignorados e contados no relatório) ou somente as contas
-  informadas (e-mail do usuário). É possível ignorar contas por padrão (ex.: `teste@*`).
+  informadas (e-mail ou nome de logon do usuário). É possível ignorar contas por padrão (ex.:
+  `teste@*`), pelo e-mail, pelo nome de logon ou pelo nome.
 - **SharePoint**: todos os sites (sem os OneDrive pessoais, que são analisados pelo tipo OneDrive)
   ou somente os sites informados (endereço, ex.: `https://empresa.sharepoint.com/sites/Financeiro`;
   pode colar o endereço de uma página ou biblioteca do site). Os **subsites** e **todas as
   bibliotecas de documentos** de cada site são analisados — inclusive os arquivos das equipes do
-  **Microsoft Teams**, que ficam nos sites delas. É possível ignorar sites por endereço ou nome.
+  **Microsoft Teams**, que ficam nos sites delas. É possível ignorar sites por endereço (ignora
+  também os subsites) ou por nome. Um endereço inexistente é informado como erro (o CLEAN não troca
+  um subsite digitado errado pelo site acima dele); OneDrive pessoais não entram na lista de sites.
 - Os padrões de *Ignorar* valem para pastas e arquivos e também para o nome das bibliotecas (ex.:
   `Site Assets`, `Style Library`); atalhos para pastas de outras bibliotecas ("Adicionar atalho a
   Meus arquivos") não são seguidos, para não analisar o mesmo arquivo duas vezes.
@@ -212,7 +217,8 @@ Microsoft Graph, com as permissões de um **registro de aplicativo** (sem usuár
 ### Registro do aplicativo no Microsoft Entra ID
 
 Pode ser o mesmo das caixas de e-mail do Microsoft 365 — no formulário do repositório, escolha
-*Usar as credenciais da conexão de e-mail*. Em *Registros de aplicativo › (o aplicativo) ›
+*Usar as credenciais da conexão* (as credenciais ficam ligadas à conexão de e-mail: um novo segredo
+salvo nela passa a valer também para o repositório). Em *Registros de aplicativo › (o aplicativo) ›
 Permissões de API › Adicionar › Microsoft Graph › Permissões de aplicativo*, inclua:
 
 | Permissão | Para quê |
@@ -375,6 +381,8 @@ sem repetir as mensagens de cada marcador.
   informadas de novo), para que não sejam enviadas a outro endereço.
 - O CLEAN precisa acessar `login.microsoftonline.com` e `graph.microsoft.com` (Microsoft 365) ou
   `oauth2.googleapis.com`, `gmail.googleapis.com` e `admin.googleapis.com` (Google) pela porta 443.
+  Para o OneDrive e o SharePoint, também `*.sharepoint.com` (o conteúdo dos arquivos é baixado de
+  lá; sem esse acesso, só os nomes são verificados).
   Se a rede exige **proxy**, defina, antes de iniciar o CLEAN (Node.js 22.21 ou superior), as
   variáveis de ambiente `NODE_USE_ENV_PROXY=1` e `HTTPS_PROXY=http://proxy.empresa.local:3128` — por
   exemplo, retirando o `rem` das linhas correspondentes no `iniciar.bat`.
@@ -411,12 +419,17 @@ Salvaguardas:
 - os arquivos da pasta de dados e da pasta de instalação do CLEAN nunca são excluídos (a pasta de
   dados nem é analisada); um repositório cadastrado **dentro** de outro, sem *Permitir exclusão*,
   protege os seus arquivos também quando a análise é feita pelo repositório maior — no OneDrive e no
-  SharePoint, um repositório sem exclusão que lista contas ou sites protege essas contas e sites;
+  SharePoint, um repositório sem exclusão que lista contas ou sites protege essas contas (conferidas
+  no Microsoft 365, pelo e-mail ou pelo nome de logon; se a conferência falhar, nada do OneDrive é
+  excluído) e esses sites, com os subsites;
 - atenção ao verificar o nome com **Caminho completo**: um termo no nome de uma pasta faz todos os
   arquivos dela (e das subpastas) serem encontrados — e, no modo automático, excluídos;
-- **e-mails**: vale a forma de exclusão (definitiva ou para a lixeira) que estava no cadastro ao
-  criar a análise — se ela mudar para *lixeira* antes de a análise começar, a lixeira é usada. No
-  relatório, se a forma mudou depois de a página ser aberta, o CLEAN avisa e pede nova confirmação;
+- **e-mails, OneDrive e SharePoint**: vale a forma de exclusão (definitiva ou para a lixeira) que
+  estava no cadastro ao criar a análise — se ela mudar para *lixeira* antes de a análise começar, a
+  lixeira é usada. No relatório, se a forma mudou depois de a página ser aberta, o CLEAN avisa e pede
+  nova confirmação; se a conta ou o site do arquivo saiu do cadastro do repositório (ou o tipo ou o
+  locatário mudaram), ou se o arquivo está numa pasta que o repositório passou a ignorar, a exclusão
+  pelo relatório deixa de estar disponível;
 - cada tentativa de exclusão fica registrada: no relatório (situação de cada item, filtro
   *Exclusão* e o bloco *Excluídos*), no **Registro** da análise (exclusões manuais e falhas), na aba
   **Exclusões** do Excel (quando, o quê, automática ou manual, por quem e o resultado), no CSV
@@ -440,7 +453,7 @@ Como cada tipo é excluído e a permissão necessária:
 | Arquivos (pastas e compartilhamentos) | **Definitiva**: arquivos apagados pela rede não vão para a Lixeira do Windows. Arquivos somente leitura também são excluídos. | A conta do CLEAN precisa de permissão de **modificação** (NTFS e compartilhamento), não só de leitura. |
 | Microsoft 365 | *Excluir definitivamente* (a mensagem vai para a área de expurgo e some para o usuário) ou *Mover para a Lixeira* (Itens Excluídos), conforme a conexão. | **`Mail.ReadWrite`** (tipo Aplicativo) no lugar de `Mail.Read`; com o RBAC para aplicativos, a função `Application Mail.ReadWrite`. |
 | Google Workspace | Definitiva ou para a Lixeira, conforme a conexão. | Na delegação em todo o domínio, inclua o escopo `https://mail.google.com/` (definitiva) ou `https://www.googleapis.com/auth/gmail.modify` (lixeira). |
-| OneDrive e SharePoint | *Mover para a Lixeira* do site ou do OneDrive (padrão; o usuário ou o administrador do site pode restaurar por até 93 dias) ou *Excluir definitivamente*, conforme o repositório. Só se o arquivo continuar na versão analisada; arquivos abertos para edição, em check-out ou com rótulo de retenção (registro) não são excluídos. | **`Files.ReadWrite.All`** (ou `Sites.ReadWrite.All`; com `Sites.Selected`, permissão `Write` no site). |
+| OneDrive e SharePoint | *Mover para a Lixeira* do site ou do OneDrive (padrão; o usuário ou o administrador do site pode restaurar por até 93 dias) ou *Excluir definitivamente*, conforme o repositório. Só se o arquivo continuar como foi analisado (mesma versão, mesmo nome e mesma pasta — conferido antes e, pelo cabeçalho If-Match, também na própria exclusão); arquivos abertos para edição, em check-out ou com rótulo de retenção (registro) não são excluídos. | **`Files.ReadWrite.All`** (ou `Sites.ReadWrite.All`; com `Sites.Selected`, permissão `Write` no site). |
 | IMAP | *Definitiva*: marca e expurga só as mensagens encontradas (UID EXPUNGE); o servidor precisa oferecer a extensão **UIDPLUS** — sem ela, a exclusão definitiva é recusada, porque um expurgo comum apagaria também as outras mensagens marcadas como excluídas na pasta. *Para a Lixeira*: move para a pasta Lixeira do servidor (MOVE; sem MOVE, copia, confere a cópia e só então expurga, o que também exige UIDPLUS); mensagens que já estão na Lixeira ficam lá. No **Gmail via IMAP**, a exclusão definitiva move para a Lixeira e expurga de lá (expurgar de outra pasta só tiraria o marcador). | A conta precisa poder alterar a caixa. |
 
 Importante:
@@ -504,11 +517,14 @@ lista, dados pessoais e senhas encontradas. Por isso:
   CLEAN atrás de um proxy HTTPS (IIS com URL Rewrite/ARR, por exemplo) e inclua o endereço público
   em `ALLOWED_HOSTS`;
 - proteja a pasta `data` com permissões NTFS restritas (ela guarda os resultados das análises, as
-  credenciais cifradas das caixas de e-mail e a chave que as decifra), por exemplo:
+  credenciais cifradas das caixas de e-mail e dos repositórios do OneDrive/SharePoint e a chave que
+  as decifra), por exemplo:
   `icacls C:\CLEAN\data /inheritance:r /grant:r "Administradores:(OI)(CI)F" "EMPRESA\svc-clean:(OI)(CI)M"`;
 - dê à conexão de e-mail apenas o acesso necessário (permissões de leitura; no Microsoft 365, de
-  preferência limitado às caixas analisadas pelo RBAC para aplicativos) e só conceda permissões de
-  escrita e marque *Permitir exclusão* onde a exclusão for realmente usada;
+  preferência limitado às caixas analisadas pelo RBAC para aplicativos) e, no SharePoint, prefira
+  `Sites.Selected` com os sites liberados um a um (`Files.Read.All` dá acesso a todos os arquivos do
+  locatário); só conceda permissões de escrita e marque *Permitir exclusão* onde a exclusão for
+  realmente usada;
 - com a exclusão permitida, qualquer pessoa com acesso à interface pode excluir itens pelo
   relatório: defina `AUTH_USER`/`AUTH_PASSWORD` (o registro mostra essa conta, que é única, e o
   endereço de acesso de quem excluiu);
@@ -555,7 +571,7 @@ Estrutura:
 ```
 src/
   server.js, app.js, config.js, store.js   servidor, rotas e persistência (JSON/NDJSON)
-  secrets.js                               cifragem das credenciais das caixas de e-mail
+  secrets.js                               cifragem das credenciais (caixas de e-mail, OneDrive e SharePoint)
   routes/                                  API REST (/api/repositories, /api/lists, /api/mail-sources, /api/scans)
   cloud/
     graph-client.js                        cliente do Microsoft Graph (token, novas tentativas, paginação)

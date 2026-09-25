@@ -52,10 +52,10 @@ function repoForm(repo, ctx, mailSources) {
         ? html`<label class="field full">
             <span>Credenciais</span>
             <select name="credentialsFrom">
-              <option value="">Informar as credenciais do registro de aplicativo</option>
-              ${m365.map((s) => html`<option value="${s.id}">Usar as da conexão de e-mail "${s.name}"</option>`)}
+              <option value="">Informar manualmente</option>
+              ${m365.map((s) => html`<option value="${s.id}" ${repo?.credentialsFrom === s.id ? 'selected' : ''}>Usar as credenciais da conexão "${s.name}"</option>`)}
             </select>
-            <small>O mesmo registro de aplicativo pode ler e-mails e arquivos: inclua nele as permissões de arquivos abaixo.</small>
+            <small>O mesmo registro de aplicativo pode ler e-mails e arquivos (inclua nele as permissões de arquivos abaixo). As credenciais ficam ligadas à conexão: um novo segredo salvo nela também vale aqui.</small>
           </label>`
         : ''}
       <div class="form-grid" data-credentials>
@@ -96,9 +96,13 @@ function repoForm(repo, ctx, mailSources) {
         <textarea name="sites" rows="4" placeholder="https://empresa.sharepoint.com/sites/Financeiro&#10;https://empresa.sharepoint.com/sites/RH">${(cloud.sites || []).join('\n')}</textarea>
         <small>Os subsites e todas as bibliotecas de documentos de cada site são analisados. Pode colar o endereço de uma página ou biblioteca do site.</small>
       </label>
-      <label class="field" data-target="all">
-        <span data-exclude-label>Ignorar (um por linha; aceita *)</span>
-        <textarea name="excludeTargets" rows="2" placeholder="">${(cloud.exclude || []).join('\n')}</textarea>
+      <label class="field" data-target="onedrive">
+        <span>Ignorar estas contas (uma por linha; aceita *)</span>
+        <textarea name="excludeAccounts" rows="2" placeholder="teste@*&#10;sala.*@empresa.com.br">${type === 'onedrive' ? (cloud.exclude || []).join('\n') : ''}</textarea>
+      </label>
+      <label class="field" data-target="sharepoint">
+        <span>Ignorar estes sites (endereço ou nome, um por linha; aceita *)</span>
+        <textarea name="excludeSites" rows="2" placeholder="https://empresa.sharepoint.com/sites/Arquivo*&#10;Projetos antigos">${type === 'sharepoint' ? (cloud.exclude || []).join('\n') : ''}</textarea>
       </label>
     </fieldset>
 
@@ -121,7 +125,7 @@ function repoForm(repo, ctx, mailSources) {
       <label class="field" data-kind="cloud" data-delete-mode>
         <span>Como excluir</span>
         <select name="deleteMode">
-          <option value="trash" ${repo?.deleteMode !== 'permanent' ? 'selected' : ''}>Mover para a Lixeira do site ou do OneDrive (pode ser restaurado)</option>
+          <option value="trash" ${repo?.deleteMode !== 'permanent' ? 'selected' : ''}>Mover para a Lixeira (restaurável)</option>
           <option value="permanent" ${repo?.deleteMode === 'permanent' ? 'selected' : ''}>Excluir definitivamente</option>
         </select>
       </label>
@@ -208,7 +212,7 @@ function readForm(form, existing) {
   body.scope = f.get('scope') || 'all';
   body.accounts = type === 'onedrive' ? f.get('accounts') : '';
   body.sites = type === 'sharepoint' ? f.get('sites') : '';
-  body.excludeTargets = f.get('excludeTargets');
+  body.excludeTargets = type === 'onedrive' ? f.get('excludeAccounts') : f.get('excludeSites');
   body.deleteMode = f.get('deleteMode') || 'trash';
   return body;
 }
@@ -229,18 +233,30 @@ function wireForm(form, existing) {
       const scope = form.elements.scope.value || 'all';
       form.querySelector('[data-target="onedrive-list"]').hidden = !(type === 'onedrive' && scope === 'list');
       form.querySelector('[data-target="sharepoint-list"]').hidden = !(type === 'sharepoint' && scope === 'list');
+      form.querySelector('[data-target="onedrive"]').hidden = type !== 'onedrive';
+      form.querySelector('[data-target="sharepoint"]').hidden = type !== 'sharepoint';
       form.querySelector('[data-scope-title]').textContent = type === 'onedrive' ? 'Contas do OneDrive' : 'Sites do SharePoint';
       form.querySelector('[data-scope-all]').textContent = type === 'onedrive' ? 'Todas as contas do locatário (usuários com OneDrive)' : 'Todos os sites (sem os OneDrive pessoais)';
       form.querySelector('[data-scope-list]').textContent = type === 'onedrive' ? 'Somente as contas informadas' : 'Somente os sites informados';
-      form.querySelector('[data-exclude-label]').textContent = type === 'onedrive' ? 'Ignorar estas contas (uma por linha; aceita *)' : 'Ignorar estes sites (endereço ou nome, um por linha; aceita *)';
-      form.elements.excludeTargets.placeholder = type === 'onedrive' ? 'teste@*\nsala.*@empresa.com.br' : 'https://empresa.sharepoint.com/sites/Arquivo*\nProjetos antigos';
       const copied = Boolean(form.elements.credentialsFrom?.value);
       form.querySelector('[data-credentials]').hidden = copied;
       form.querySelector('[data-delete-mode]').hidden = !form.elements.allowDelete.checked;
     }
     form.querySelector('[data-audit-fields]').hidden = !form.elements.auditEnabled.checked;
   };
-  form.addEventListener('change', sync);
+  // Um resultado de "Testar conexão" deixa de valer quando o tipo, as credenciais ou o alcance mudam.
+  const TEST_FIELDS = new Set(['type', 'credentialsFrom', 'tenantId', 'clientId', 'clientSecret', 'scope', 'accounts', 'sites', 'excludeAccounts', 'excludeSites']);
+  const clearTest = (event) => {
+    if (!TEST_FIELDS.has(event.target.name)) return;
+    const box = form.querySelector('[data-cloud-result]');
+    box.className = 'test-result';
+    box.textContent = '';
+  };
+  form.addEventListener('change', (event) => {
+    clearTest(event);
+    sync();
+  });
+  form.addEventListener('input', clearTest);
   sync();
 
   const pathResult = form.querySelector('[data-test-result]');
@@ -261,6 +277,7 @@ function wireForm(form, existing) {
   testButton.addEventListener('click', async () => {
     cloudResult.className = 'test-result';
     cloudResult.textContent = 'Testando…';
+    const hadFocus = document.activeElement === testButton;
     testButton.disabled = true;
     try {
       showResult(cloudResult, await post('/api/repositories/test', readForm(form, existing)));
@@ -268,12 +285,20 @@ function wireForm(form, existing) {
       showResult(cloudResult, { ok: false, message: err.message });
     } finally {
       testButton.disabled = false;
+      if (hadFocus) testButton.focus(); // o botão desabilitado perde o foco do teclado
     }
   });
 }
 
 function whereText(r) {
   return r.type === 'onedrive' || r.type === 'sharepoint' ? r.path : html`<span class="path">${r.path}</span>`;
+}
+
+function ignoredText(r) {
+  const parts = [];
+  if (r.exclude?.length) parts.push(r.exclude.join(', '));
+  if (r.cloud?.exclude?.length) parts.push(`${r.type === 'onedrive' ? 'contas' : 'sites'}: ${r.cloud.exclude.join(', ')}`);
+  return parts.length ? parts.join(' · ') : html`<span class="muted">—</span>`;
 }
 
 function deletionText(r) {
@@ -311,7 +336,7 @@ export async function render(root, { ctx }) {
                         <td><b>${r.name}</b>${r.description ? html`<div class="muted small">${r.description}</div>` : ''}</td>
                         <td class="small nowrap">${TYPES[r.type || 'local'].label}</td>
                         <td class="small">${whereText(r)}</td>
-                        <td class="small">${r.exclude?.length ? r.exclude.join(', ') : html`<span class="muted">—</span>`}</td>
+                        <td class="small">${ignoredText(r)}</td>
                         <td class="small">${r.audit?.enabled ? `Sim (${fmtNum(r.audit.days)} dias${r.audit.computer ? `, ${r.audit.computer}` : ''})` : html`<span class="muted">Não</span>`}</td>
                         <td class="small">${deletionText(r)}</td>
                         <td class="actions">

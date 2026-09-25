@@ -3,7 +3,7 @@ import { foldText } from '../scan/matcher.js';
 
 export const SOURCE_LABELS = {
   audit: 'Log de auditoria',
-  cloud: 'Microsoft 365 (última alteração)',
+  cloud: 'Microsoft 365 (quem alterou por último)',
   metadata: 'Metadados do documento',
   owner: 'Proprietário do arquivo',
 };
@@ -121,7 +121,11 @@ function haystack(record) {
         record.metadata?.author,
         record.cloud?.account,
         record.cloud?.accountName,
+        record.cloud?.library,
         record.cloud?.lastModifiedBy?.name,
+        record.cloud?.lastModifiedBy?.email,
+        record.cloud?.createdBy?.name,
+        record.cloud?.createdBy?.email,
         ...record.terms,
       ]
         .filter(Boolean)

@@ -56,15 +56,17 @@ export function emailList(value, field, { max = 5000, noun = 'endereços' } = {}
 
 /**
  * Credenciais do Microsoft Graph (registro de aplicativo no Microsoft Entra ID). Campo de segredo
- * vazio mantém o segredo salvo (previousSecret). Retorna { graph: { tenantId, clientId }, clientSecret }
- * com o segredo cifrado.
+ * vazio mantém o segredo salvo (previousSecret), desde que o locatário e o aplicativo continuem os
+ * mesmos (previousGraph). Retorna { graph: { tenantId, clientId }, clientSecret } com o segredo cifrado.
  */
-export function graphCredentials(g = {}, { previousSecret = null, box }) {
+export function graphCredentials(g = {}, { previousSecret = null, previousGraph = null, box }) {
   const tenantId = text(g.tenantId, 'o ID do locatário', { required: true, max: 255 });
   if (!GUID_RE.test(tenantId) && !DOMAIN_RE.test(tenantId)) throw bad('ID do locatário inválido: use o GUID (ID do diretório) ou o domínio, ex.: empresa.onmicrosoft.com.');
   const clientId = text(g.clientId, 'o ID do cliente (aplicativo)', { required: true, max: 64 });
   if (!GUID_RE.test(clientId)) throw bad('ID do cliente inválido: use o "ID do aplicativo (cliente)" do registro do aplicativo.');
   const secret = text(g.clientSecret, 'o segredo do cliente', { max: 2000 });
+  const sameApp = previousGraph && previousGraph.tenantId?.toLowerCase() === tenantId.toLowerCase() && previousGraph.clientId?.toLowerCase() === clientId.toLowerCase();
+  if (!secret && previousSecret && previousGraph && !sameApp) throw bad('Ao trocar o locatário ou o aplicativo, informe o segredo do cliente novamente.');
   const clientSecret = secret ? box.seal(secret) : previousSecret;
   if (!clientSecret) throw bad('Informe o segredo do cliente (valor do segredo criado no registro do aplicativo).');
   return { graph: { tenantId, clientId }, clientSecret };
@@ -84,6 +86,9 @@ export function siteUrl(value) {
     throw bad(`Endereço de site inválido: "${v.slice(0, 120)}". Use o endereço completo, ex.: https://empresa.sharepoint.com/sites/Financeiro.`);
   }
   if (u.protocol !== 'https:' || u.username || u.password) throw bad(`Endereço de site inválido: "${v.slice(0, 120)}". Use um endereço https://.`);
+  if (/-my\.sharepoint\.[a-z.]+$/i.test(u.hostname) || /^\/personal\//i.test(u.pathname)) {
+    throw bad(`"${v.slice(0, 120)}" é um OneDrive pessoal: cadastre um repositório do tipo OneDrive com a conta do usuário.`);
+  }
   return `https://${u.hostname.toLowerCase()}${u.pathname.replace(/\/+$/, '')}`;
 }
 
@@ -145,6 +150,7 @@ export function parseRepository(body = {}, { existing = null, box = null, mailSo
     deleteMode: null,
     graph: null,
     secrets: null,
+    credentialsFrom: null,
     cloud: null,
     audit: {
       enabled: Boolean(audit.enabled),
@@ -160,15 +166,19 @@ export function parseRepository(body = {}, { existing = null, box = null, mailSo
 function parseCloud(body, type, { existing, box, mailSource }) {
   let graph;
   let clientSecret;
+  let credentialsFrom = null;
   if (body.credentialsFrom) {
-    // Mesmo registro de aplicativo de uma conexão de e-mail do Microsoft 365 (as credenciais são copiadas).
+    // Mesmo registro de aplicativo de uma conexão de e-mail do Microsoft 365: as credenciais ficam
+    // ligadas a ela (um novo segredo salvo na conexão também passa a valer para o repositório).
     if (!mailSource || mailSource.type !== 'graph' || !mailSource.graph) throw bad('Escolha uma conexão de e-mail do Microsoft 365 para usar as mesmas credenciais.');
     if (!mailSource.secrets?.clientSecret) throw bad(`A conexão "${mailSource.name}" não tem o segredo do cliente salvo.`);
     graph = { tenantId: mailSource.graph.tenantId, clientId: mailSource.graph.clientId };
     clientSecret = mailSource.secrets.clientSecret;
+    credentialsFrom = mailSource.id;
   } else {
-    const previousSecret = CLOUD_REPO_TYPES.has(existing?.type) ? existing.secrets?.clientSecret || null : null;
-    ({ graph, clientSecret } = graphCredentials(body.graph || {}, { previousSecret, box }));
+    const cloudBefore = CLOUD_REPO_TYPES.has(existing?.type);
+    const previousSecret = cloudBefore ? existing.secrets?.clientSecret || null : null;
+    ({ graph, clientSecret } = graphCredentials(body.graph || {}, { previousSecret, previousGraph: cloudBefore ? existing.graph : null, box }));
   }
   const scope = body.scope === 'all' ? 'all' : 'list';
   const cloud = { scope, accounts: [], sites: [], exclude: lines(body.excludeTargets, 500) };
@@ -188,6 +198,7 @@ function parseCloud(body, type, { existing, box, mailSource }) {
     deleteMode: body.deleteMode === 'permanent' ? 'permanent' : 'trash',
     graph,
     secrets: { clientSecret },
+    credentialsFrom,
     cloud,
     audit: { ...NO_AUDIT },
   };

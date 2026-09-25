@@ -74,7 +74,7 @@ export function parseMailSource(body = {}, existing = null, box, { forTest = fal
   const secrets = {};
 
   if (type === 'graph') {
-    const { graph, clientSecret } = graphCredentials(body.graph || {}, { previousSecret: prev.clientSecret, box });
+    const { graph, clientSecret } = graphCredentials(body.graph || {}, { previousSecret: prev.clientSecret, previousGraph: sameType ? existing.graph : null, box });
     data.graph = graph;
     secrets.clientSecret = clientSecret;
   }
@@ -196,10 +196,28 @@ export function mailSourcesRouter({ store, manager = null, endpoints = {} }) {
     res.json(publicMailSource(find(req.params.id)));
   });
 
+  /**
+   * Repositórios do OneDrive/SharePoint que usam as credenciais desta conexão: recebem as novas
+   * credenciais (ex.: um segredo renovado) ou deixam de estar ligados (conexão removida ou de outro tipo).
+   */
+  const syncLinkedRepositories = (source) => {
+    for (const repo of store.listRepositories()) {
+      if (!repo.credentialsFrom || repo.credentialsFrom !== source.id) continue;
+      if (source.deleted || source.type !== 'graph' || !source.secrets?.clientSecret) {
+        store.updateRepository(repo.id, { credentialsFrom: null });
+        continue;
+      }
+      const tenantChanged = String(repo.graph?.tenantId || '').toLowerCase() !== String(source.graph.tenantId).toLowerCase();
+      store.updateRepository(repo.id, { graph: { tenantId: source.graph.tenantId, clientId: source.graph.clientId }, secrets: { clientSecret: source.secrets.clientSecret } });
+      if (tenantChanged && repo.allowDelete) manager?.revokeDeletion('repository', repo.id, 'o locatário das credenciais foi alterado');
+    }
+  };
+
   router.put('/:id', (req, res) => {
     const existing = find(req.params.id);
     const before = { allowDelete: existing.allowDelete, deleteMode: existing.deleteMode };
     const updated = store.updateMailSource(existing.id, parseMailSource(req.body, existing, store.secrets));
+    syncLinkedRepositories(updated);
     // Análises em andamento deixam de excluir se a exclusão foi desligada ou mudou de forma.
     if (before.allowDelete && (!updated.allowDelete || updated.deleteMode !== before.deleteMode)) {
       manager?.revokeDeletion('mail', existing.id, updated.allowDelete ? 'a forma de exclusão da conexão foi alterada' : 'a opção "Permitir exclusão" foi desligada');
@@ -210,6 +228,7 @@ export function mailSourcesRouter({ store, manager = null, endpoints = {} }) {
   router.delete('/:id', (req, res) => {
     const existing = find(req.params.id);
     store.deleteMailSource(existing.id);
+    syncLinkedRepositories({ ...existing, deleted: true });
     if (existing.allowDelete) manager?.revokeDeletion('mail', existing.id, 'a conexão foi removida do cadastro');
     res.status(204).end();
   });
