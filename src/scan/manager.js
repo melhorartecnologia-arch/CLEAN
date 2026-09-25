@@ -79,7 +79,14 @@ export class ScanManager {
   #pump() {
     while (this.running.size < this.maxConcurrent && this.queue.length > 0) {
       const id = this.queue.shift();
-      this.#run(id).catch((err) => this.#fail(id, err.message));
+      // A vaga é reservada antes de qualquer await, para respeitar o limite de análises simultâneas.
+      const entry = { worker: null, done: false, cancelRequested: false, fatal: null };
+      this.running.set(id, entry);
+      this.#run(id, entry).catch((err) => {
+        this.running.delete(id);
+        this.#fail(id, err.message);
+        this.#pump();
+      });
     }
   }
 
@@ -88,12 +95,17 @@ export class ScanManager {
     this.store.appendLog(id, { level: 'error', message });
   }
 
-  async #run(id) {
+  async #run(id, entry) {
     const config = await this.store.readScanConfig(id);
+    if (entry.cancelRequested) {
+      this.running.delete(id);
+      this.store.updateScan(id, { status: 'cancelled', finishedAt: new Date().toISOString(), current: null });
+      this.#pump();
+      return;
+    }
     this.store.updateScan(id, { status: 'running', startedAt: new Date().toISOString() });
     const worker = new Worker(this.workerUrl, { workerData: config });
-    const entry = { worker, done: false, cancelRequested: false, fatal: null };
-    this.running.set(id, entry);
+    entry.worker = worker;
     worker.on('message', (message) => this.#onMessage(id, entry, message));
     worker.on('error', (err) => {
       entry.fatal = err?.stack || String(err);
@@ -107,7 +119,9 @@ export class ScanManager {
           if (entry.cancelRequested) {
             this.store.updateScan(id, { status: 'cancelled', finishedAt: new Date().toISOString(), current: null });
           } else {
-            this.#fail(id, entry.fatal ? `Falha na análise: ${entry.fatal.split('\n')[0]}` : `A análise terminou inesperadamente (código ${code}).`);
+            const where = scan.current?.path ? ` Último arquivo em leitura: ${scan.current.path}` : '';
+            const reason = entry.fatal ? `Falha na análise: ${entry.fatal.split('\n')[0]}` : `A análise terminou inesperadamente (código ${code}).`;
+            this.#fail(id, `${reason}${where}`);
           }
         }
       }
@@ -166,11 +180,12 @@ export class ScanManager {
     const entry = this.running.get(id);
     if (!entry) return false;
     entry.cancelRequested = true;
+    if (!entry.worker) return true; // ainda preparando: #run encerra antes de criar a thread
     entry.worker.postMessage({ type: 'cancel' });
-    // Se a thread estiver presa (ex.: arquivo muito grande), força o encerramento.
+    // Se a thread não terminar sozinha (ex.: arquivo enorme sendo lido), força o encerramento.
     setTimeout(() => {
       if (!entry.done) entry.worker.terminate();
-    }, 15000).unref();
+    }, 60000).unref();
     return true;
   }
 
@@ -179,10 +194,12 @@ export class ScanManager {
     const exits = [];
     for (const [id, entry] of this.running) {
       entry.cancelRequested = true;
-      exits.push(new Promise((resolve) => entry.worker.once('exit', resolve)));
       this.store.updateScan(id, { status: 'interrupted', finishedAt: new Date().toISOString(), current: null });
       entry.done = true;
-      entry.worker.terminate();
+      if (entry.worker) {
+        exits.push(new Promise((resolve) => entry.worker.once('exit', resolve)));
+        entry.worker.terminate();
+      }
     }
     await Promise.all(exits);
     await this.store.close();

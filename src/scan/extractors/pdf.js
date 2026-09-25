@@ -1,6 +1,15 @@
 // PDF: texto por página (pdf.js via unpdf) e metadados (autor, aplicativo, datas).
+//
+// PDFs danificados podem fazer o pdf.js falhar em tarefas internas sem nunca concluir a promessa
+// aguardada; por isso cada etapa tem tempo limite e uma página com defeito não impede as demais.
 import { getDocumentProxy } from 'unpdf';
 import { compact } from './ooxml.js';
+import { withTimeout } from '../errors.js';
+
+const OPEN_TIMEOUT = 60_000;
+const PAGE_TIMEOUT = 30_000;
+const META_TIMEOUT = 15_000;
+const MAX_PAGE_ERRORS = 5;
 
 export function isPdf(buf) {
   return buf.length > 5 && buf.toString('latin1', 0, 1024).includes('%PDF-');
@@ -20,21 +29,41 @@ export function pdfDate(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+async function pageText(pdf, number) {
+  const page = await pdf.getPage(number);
+  try {
+    const content = await page.getTextContent();
+    let text = '';
+    for (const item of content.items) {
+      if (typeof item.str !== 'string') continue;
+      text += item.str;
+      if (item.hasEOL) text += '\n';
+    }
+    return text;
+  } finally {
+    page.cleanup();
+  }
+}
+
 /**
  * Extrai o texto página a página, parando ao atingir maxChars.
- * Retorna { segments, metadata, truncated, encrypted }.
+ * Retorna { segments, metadata, truncated, encrypted, pageErrors }.
  */
 export async function pdfExtract(buf, { maxChars = 20_000_000, withText = true } = {}) {
   let pdf;
   try {
     // Cópia do buffer: o pdf.js pode transferir (e invalidar) o ArrayBuffer recebido.
-    pdf = await getDocumentProxy(new Uint8Array(buf), {
-      verbosity: 0,
-      isEvalSupported: false,
-      disableFontFace: true,
-      useSystemFonts: false,
-      stopAtErrors: false,
-    });
+    pdf = await withTimeout(
+      getDocumentProxy(new Uint8Array(buf), {
+        verbosity: 0,
+        isEvalSupported: false,
+        disableFontFace: true,
+        useSystemFonts: false,
+        stopAtErrors: false,
+      }),
+      OPEN_TIMEOUT,
+      'Tempo esgotado ao abrir o PDF (arquivo danificado?).',
+    );
   } catch (err) {
     if (err?.name === 'PasswordException') return { segments: [], metadata: {}, encrypted: true };
     throw err;
@@ -43,28 +72,31 @@ export async function pdfExtract(buf, { maxChars = 20_000_000, withText = true }
     const segments = [];
     let total = 0;
     let truncated = false;
+    let pageErrors = 0;
     if (withText) {
       for (let p = 1; p <= pdf.numPages; p++) {
         if (total >= maxChars) {
           truncated = true;
           break;
         }
-        const page = await pdf.getPage(p);
-        const content = await page.getTextContent();
-        let text = '';
-        for (const item of content.items) {
-          if (typeof item.str !== 'string') continue;
-          text += item.str;
-          if (item.hasEOL) text += '\n';
+        let text;
+        try {
+          text = await withTimeout(pageText(pdf, p), PAGE_TIMEOUT, `Tempo esgotado ao ler a página ${p} do PDF.`);
+        } catch (err) {
+          // Página com defeito: segue para as próximas; muitas falhas seguidas encerram a leitura.
+          pageErrors++;
+          truncated = true;
+          if (pageErrors >= MAX_PAGE_ERRORS || err?.code === 'ETIMEOUT') break;
+          continue;
         }
-        page.cleanup();
         total += text.length;
         if (text.trim()) segments.push({ label: `Página ${p}`, text });
       }
+      if (pageErrors && segments.length === 0) throw new Error(`Não foi possível ler as páginas do PDF (${pageErrors} com defeito).`);
     }
     let metadata = {};
     try {
-      const { info } = await pdf.getMetadata();
+      const { info } = await withTimeout(pdf.getMetadata(), META_TIMEOUT, 'Tempo esgotado ao ler os metadados do PDF.');
       metadata = compact({
         author: clean(info?.Author),
         title: clean(info?.Title),
@@ -75,9 +107,9 @@ export async function pdfExtract(buf, { maxChars = 20_000_000, withText = true }
     } catch {
       // metadados são opcionais
     }
-    return { segments, metadata, truncated, pages: pdf.numPages };
+    return { segments, metadata, truncated, pageErrors, pages: pdf.numPages };
   } finally {
-    await pdf.loadingTask?.destroy?.().catch(() => {});
+    await withTimeout(Promise.resolve(pdf.loadingTask?.destroy?.()), 5000).catch(() => {});
   }
 }
 

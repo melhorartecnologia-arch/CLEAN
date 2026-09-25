@@ -157,7 +157,7 @@ export async function render(root, { params, query }) {
     } else if (scan.status === 'cancelled') {
       content = html`<div class="alert">${icon('info')}<div><b>Análise cancelada.</b> Os resultados encontrados até o cancelamento estão abaixo.</div></div>`;
     }
-    const warnings = (scan.log || []).filter((l) => l.level === 'warn' || l.level === 'error');
+    const warnings = (scan.log || []).filter((l) => l.level === 'warn');
     if (warnings.length) {
       content = html`${content}<div class="alert">${icon('alert')}<div><b>${plural(warnings.length, 'aviso', 'avisos')} durante a análise.</b> ${warnings.at(-1).message}
           ${warnings.length > 1 ? html`<a href="#" data-action="show-log">Ver todos</a>` : ''}</div></div>`;

@@ -59,8 +59,25 @@ function utf16Guess(buf) {
   return null;
 }
 
+/**
+ * Remove uma sequência UTF-8 incompleta no fim do buffer (leitura parcial de um arquivo grande),
+ * para que o corte no meio de um caractere não faça o texto todo parecer Windows-1252.
+ */
+function trimPartialUtf8(buf) {
+  let i = buf.length - 1;
+  let continuation = 0;
+  while (i >= 0 && continuation < 3 && (buf[i] & 0xc0) === 0x80) {
+    i--;
+    continuation++;
+  }
+  if (i < 0) return buf;
+  const lead = buf[i];
+  const needed = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+  return needed > continuation + 1 ? buf.subarray(0, i) : buf;
+}
+
 /** Decodifica um buffer de texto escolhendo a codificação mais provável. */
-export function decodeText(buf) {
+export function decodeText(buf, { partial = false } = {}) {
   if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
     return decoderFor('utf-8').decode(buf.subarray(3));
   }
@@ -69,7 +86,7 @@ export function decodeText(buf) {
   const utf16 = utf16Guess(buf);
   if (utf16) return decoderFor(utf16).decode(buf);
   try {
-    return utf8Fatal.decode(buf);
+    return utf8Fatal.decode(partial ? trimPartialUtf8(buf) : buf);
   } catch {
     return decoderFor('windows-1252').decode(buf);
   }

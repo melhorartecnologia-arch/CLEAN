@@ -2,7 +2,7 @@
 import fs from 'node:fs/promises';
 import { Router } from 'express';
 import { HttpError, parseRepository, normalizeRepoPath } from './validate.js';
-import { friendlyError } from '../scan/scanner.js';
+import { friendlyError } from '../scan/errors.js';
 
 export function repositoriesRouter({ store }) {
   const router = Router();

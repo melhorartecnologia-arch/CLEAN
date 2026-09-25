@@ -151,7 +151,7 @@ test('fluxo completo pela API', async () => {
 
   const csv = await api('GET', `/api/scans/${scan.data.id}/export.csv`);
   const csvText = Buffer.from(csv.data).toString('utf8');
-  assert.ok(csvText.startsWith('﻿Repositório;Arquivo;Termo'));
+  assert.ok(csvText.startsWith('\uFEFFRepositório;Arquivo;Termo'));
   assert.ok(csvText.includes("'=HYPERLINK"), 'fórmulas são neutralizadas no CSV');
   const html = await api('GET', `/api/scans/${scan.data.id}/export.html`);
   const htmlText = Buffer.from(html.data).toString('utf8');

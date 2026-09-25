@@ -130,7 +130,7 @@ export function rtfExtract(buf) {
     if (next === '~' || next === '_' || next === '-' || next === '\r' || next === '\n') {
       i += 2;
       groupStart = false;
-      if (next === '~') putText(' ');
+      if (next === '~') putText('\u00a0');
       else if (next === '_') putText('-');
       else if (next !== '-') putText('\n');
       continue;

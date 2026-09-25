@@ -3,9 +3,11 @@ import { loadConfig } from './config.js';
 import { Store } from './store.js';
 import { ScanManager } from './scan/manager.js';
 import { createApp } from './app.js';
+import { cleanupTempFiles } from './scan/powershell.js';
 
 const config = loadConfig();
 const store = await new Store(config.dataDir).init();
+await cleanupTempFiles();
 const manager = new ScanManager(store, { maxConcurrent: config.maxConcurrentScans });
 const app = createApp({ store, manager, config });
 
@@ -22,6 +24,11 @@ const server = app.listen(config.port, config.host, () => {
 server.on('error', (err) => {
   console.error(`[CLEAN] Não foi possível iniciar o servidor: ${err.message}`);
   process.exit(1);
+});
+
+// Um erro solto não deve derrubar o servidor (as análises rodam em threads separadas).
+process.on('unhandledRejection', (reason) => {
+  console.error('[CLEAN] Erro não tratado:', reason);
 });
 
 let closing = false;

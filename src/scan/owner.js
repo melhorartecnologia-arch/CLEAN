@@ -49,7 +49,7 @@ export class OwnerResolver {
   }
 
   /** Resolve os proprietários. Retorna Map(caminho -> { owner, error }). */
-  async resolve(paths) {
+  async resolve(paths, { signal } = {}) {
     const result = new Map();
     if (paths.length === 0) return result;
     if (this.platform !== 'win32') {
@@ -70,10 +70,10 @@ export class OwnerResolver {
     for (let i = 0; i < paths.length; i += this.batchSize) {
       const batch = paths.slice(i, i + this.batchSize);
       try {
-        const rows = parseJsonLines(await runPowerShell(OWNER_SCRIPT, { input: batch, timeoutMs: 5 * 60 * 1000 }));
+        const rows = parseJsonLines(await runPowerShell(OWNER_SCRIPT, { input: batch, timeoutMs: 5 * 60 * 1000, signal }));
         for (const row of rows) result.set(row.p, { owner: row.o || null, error: row.e || null });
       } catch (err) {
-        this.failure = err.message;
+        if (!signal?.aborted) this.failure = err.message;
         for (const p of batch) result.set(p, { owner: null, error: err.message });
       }
     }

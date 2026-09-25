@@ -189,3 +189,52 @@ test('gerenciador executa a análise em uma worker thread e grava os resultados'
   assert.equal(reloaded.getScan(scan.id).status, 'completed');
   await reloaded.close();
 });
+
+test('expressão regular com retrocesso excessivo não trava a análise', async () => {
+  const dir = path.join(root, 'Lento');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'a.txt'), `${'a'.repeat(40)}! confidencial`);
+  const messages = [];
+  const scanner = new Scanner(
+    {
+      repositories: [{ id: 'l', name: 'Lento', path: dir }],
+      terms: [
+        { id: 'lenta', type: 'regex', value: '(a+)+$', label: 'Lenta' },
+        { id: 'conf', type: 'text', value: 'confidencial' },
+      ],
+      options: { checkName: false },
+      regexTimeoutMs: 300,
+    },
+    (m) => messages.push(m),
+  );
+  const started = Date.now();
+  const stats = await scanner.run();
+  assert.ok(Date.now() - started < 10000, 'terminou dentro do tempo');
+  assert.equal(stats.filesMatched, 1, 'os demais termos continuam sendo encontrados');
+  const errors = messages.filter((m) => m.type === 'errors').flatMap((m) => m.items);
+  assert.match(errors[0].message, /Tempo limite/);
+});
+
+test('a fila respeita o limite de análises simultâneas e permite cancelar as que aguardam', async () => {
+  const store = await new Store(path.join(root, 'data-fila')).init();
+  const repo = store.createRepository({ name: 'Compartilhado', path: repoDir, exclude: ['Antigo'] });
+  const list = store.createList({ name: 'RH', terms: TERMS.map(({ listName, ...t }) => t) });
+  const manager = new ScanManager(store, { maxConcurrent: 1 });
+  const scans = [];
+  for (let i = 0; i < 3; i++) scans.push(await manager.start({ repositoryIds: [repo.id], listIds: [list.id] }));
+  assert.equal(manager.running.size, 1);
+  assert.equal(manager.cancel(scans[2].id), true);
+  let maxRunning = 0;
+  for (let i = 0; i < 300; i++) {
+    const statuses = scans.map((s) => store.getScan(s.id).status);
+    maxRunning = Math.max(maxRunning, statuses.filter((st) => st === 'running').length);
+    if (statuses.every((st) => !['queued', 'running'].includes(st))) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.equal(maxRunning, 1);
+  assert.deepEqual(
+    scans.map((s) => store.getScan(s.id).status),
+    ['completed', 'completed', 'cancelled'],
+  );
+  await store.close();
+});

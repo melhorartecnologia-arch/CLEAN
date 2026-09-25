@@ -2,11 +2,18 @@
 // registros do relatório (apenas arquivos com ocorrências) com o último usuário de cada arquivo.
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import vm from 'node:vm';
 import { Matcher } from './matcher.js';
 import { walk, compileExclusions, DEFAULT_EXCLUDES } from './walker.js';
 import { extractFile } from './extractors/index.js';
 import { OwnerResolver } from './owner.js';
 import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
+import { friendlyError, withTimeout } from './errors.js';
+
+// Tempo máximo para ler um arquivo (o que passar disso é registrado como erro e a análise segue).
+const FILE_TIMEOUT = 5 * 60 * 1000;
+
+export { friendlyError };
 
 export const DEFAULT_OPTIONS = {
   checkName: true,
@@ -19,21 +26,22 @@ export const DEFAULT_OPTIONS = {
   maxSamples: 3,
 };
 
-const ERROR_MESSAGES = {
-  EACCES: 'Acesso negado',
-  EPERM: 'Acesso negado (permissão)',
-  ENOENT: 'Não encontrado (pode ter sido removido durante a análise)',
-  EBUSY: 'Arquivo em uso ou bloqueado',
-  ENAMETOOLONG: 'Caminho muito longo',
-  ELOOP: 'Laço de atalhos',
-  EIO: 'Erro de leitura (E/S)',
-  ETIMEDOUT: 'Tempo esgotado ao acessar a rede',
-  EHOSTUNREACH: 'Servidor inacessível',
-};
-
-export function friendlyError(err) {
-  const base = ERROR_MESSAGES[err?.code];
-  return base ? `${base} (${err.code})` : String(err?.message || err);
+/**
+ * Executa uma função com tempo limite. Uma expressão regular com retrocesso excessivo não pode
+ * ser interrompida de outra forma dentro da mesma thread; o módulo vm consegue.
+ */
+export function createGuard(timeoutMs) {
+  const holder = { fn: null };
+  const context = vm.createContext(holder);
+  const script = new vm.Script('fn()');
+  return (fn) => {
+    holder.fn = fn;
+    try {
+      script.runInContext(context, { timeout: timeoutMs });
+    } finally {
+      holder.fn = null;
+    }
+  };
 }
 
 function iso(date) {
@@ -73,7 +81,8 @@ export class Scanner {
   constructor(config, emit, { ownerResolver, auditQuery = queryAuditEvents } = {}) {
     this.repositories = config.repositories || [];
     this.options = { ...DEFAULT_OPTIONS, ...(config.options || {}) };
-    this.matcher = new Matcher(config.terms || [], { maxSamples: this.options.maxSamples });
+    this.matcher = new Matcher(config.terms || [], { maxSamples: this.options.maxSamples, guard: createGuard(config.regexTimeoutMs || 30000) });
+    this.abort = new AbortController();
     this.emit = emit;
     this.ownerResolver = ownerResolver || new OwnerResolver();
     this.auditQuery = auditQuery;
@@ -81,18 +90,21 @@ export class Scanner {
     this.cancelled = false;
     this.seq = 0;
     this.pendingOwners = [];
+    this.inFlight = new Set(); // arquivos sendo lidos no momento (para mensagens de erro)
     this.pendingErrors = [];
     this.lastProgress = 0;
     this.current = null;
     this.auditCache = new Map();
     const maxBytes = Math.max(1, Number(this.options.maxFileSizeMB) || 50) * 1024 * 1024;
     this.limits = { maxBytes, maxChars: 20_000_000 };
+    this.fileTimeoutMs = config.fileTimeoutMs || FILE_TIMEOUT;
     this.modifiedAfter = this.options.modifiedAfter ? new Date(this.options.modifiedAfter).getTime() : null;
     if (Number.isNaN(this.modifiedAfter)) this.modifiedAfter = null;
   }
 
   cancel() {
     this.cancelled = true;
+    this.abort.abort();
   }
 
   log(level, message) {
@@ -162,10 +174,13 @@ export class Scanner {
         } else if (entry.type === 'dir') {
           this.stats.directories++;
         } else {
+          this.inFlight.add(entry.path);
           try {
             await this.processFile(repo, entry, auditIndex);
           } catch (err) {
             this.error(entry.path, err);
+          } finally {
+            this.inFlight.delete(entry.path);
           }
         }
         this.progress();
@@ -220,24 +235,31 @@ export class Scanner {
     }
     const { options, matcher } = this;
     const matches = [];
+    const slowRegex = () => this.error(entry.path, 'Tempo limite ao procurar as expressões regulares neste arquivo (possível retrocesso excessivo); resultado parcial.');
     if (options.checkName) {
       const label = options.nameTarget === 'path' ? 'Caminho' : 'Nome do arquivo';
       const text = options.nameTarget === 'path' ? entry.relativePath : entry.name;
       matches.push(...matcher.match([{ text, label }], 'name'));
+      if (matcher.timedOut) slowRegex();
     }
     let content = null;
     if (options.checkContent) {
-      content = await extractFile(entry.path, { size: st.size, limits: this.limits });
+      content = await withTimeout(
+        extractFile(entry.path, { size: st.size, limits: this.limits }),
+        this.fileTimeoutMs,
+        'Tempo esgotado ao ler o conteúdo do arquivo.',
+      ).catch((err) => ({ type: path.extname(entry.name).slice(1), status: 'error', segments: [], metadata: {}, note: friendlyError(err) }));
       this.countContent(content, st.size);
       if (content.status === 'error') this.error(entry.path, content.note);
       matches.push(...matcher.match(content.segments, 'content'));
+      if (matcher.timedOut) slowRegex();
       content.segments = null;
     }
     if (matches.length === 0) return;
 
     if (!content || content.status === 'skipped-size') {
       // Somente os metadados (para o "salvo por último por"), sem ler o texto.
-      const meta = await extractFile(entry.path, { size: st.size, limits: this.limits, withText: false }).catch(() => null);
+      const meta = await withTimeout(extractFile(entry.path, { size: st.size, limits: this.limits, withText: false }), this.fileTimeoutMs).catch(() => null);
       content = { ...(content || {}), type: content?.type || meta?.type, metadata: meta?.metadata || {} };
     }
     const occurrences = matches.reduce((sum, m) => sum + m.count, 0);
@@ -309,11 +331,12 @@ export class Scanner {
   async flushOwners() {
     while (this.pendingOwners.length > 0) {
       const batch = this.pendingOwners.splice(0, 400);
-      const owners = await this.ownerResolver.resolve(batch.map((r) => r.path));
+      // Ao cancelar, os registros são entregues sem esperar o proprietário (nada se perde).
+      const owners = this.cancelled ? new Map() : await this.ownerResolver.resolve(batch.map((r) => r.path), { signal: this.abort.signal });
       for (const record of batch) {
         const info = owners.get(record.path);
         record.owner = info?.owner || null;
-        record.ownerError = info?.error || null;
+        record.ownerError = info?.error || (this.cancelled ? 'Análise cancelada antes de identificar o proprietário.' : null);
       }
       this.finishRecords(batch);
     }

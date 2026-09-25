@@ -13,15 +13,28 @@ export function openOle(buf) {
   return CFB.read(buf, { type: 'buffer' });
 }
 
+/**
+ * Fluxo na raiz do contêiner. Objetos incorporados (ex.: um documento do Word dentro de uma
+ * planilha) ficam em subpastas e não podem ser confundidos com o documento principal.
+ */
 function stream(cfb, name) {
-  const entry = CFB.find(cfb, name);
+  const entry = CFB.find(cfb, `/${name}`);
   if (!entry || entry.type !== 2 || !entry.content || !entry.content.length) return null;
   return Buffer.isBuffer(entry.content) ? entry.content : Buffer.from(entry.content);
 }
 
+/** Nomes das entradas diretamente na raiz. */
+function rootNames(cfb) {
+  const names = new Set();
+  cfb.FullPaths.forEach((full, i) => {
+    if (/^[^/]*\/[^/]+$/.test(full)) names.add(cfb.FileIndex[i].name);
+  });
+  return names;
+}
+
 /** Identifica o conteúdo do contêiner OLE. */
 export function detectOle(cfb) {
-  const names = new Set(cfb.FileIndex.map((e) => e.name));
+  const names = rootNames(cfb);
   if (names.has('EncryptedPackage') || names.has('EncryptionInfo')) return 'encrypted';
   if (names.has('WordDocument')) return 'doc';
   if (names.has('Workbook') || names.has('Book')) return 'xls';
@@ -295,7 +308,8 @@ function excelText(cfb) {
       sheet.line = line;
       sheet.first = true;
     }
-    sheet.parts.push(sheet.first ? String(value) : `\t${value}`);
+    const text = String(value).replace(/\r\n|[\r\n]/g, ' '); // quebras dentro da célula
+    sheet.parts.push(sheet.first ? text : `\t${text}`);
     sheet.first = false;
   };
 
@@ -380,7 +394,7 @@ function excelText(cfb) {
 // PowerPoint 97-2003 — [MS-PPT]
 
 function powerPointText(cfb) {
-  if (CFB.find(cfb, 'EncryptedSummary')) return { encrypted: true };
+  if (stream(cfb, 'EncryptedSummary')) return { encrypted: true };
   const doc = stream(cfb, 'PowerPoint Document');
   if (!doc) return null;
   const parts = [];

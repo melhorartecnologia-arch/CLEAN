@@ -58,12 +58,12 @@ function Get-WinEvent {
   }
   # Mais recentes primeiro, como o Get-WinEvent real
   ev 5145 '2026-09-20T16:00:00Z' @('S-9', 'svc-backup', 'EMPRESA', '0x9', 'File', '10.0.0.9', '5000', '\\\\*\\Financeiro', '\\??\\E:\\Shares\\Financeiro', 'RH\\salarios.xlsx', '0x120089', '%%4416', '')
-  ev 4663 '2026-09-20T15:30:00Z' @('S-8', 'svc-av', 'EMPRESA', '0x8', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\salarios.xlsx', '0x10', '%%4416', '0x1', '0x4', 'av.exe', '')
-  ev 5145 '2026-09-20T15:00:00Z' @('S-1', 'ana', 'EMPRESA', '0x1', 'File', '10.0.0.5', '5000', '\\\\*\\Financeiro', '\\??\\E:\\Shares\\Financeiro', 'RH\\salarios.xlsx', '0x120089', '%%4416', '')
-  ev 4663 '2026-09-20T14:00:00Z' @('S-2', 'bruno', 'EMPRESA', '0x2', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\salarios.xlsx', '0x10', '%%4417', '0x2', '0x4', 'EXCEL.EXE', '')
-  ev 4663 '2026-09-20T13:00:00Z' @('S-3', 'SERVIDOR$', 'EMPRESA', '0x3', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\outro.docx', '0x10', '%%4417', '0x2', '0x4', 'x.exe', '')
+  ev 4663 '2026-09-20T15:30:00Z' @('S-8', 'svc-av', 'EMPRESA', '0x8', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\salarios.xlsx', '0x10', '%%4416', 0x1, '0x4', 'av.exe', '')
+  ev 5145 '2026-09-20T15:00:00Z' @('S-1', 'ana', 'EMPRESA', '0x1', 'File', '10.0.0.5', '5000', '\\\\*\\Financeiro', '\\??\\E:\\Shares\\Financeiro', 'RH\\salarios.xlsx', 0x120089, '%%4416', '')
+  ev 4663 '2026-09-20T14:00:00Z' @('S-2', 'bruno', 'EMPRESA', '0x2', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\salarios.xlsx', '0x10', '%%4417', 0x2, '0x4', 'EXCEL.EXE', '')
+  ev 4663 '2026-09-20T13:00:00Z' @('S-3', 'SERVIDOR$', 'EMPRESA', '0x3', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\outro.docx', '0x10', '%%4417', 0x2, '0x4', 'x.exe', '')
   ev 4663 '2026-09-20T12:00:00Z' @('S-4', 'carla', 'EMPRESA', '0x4', 'Security', 'Key', '\\REGISTRY\\MACHINE\\X', '0x10', '%%4417', '0x2', '0x4', 'x.exe', '')
-  ev 4663 '2026-09-19T12:00:00Z' @('S-5', 'daniel', 'EMPRESA', '0x5', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\salarios.xlsx', '0x10', '%%1537', '0x10000', '0x4', 'explorer.exe', '')
+  ev 4663 '2026-09-19T12:00:00Z' @('S-5', 'daniel', 'EMPRESA', '0x5', 'Security', 'File', 'E:\\Shares\\Financeiro\\RH\\salarios.xlsx', '0x10', '%%1537', 0x10000, '0x4', 'explorer.exe', '')
   ev 4663 '2026-09-18T12:00:00Z' @('S-6', 'eva', 'EMPRESA', '0x6', 'Security', 'File', 'D:\\Local\\planilha.xlsx', '0x10', '%%4417', '0x2', '0x4', 'EXCEL.EXE', '')
 }
 `;

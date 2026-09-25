@@ -196,7 +196,7 @@ export function exportCsv(records) {
     const extra = [SOURCE_LABELS[r.lastUserSource] || '', r.owner || '', r.metadata?.lastModifiedBy || '', auditText(r.audit)];
     for (const row of matchRows(r)) lines.push([...row, ...extra].map(csvCell).join(';'));
   }
-  return `﻿${lines.join('\r\n')}\r\n`;
+  return `\uFEFF${lines.join('\r\n')}\r\n`;
 }
 
 // -- HTML ----------------------------------------------------------------------------------------

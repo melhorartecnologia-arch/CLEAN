@@ -19,7 +19,8 @@ export function encodeCommand(script) {
  * Executa o script passando `input` (linhas) no arquivo indicado por $env:CLEAN_IN e devolve as
  * linhas gravadas pelo script em $env:CLEAN_OUT. Variáveis extras podem ser passadas em `env`.
  */
-export async function runPowerShell(script, { input = [], env = {}, timeoutMs = 10 * 60 * 1000 } = {}) {
+export async function runPowerShell(script, { input = [], env = {}, timeoutMs = 10 * 60 * 1000, signal } = {}) {
+  if (signal?.aborted) throw new Error('Operação cancelada.');
   const id = crypto.randomUUID();
   const inFile = path.join(os.tmpdir(), `clean-${id}-in.txt`);
   const outFile = path.join(os.tmpdir(), `clean-${id}-out.txt`);
@@ -36,24 +37,48 @@ export async function runPowerShell(script, { input = [], env = {}, timeoutMs = 
         if (stderr.length < 8000) stderr += chunk;
       });
       const timer = setTimeout(() => child.kill(), timeoutMs);
+      const onAbort = () => child.kill();
+      signal?.addEventListener('abort', onAbort, { once: true });
       child.on('error', (err) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         reject(new Error(`Não foi possível executar o PowerShell (${powershellPath()}): ${err.message}`));
       });
       child.on('close', (code) => {
         clearTimeout(timer);
-        if (code === 0) resolve();
+        signal?.removeEventListener('abort', onAbort);
+        if (signal?.aborted) reject(new Error('Operação cancelada.'));
+        else if (code === 0) resolve();
         else reject(new Error(`PowerShell terminou com código ${code}: ${cleanStderr(stderr)}`));
       });
     });
     const raw = await fs.readFile(outFile, 'utf8').catch(() => '');
     return raw
-      .replace(/^﻿/, '')
+      .replace(/^\uFEFF/, '')
       .split(/\r?\n/)
       .filter((line) => line.trim());
   } finally {
     await Promise.all([fs.rm(inFile, { force: true }), fs.rm(outFile, { force: true })]);
   }
+}
+
+/**
+ * Remove arquivos temporários de execuções anteriores que não terminaram normalmente (ex.: servidor
+ * encerrado no meio de uma análise). Eles contêm caminhos de arquivos e nomes de usuários.
+ */
+export async function cleanupTempFiles(maxAgeMs = 60 * 60 * 1000) {
+  const dir = os.tmpdir();
+  const names = await fs.readdir(dir).catch(() => []);
+  const now = Date.now();
+  await Promise.all(
+    names
+      .filter((name) => /^clean-[0-9a-f-]{36}-(in|out)\.txt$/.test(name))
+      .map(async (name) => {
+        const file = path.join(dir, name);
+        const st = await fs.stat(file).catch(() => null);
+        if (st && now - st.mtimeMs > maxAgeMs) await fs.rm(file, { force: true }).catch(() => {});
+      }),
+  );
 }
 
 function cleanStderr(text) {

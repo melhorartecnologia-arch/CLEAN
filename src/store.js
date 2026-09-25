@@ -36,6 +36,7 @@ export class Store {
     this.saveTimer = null;
     this.appendChains = new Map();
     this.resultCache = new Map();
+    this.readChains = new Map();
   }
 
   async init() {
@@ -226,8 +227,24 @@ export class Store {
     await Promise.all([...this.appendChains.entries()].filter(([file]) => file.startsWith(dir)).map(([, chain]) => chain));
   }
 
-  /** Lê um arquivo NDJSON de forma incremental (útil durante a análise, quando ele ainda cresce). */
-  async #readNdjson(id, file) {
+  /**
+   * Lê um arquivo NDJSON de forma incremental (útil durante a análise, quando ele ainda cresce).
+   * Leituras do mesmo arquivo são enfileiradas: duas leituras simultâneas partiriam do mesmo
+   * ponto do cache e duplicariam (ou pulariam) registros.
+   */
+  #readNdjson(id, file) {
+    const key = `${id}/${file}`;
+    const previous = this.readChains.get(key) || Promise.resolve();
+    const next = previous.catch(() => {}).then(() => this.#readNdjsonNow(id, file));
+    this.readChains.set(key, next);
+    const release = () => {
+      if (this.readChains.get(key) === next) this.readChains.delete(key);
+    };
+    next.then(release, release);
+    return next;
+  }
+
+  async #readNdjsonNow(id, file) {
     const target = path.join(this.scanDir(id), file);
     const key = `${id}/${file}`;
     let st;

@@ -212,3 +212,110 @@ test('utilitários de texto', () => {
   assert.equal(pdfDate('D:2024'), '2024-01-01T00:00:00.000Z');
   assert.equal(pdfDate('lixo'), null);
 });
+
+// ---------- Regressões encontradas na revisão ----------
+
+test('objeto incorporado não muda o tipo nem os metadados do arquivo OLE', async () => {
+  const r = await extract('embutido.xls');
+  assert.equal(r.type, 'xls');
+  assert.ok(allText(r).includes('111.444.777-35'), 'as células da planilha são lidas');
+  assert.equal(r.metadata.lastModifiedBy, 'Carlos Financeiro');
+});
+
+test('caixa de texto do Word não é contada duas vezes', async () => {
+  const text = allText(await extract('caixa-texto.docx'));
+  assert.equal(text.match(/SEGREDO/gi).length, 1);
+});
+
+for (const file of ['multilinha.xlsx', 'multilinha.xls', 'multilinha.ods']) {
+  test(`célula com várias linhas não desloca a numeração: ${file}`, async () => {
+    const lines = (await extract(file)).segments[0].text.split('\n');
+    assert.match(lines[3], /SEGREDO/i, JSON.stringify(lines));
+  });
+}
+
+test('planilha com prefixo de namespace (Open XML SDK)', async () => {
+  const text = allText(await extract('prefixo.xlsx'));
+  assert.ok(text.includes('CPF 529.982.247-25 CONFIDENCIAL'), text);
+});
+
+test('ZIP do Windows Explorer: nomes na página de código 850', async () => {
+  const r = await extract('explorer.zip');
+  assert.equal(r.segments[0].text, 'Relatório de Salários.xlsx');
+});
+
+test('página .mht com quoted-printable', async () => {
+  const r = await extract('pagina.mht');
+  assert.equal(r.type, 'mht');
+  assert.ok(allText(r).includes('Relação de salários: João da Silva CONFIDENCIAL'), allText(r));
+});
+
+test('e-mail .eml com corpo em base64, assunto codificado e anexo', async () => {
+  const file = path.join(tmp, 'mensagem.eml');
+  const body = Buffer.from('Segue a folha de pagamento. CPF 529.982.247-25', 'utf8').toString('base64');
+  fs.writeFileSync(
+    file,
+    [
+      'From: =?UTF-8?Q?Jo=C3=A3o_Silva?= <joao@empresa.com.br>',
+      'To: rh@empresa.com.br',
+      'Subject: =?UTF-8?B?U2Fsw6FyaW9zIGRlIHNldGVtYnJv?=',
+      'Date: Thu, 25 Sep 2026 10:00:00 -0300',
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/mixed; boundary="XYZ"',
+      '',
+      '--XYZ',
+      'Content-Type: multipart/alternative; boundary="ALT"',
+      '',
+      '--ALT',
+      'Content-Type: text/plain; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      body,
+      '--ALT',
+      'Content-Type: text/html; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      Buffer.from('<p>Segue a folha de pagamento. CPF 529.982.247-25</p>').toString('base64'),
+      '--ALT--',
+      '--XYZ',
+      'Content-Type: application/vnd.ms-excel; name="folha.xls"',
+      'Content-Disposition: attachment; filename*=UTF-8\'\'sal%C3%A1rios%202026.xls',
+      'Content-Transfer-Encoding: base64',
+      '',
+      'AAAA',
+      '--XYZ--',
+      '',
+    ].join('\r\n'),
+  );
+  const r = await extract(file);
+  assert.equal(r.type, 'eml');
+  const text = allText(r);
+  assert.equal(text.match(/folha de pagamento/g).length, 1, 'multipart/alternative gera um único texto');
+  assert.ok(text.includes('Assunto: Salários de setembro'));
+  assert.ok(text.includes('salários 2026.xls'));
+  assert.equal(r.metadata.title, 'Salários de setembro');
+  assert.match(r.metadata.author, /João Silva/);
+});
+
+test('arquivo que não pode ser aberto vira erro de leitura (o nome continua valendo)', async () => {
+  const r = await extractFile(path.join(tmp, 'nao-existe.docx'), { size: 10 });
+  assert.equal(r.status, 'error');
+  assert.match(r.note, /Não encontrado/);
+});
+
+test('texto grande cortado no meio de um caractere continua em UTF-8', async () => {
+  const file = path.join(tmp, 'grande-utf8.txt');
+  fs.writeFileSync(file, 'salário ação João '.repeat(100));
+  // 1001 bytes: o corte cai no meio de um caractere de 2 bytes
+  const r = await extract(file, { limits: { maxBytes: 1001, maxChars: 1e7 } });
+  assert.equal(r.status, 'partial');
+  assert.ok(r.segments[0].text.startsWith('salário ação João'), r.segments[0].text.slice(0, 40));
+});
+
+test('metadados de arquivos grandes demais para o conteúdo', async () => {
+  const limits = { maxBytes: 1000, maxChars: 1e7, maxMetadataBytes: 1e8 };
+  const full = await extract('doc.docx', { limits });
+  assert.equal(full.status, 'skipped-size');
+  const meta = await extract('doc.docx', { limits, withText: false });
+  assert.equal(meta.metadata.lastModifiedBy, 'Marcos Revisor');
+});

@@ -61,6 +61,20 @@ function toText(xml) {
   return tidyParagraphs(xmlToText(xml, RULES));
 }
 
+// Planilhas: cada linha da planilha é uma linha de texto; parágrafos e quebras dentro de uma
+// célula viram espaço para não deslocar a numeração das linhas.
+const SHEET_RULES = {
+  ...RULES,
+  close: { 'text:p': ' ', 'text:h': ' ', 'table:table-cell': '\t', 'table:table-row': '\n' },
+  empty: { ...RULES.empty, 'text:line-break': ' ' },
+};
+
+function sheetToText(xml) {
+  return xmlToText(xml, SHEET_RULES)
+    .replace(/ +\t/g, '\t')
+    .replace(/[ \t]+\n/g, '\n');
+}
+
 /** A numeração de linhas só é confiável se não houver conteúdo após um bloco enorme de linhas vazias. */
 function exactRows(tableXml) {
   for (const m of tableXml.matchAll(/table:number-rows-repeated="(\d+)"/g)) {
@@ -76,7 +90,7 @@ export function odfSegments(zip, kind) {
     const segments = [];
     for (const m of xml.matchAll(/<table:table\b([^>]*)>([\s\S]*?)<\/table:table>/g)) {
       const name = decodeXmlEntities(/\btable:name="([^"]*)"/.exec(m[1])?.[1] || '');
-      segments.push({ label: `Planilha "${name}"`, text: toText(m[2]), lines: exactRows(m[2]) });
+      segments.push({ label: `Planilha "${name}"`, text: sheetToText(m[2]), lines: exactRows(m[2]) });
     }
     return segments;
   }

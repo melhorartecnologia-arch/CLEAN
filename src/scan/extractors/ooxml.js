@@ -25,8 +25,10 @@ export function detectOoxml(zip) {
   return null;
 }
 
+// mc:Fallback repete o conteúdo de mc:Choice (ex.: caixas de texto em VML) e contaria em dobro.
 const WORD_RULES = {
   text: ['w:t', 'w:delText'],
+  skip: ['mc:Fallback'],
   close: { 'w:p': '\u0001', 'w:tc': '\t', 'w:tr': '\n' }, // \u0001: fim de parágrafo (ver tidyParagraphs)
   empty: { 'w:tab': '\t', 'w:br': '\n', 'w:cr': '\n', 'w:noBreakHyphen': '-' },
 };
@@ -54,6 +56,7 @@ export function docxSegments(zip) {
 
 const DRAWING_RULES = {
   text: ['a:t', 'p:text'],
+  skip: ['mc:Fallback'],
   close: { 'a:p': '\u0001', 'a:tc': '\t', 'a:tr': '\n' },
   empty: { 'a:br': '\n' },
 };
@@ -94,12 +97,13 @@ export function pptxSegments(zip) {
   return segments;
 }
 
-const CELL_RE = /<row\b([^>]*?)(\/?)>|<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+// As expressões aceitam prefixo de namespace opcional (<x:c>, <x:row>...), usado por alguns geradores.
+const CELL_RE = /<(?:\w+:)?row\b([^>]*?)(\/?)>|<(?:\w+:)?c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?c>)/g;
 const ROW_NUM_RE = /\br="(\d+)"/;
 const CELL_TYPE_RE = /\bt="([^"]*)"/;
-const V_RE = /<v>([^<]*)<\/v>/;
-const T_RE = /<t(?:\s[^>]*)?>([^<]*)<\/t>/g;
-const PHONETIC_RE = /<rPh\b[\s\S]*?<\/rPh>/g;
+const V_RE = /<(?:\w+:)?v>([^<]*)<\/(?:\w+:)?v>/;
+const T_RE = /<(?:\w+:)?t(?:\s[^>]*)?>([^<]*)<\/(?:\w+:)?t>/g;
+const PHONETIC_RE = /<(?:\w+:)?rPh\b[\s\S]*?<\/(?:\w+:)?rPh>/g;
 
 function richText(xml) {
   let out = '';
@@ -111,7 +115,7 @@ function sharedStrings(zip, path) {
   const xml = path ? zip.text(path) : null;
   if (!xml) return [];
   const list = [];
-  const re = /<si>([\s\S]*?)<\/si>|<si\/>/g;
+  const re = /<(?:\w+:)?si>([\s\S]*?)<\/(?:\w+:)?si>|<(?:\w+:)?si\/>/g;
   let m;
   while ((m = re.exec(xml)) !== null) list.push(m[1] ? richText(m[1]) : '');
   return list;
@@ -154,6 +158,8 @@ function sheetText(xml, sst) {
       value = decodeXmlEntities(V_RE.exec(inner)?.[1] || '');
     }
     if (!value) continue;
+    // Quebras de linha dentro da célula (Alt+Enter) não podem deslocar a numeração das linhas.
+    value = value.replace(/\r\n|[\r\n]/g, ' ');
     out.push(firstCell ? value : `\t${value}`);
     firstCell = false;
   }
@@ -167,11 +173,11 @@ export function xlsxSegments(zip) {
   let sstPath = null;
   for (const rel of rels.values()) if (rel.type.endsWith('/sharedStrings')) sstPath = rel.target;
   const sst = sharedStrings(zip, sstPath || (zip.has('xl/sharedStrings.xml') ? 'xl/sharedStrings.xml' : null));
-  const re = /<sheet\b([^>]*)\/?>/g;
+  const re = /<(?:\w+:)?sheet\b([^>]*)\/?>/g;
   let m;
   while ((m = re.exec(wb)) !== null) {
     const name = decodeXmlEntities(/\bname="([^"]*)"/.exec(m[1])?.[1] || '');
-    const rid = /\br:id="([^"]*)"/.exec(m[1])?.[1];
+    const rid = /\s\w+:id="([^"]*)"/.exec(m[1])?.[1];
     const rel = rid && rels.get(rid);
     if (!rel) continue;
     const xml = zip.text(rel.target);

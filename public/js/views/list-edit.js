@@ -43,7 +43,7 @@ async function readTermsFile(file) {
   } catch {
     text = new TextDecoder('windows-1252').decode(buf);
   }
-  let lines = text.replace(/^﻿/, '').split(/\r?\n/);
+  let lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
   if (/\.csv$/i.test(file.name)) {
     const first = lines.find((l) => l.trim()) || '';
     const sep = (first.match(/;/g) || []).length >= (first.match(/,/g) || []).length ? ';' : ',';

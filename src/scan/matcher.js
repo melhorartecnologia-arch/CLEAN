@@ -5,7 +5,10 @@
 //   algoritmo Aho-Corasick, então o custo não cresce com o tamanho da lista.
 // - Termos regex: expressão regular JavaScript (flags "gi") aplicada ao texto original, com
 //   validador opcional (CPF, CNPJ, cartão...) para descartar falsos positivos.
-import { VALIDATORS } from './presets.js';
+import { VALIDATORS, PRESETS } from './presets.js';
+
+// Expressões dos modelos prontos: sabidamente rápidas, dispensam o tempo limite.
+const SAFE_PATTERNS = new Set(PRESETS.map((p) => p.value));
 
 const FOLD = new Uint16Array(65536); // caractere -> caractere minúsculo sem acento (1 para 1)
 const WORD = new Uint8Array(65536); // 1 se o caractere é letra ou dígito
@@ -182,7 +185,7 @@ export class Matcher {
       };
       if (term.type === 'regex') {
         const validator = term.validator ? VALIDATORS[term.validator].fn : null;
-        this.regexes.push({ info, re: new RegExp(term.value, 'gi'), validator });
+        this.regexes.push({ info, re: new RegExp(term.value, 'gi'), validator, safe: SAFE_PATTERNS.has(term.value) });
       } else {
         const key = foldText(term.value);
         this.automaton.add(key, {
@@ -196,6 +199,10 @@ export class Matcher {
       this.size++;
     }
     this.automaton.build();
+    // guard(fn): executa fn com tempo limite (ver scanner.js). Só é usado se houver expressões
+    // regulares escritas pelo usuário, que podem ter retrocesso excessivo e travar a análise.
+    this.guard = options.guard && this.regexes.some((r) => !r.safe) ? options.guard : null;
+    this.timedOut = false;
   }
 
   /**
@@ -206,17 +213,37 @@ export class Matcher {
    */
   match(segments, location) {
     const hits = new Map();
+    const prepared = [];
     for (const segment of segments) {
       if (!segment || !segment.text) continue;
-      this.#matchSegment(segment, location, hits);
+      const text = segment.text.normalize('NFC');
+      const record = this.#recorder(text, segment, location, hits);
+      prepared.push({ text, record });
+      this.#matchTexts(text, record);
+    }
+    this.timedOut = false;
+    if (this.regexes.length && prepared.length) {
+      const run = () => {
+        for (const { text, record } of prepared) this.#matchRegexes(text, record);
+      };
+      if (this.guard) {
+        try {
+          this.guard(run);
+        } catch (err) {
+          if (err?.code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') throw err;
+          this.timedOut = true; // mantém o que já foi encontrado
+        }
+      } else {
+        run();
+      }
     }
     return [...hits.values()].map((hit) => ({ ...hit, values: [...hit.values] }));
   }
 
-  #matchSegment(segment, location, hits) {
-    const text = segment.text.normalize('NFC');
+  /** Função que registra uma ocorrência (contagem, valores distintos e exemplos com contexto). */
+  #recorder(text, segment, location, hits) {
     const { maxCount } = this.options;
-    const record = (info, start, end) => {
+    return (info, start, end) => {
       let hit = hits.get(info.id);
       if (!hit) {
         hit = {
@@ -241,7 +268,9 @@ export class Matcher {
       if (hit.samples.length < this.options.maxSamples) hit.samples.push(this.#sample(text, start, end, segment));
       return true;
     };
+  }
 
+  #matchTexts(text, record) {
     this.automaton.search(text, (entry, start, end) => {
       if (entry.wholeWord) {
         if (entry.firstIsWord && start > 0 && WORD[text.charCodeAt(start - 1)]) return true;
@@ -250,7 +279,9 @@ export class Matcher {
       record(entry.info, start, end);
       return true;
     });
+  }
 
+  #matchRegexes(text, record) {
     for (const { info, re, validator } of this.regexes) {
       re.lastIndex = 0;
       let m;

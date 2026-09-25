@@ -11,10 +11,14 @@ import { isPdf, pdfExtract } from './pdf.js';
 import { isRtf, rtfExtract } from './rtf.js';
 import { decodeText, looksLikeText } from './text.js';
 import { htmlToText } from './xml.js';
+import { MIME_EXTENSIONS, mimeExtract } from './mime.js';
+import { zipEntryNames } from './zip.js';
+import { friendlyError } from '../errors.js';
 
 export const DEFAULT_LIMITS = {
   maxBytes: 50 * 1024 * 1024, // arquivos maiores: só o nome é analisado (texto puro: lê o início)
   maxChars: 20_000_000, // texto máximo extraído por arquivo
+  maxMetadataBytes: 200 * 1024 * 1024, // limite para ler apenas os metadados (último usuário)
 };
 
 const HTML_EXT = new Set(['.htm', '.html', '.xhtml', '.mht', '.mhtml', '.hta']);
@@ -91,7 +95,7 @@ async function extractZip(buf, { withText }) {
     return { type: odf, metadata, segments: odfSegments(zip, odf), partial: zip.truncated };
   }
   // ZIP comum: os nomes dos arquivos compactados entram como conteúdo.
-  const names = zip.names().sort(naturalCompare);
+  const names = (zipEntryNames(buf) || zip.names()).sort(naturalCompare);
   return { type: 'zip', metadata: {}, segments: [{ label: 'Arquivos compactados', text: names.join('\n'), lines: true }] };
 }
 
@@ -102,35 +106,42 @@ async function extractZip(buf, { withText }) {
 export async function extractFile(filePath, { size, limits = DEFAULT_LIMITS, withText = true } = {}) {
   const ext = path.extname(filePath).toLowerCase();
   if (size === 0) return { type: ext.slice(1) || 'arquivo', status: 'empty', segments: [], metadata: {} };
-  const head = await readHead(filePath, 8192);
-  const kind = classify(head, ext);
-  const tooBig = size > limits.maxBytes;
-
+  const maxBytes = limits.maxBytes ?? DEFAULT_LIMITS.maxBytes;
+  const maxMetadataBytes = limits.maxMetadataBytes ?? DEFAULT_LIMITS.maxMetadataBytes;
+  const tooBig = size > maxBytes;
+  let kind = 'binary';
   try {
+    kind = classify(await readHead(filePath, 8192), ext);
     if (kind === 'binary') return { type: ext.slice(1) || 'binário', status: 'unsupported', segments: [], metadata: {} };
 
     if (kind === 'text' || kind === 'html' || kind === 'rtf') {
-      if (!withText && kind !== 'rtf') return { type: kind === 'html' ? 'html' : 'texto', status: 'ok', segments: [], metadata: {} };
-      const buf = tooBig || !withText ? await readHead(filePath, withText ? limits.maxBytes : 256 * 1024) : await fs.readFile(filePath);
+      const mime = kind !== 'rtf' && MIME_EXTENSIONS.has(ext);
+      if (!withText && kind !== 'rtf' && !mime) return { type: kind === 'html' ? 'html' : 'texto', status: 'ok', segments: [], metadata: {} };
+      const partial = tooBig && withText;
+      const buf = partial || !withText ? await readHead(filePath, withText ? maxBytes : 256 * 1024) : await fs.readFile(filePath);
       let result;
       if (kind === 'rtf') {
         const { text, metadata } = rtfExtract(buf);
         result = { type: 'rtf', metadata, segments: withText ? [{ text }] : [] };
+      } else if (mime) {
+        const r = mimeExtract(buf);
+        result = { type: ext.slice(1), metadata: r.metadata, segments: withText ? r.segments : [] };
       } else if (kind === 'html') {
-        result = { type: 'html', metadata: {}, segments: [{ text: htmlToText(decodeText(buf)) }] };
+        result = { type: 'html', metadata: {}, segments: [{ text: htmlToText(decodeText(buf, { partial })) }] };
       } else {
-        result = { type: 'texto', metadata: {}, segments: [{ text: decodeText(buf), lines: true }] };
+        result = { type: 'texto', metadata: {}, segments: [{ text: decodeText(buf, { partial }), lines: true }] };
       }
-      return finish(result, limits, tooBig && withText ? 'Arquivo grande: apenas o início foi analisado.' : null);
+      return finish(result, limits, partial ? 'Arquivo grande: apenas o início foi analisado.' : null);
     }
 
-    if (tooBig) {
+    // Formatos estruturados precisam do arquivo inteiro. Só para os metadados o limite é maior.
+    if (withText ? tooBig : size > maxMetadataBytes) {
       return {
         type: kind,
         status: 'skipped-size',
         segments: [],
         metadata: {},
-        note: `Conteúdo não analisado: arquivo maior que ${Math.round(limits.maxBytes / 1048576)} MB.`,
+        note: `Conteúdo não analisado: arquivo maior que ${Math.round(maxBytes / 1048576)} MB.`,
       };
     }
 
@@ -147,7 +158,8 @@ export async function extractFile(filePath, { size, limits = DEFAULT_LIMITS, wit
     }
     return { type: kind, status: 'unsupported', segments: [], metadata: {} };
   } catch (err) {
-    return { type: ext.slice(1) || kind, status: 'error', segments: [], metadata: {}, note: `Falha ao ler o conteúdo: ${err.message}` };
+    // Sem permissão de leitura, arquivo bloqueado etc.: o nome continua sendo verificado.
+    return { type: ext.slice(1) || kind, status: 'error', segments: [], metadata: {}, note: `Falha ao ler o conteúdo: ${friendlyError(err)}` };
   }
 }
 

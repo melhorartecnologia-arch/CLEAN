@@ -35,7 +35,7 @@ try {
     if ($e.Id -eq 4663) {
       if ($v.Count -lt 10 -or [string]$v[5].Value -ne 'File') { return }
       $file = [string]$v[6].Value
-      $mask = [string]$v[9].Value
+      $maskValue = $v[9].Value
     } else {
       if ($v.Count -lt 11) { return }
       $share = [string]$v[7].Value
@@ -43,15 +43,17 @@ try {
       $rel = ([string]$v[9].Value).Trim('\\')
       if (-not $rel) { return }
       $file = $shareLocal.TrimEnd('\\') + '\\' + $rel
-      $mask = [string]$v[10].Value
+      $maskValue = $v[10].Value
     }
     $user = [string]$v[1].Value
     $domain = [string]$v[2].Value
     if (-not $file -or -not $user -or $user -eq '-' -or $user.EndsWith('$')) { return }
     if ($ignore.ContainsKey($user.ToLowerInvariant()) -or $ignore.ContainsKey(($domain + '\\' + $user).ToLowerInvariant())) { return }
     $key = $file.ToLowerInvariant()
-    $isWrite = $false
-    try { $isWrite = ([Convert]::ToInt64($mask, 16) -band $writeBits) -ne 0 } catch { }
+    # AccessMask chega como número (HexInt32) no Get-WinEvent; [int64] também aceita texto "0x..."
+    $mask = [int64]0
+    try { $mask = [int64]$maskValue } catch { }
+    $isWrite = ($mask -band $writeBits) -ne 0
     $any = -not $seenAny.ContainsKey($key)
     $write = $isWrite -and -not $seenWrite.ContainsKey($key)
     if (-not ($any -or $write)) { return }
@@ -59,7 +61,7 @@ try {
     if ($write) { $seenWrite[$key] = $true }
     ConvertTo-Json -Compress -InputObject @{
       t = $e.TimeCreated.ToUniversalTime().ToString('o'); id = $e.Id; u = $user; d = $domain
-      f = $file; s = $share; sl = $shareLocal; m = $mask; a = [int]$any; w = [int]$write
+      f = $file; s = $share; sl = $shareLocal; m = ('0x{0:x}' -f $mask); a = [int]$any; w = [int]$write
     }
   }
 } catch {
