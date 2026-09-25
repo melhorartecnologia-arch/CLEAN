@@ -158,6 +158,7 @@ function networkMessage(err, url) {
 
 /** Lê o corpo da resposta até maxBytes; o restante é descartado (conexão encerrada). */
 async function readLimited(res, maxBytes, onChunk = () => {}) {
+  if (!res.body) return { data: Buffer.alloc(0), truncated: false, size: 0 }; // 204 e afins: sem corpo
   const declared = Number(res.headers.get('content-length')) || 0;
   const chunks = [];
   let size = 0;

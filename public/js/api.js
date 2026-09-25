@@ -11,7 +11,12 @@ export async function api(method, url, body) {
   }
   if (res.status === 204) return null;
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(data?.error || `Erro ${res.status} ao acessar ${url}`);
+  if (!res.ok) {
+    const error = new Error(data?.error || `Erro ${res.status} ao acessar ${url}`);
+    error.status = res.status;
+    error.code = data?.code || null; // ex.: 'changed' (arquivo alterado depois da análise)
+    throw error;
+  }
   return data;
 }
 

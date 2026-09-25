@@ -31,6 +31,42 @@ export const LOCATION_LABELS = {
 
 export const MAIL_TYPE_LABELS = { graph: 'Microsoft 365', gmail: 'Google Workspace', imap: 'IMAP' };
 
+export const DELETION_LABELS = { deleted: 'Excluído', missing: 'Não encontrado (já excluído ou movido)', failed: 'Falha na exclusão' };
+
+/** Situação da exclusão de um item, em uma linha (relatórios e exportações). */
+export function deletionText(d) {
+  if (!d) return '';
+  const when = formatDateTime(d.at);
+  const how = d.mode === 'auto' ? 'exclusão automática da análise' : `exclusão manual${d.by ? ` por ${d.by}` : ''}`;
+  const where = d.method === 'trash' ? ' (movido para a lixeira)' : '';
+  if (d.status === 'deleted') return `Excluído em ${when}${where} — ${how}`;
+  if (d.status === 'missing') return `Não encontrado em ${when} (já excluído ou movido) — ${how}`;
+  return `Falha ao excluir em ${when}: ${d.error || 'erro desconhecido'} — ${how}`;
+}
+
+/** Aplica aos registros a última ocorrência de exclusão de cada um (registro deletions.ndjson). */
+export function applyDeletions(records, deletions) {
+  const latest = new Map();
+  for (const d of deletions) latest.set(d.recordId, d);
+  for (const r of records) r.deletion = latest.get(r.id) || null;
+  return records;
+}
+
+/** Filtro "Exclusão": deleted = excluídos (ou que já não existiam), failed = com falha, kept = mantidos. */
+function matchesDeletion(record, value) {
+  const status = record.deletion?.status;
+  if (value === 'deleted') return status === 'deleted' || status === 'missing';
+  if (value === 'failed') return status === 'failed';
+  if (value === 'kept') return status !== 'deleted' && status !== 'missing';
+  return true;
+}
+
+export function deletionTotals(records) {
+  const totals = { deleted: 0, missing: 0, failed: 0 };
+  for (const r of records) if (r.deletion && totals[r.deletion.status] !== undefined) totals[r.deletion.status]++;
+  return totals;
+}
+
 export const SCAN_STATUS_LABELS = {
   queued: 'Na fila',
   running: 'Em andamento',
@@ -61,7 +97,7 @@ const SORTERS = {
 };
 
 /** Parâmetros de filtro aceitos pela API (os demais são ignorados). */
-export const FILTER_KEYS = ['q', 'term', 'user', 'repository', 'location', 'extension', 'status', 'sort', 'dir', 'page'];
+export const FILTER_KEYS = ['q', 'term', 'user', 'repository', 'location', 'extension', 'status', 'deletion', 'sort', 'dir', 'page'];
 
 /**
  * Filtra e ordena os registros.
@@ -76,6 +112,7 @@ export function filterRecords(records, filters = {}) {
     if (filters.location && !r.matches.some((m) => m.location === filters.location)) return false;
     if (filters.extension && r.extension !== filters.extension) return false;
     if (filters.status && r.contentStatus !== filters.status) return false;
+    if (filters.deletion && !matchesDeletion(r, filters.deletion)) return false;
     if (q && !haystack(r).includes(q)) return false;
     return true;
   });
@@ -198,7 +235,7 @@ const MAIL_SORTERS = {
   size: (a, b) => a.size - b.size,
 };
 
-export const MAIL_FILTER_KEYS = ['q', 'term', 'mailbox', 'sender', 'location', 'source', 'sort', 'dir', 'page'];
+export const MAIL_FILTER_KEYS = ['q', 'term', 'mailbox', 'sender', 'location', 'source', 'deletion', 'sort', 'dir', 'page'];
 
 /** Anexos "de verdade" (sem as imagens embutidas no corpo, como logotipos de assinatura). */
 export function realAttachments(record) {
@@ -217,6 +254,7 @@ export function filterMailRecords(records, filters = {}) {
     if (filters.sender && (r.fromAddress || '') !== filters.sender) return false;
     if (filters.location && !r.matches.some((m) => m.location === filters.location)) return false;
     if (filters.source && r.sourceId !== filters.source) return false;
+    if (filters.deletion && !matchesDeletion(r, filters.deletion)) return false;
     if (q && !mailHaystack(r).includes(q)) return false;
     return true;
   });

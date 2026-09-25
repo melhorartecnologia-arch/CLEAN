@@ -252,6 +252,11 @@ export class Store {
     return this.#append(id, 'errors.ndjson', errors);
   }
 
+  /** Registro das exclusões (automáticas e manuais) dos itens de uma análise. */
+  appendDeletions(id, items) {
+    return this.#append(id, 'deletions.ndjson', items);
+  }
+
   /** Aguarda a gravação pendente dos arquivos de uma análise. */
   async flushScan(id) {
     const dir = this.scanDir(id);
@@ -311,7 +316,7 @@ export class Store {
     // Mantém em memória apenas as análises consultadas mais recentemente.
     this.resultCache.delete(key);
     this.resultCache.set(key, cache);
-    while (this.resultCache.size > 4) this.resultCache.delete(this.resultCache.keys().next().value);
+    while (this.resultCache.size > 8) this.resultCache.delete(this.resultCache.keys().next().value);
     return cache.records;
   }
 
@@ -321,5 +326,9 @@ export class Store {
 
   readErrors(id) {
     return this.#readNdjson(id, 'errors.ndjson');
+  }
+
+  readDeletions(id) {
+    return this.#readNdjson(id, 'deletions.ndjson');
   }
 }

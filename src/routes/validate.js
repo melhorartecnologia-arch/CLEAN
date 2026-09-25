@@ -52,6 +52,8 @@ export function parseRepository(body = {}) {
     path: normalizeRepoPath(body.path),
     description: text(body.description, 'a descrição', { max: 1000 }),
     exclude: lines(body.exclude),
+    // Permite excluir os arquivos encontrados (automaticamente na análise ou pelo relatório).
+    allowDelete: body.allowDelete === true,
     audit: {
       enabled: Boolean(audit.enabled),
       computer,

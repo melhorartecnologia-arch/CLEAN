@@ -267,5 +267,67 @@ export class ImapConnector {
     return { ok: true, message: 'Conexão IMAP funcionando.', details };
   }
 
+  /**
+   * Exclui mensagens (ids no formato "pasta:uidvalidity:uid" gerado na análise): 'permanent' =
+   * marca como excluída e expurga (UID EXPUNGE quando o servidor permite, sem afetar outras
+   * mensagens); 'trash' = move para a pasta Lixeira do servidor. Retorna Map(id → { ok, missing?, error? }).
+   */
+  async deleteMessages(mailbox, ids, mode = 'permanent') {
+    const results = new Map();
+    const groups = new Map();
+    for (const id of ids) {
+      const m = /^(.*):([^:]*):(\d+)$/.exec(String(id));
+      if (!m) {
+        results.set(id, { ok: false, error: 'Identificador de mensagem inválido.' });
+        continue;
+      }
+      const group = groups.get(m[1]) || { validity: m[2], items: [] };
+      group.items.push({ id, uid: Number(m[3]) });
+      groups.set(m[1], group);
+    }
+    if (groups.size === 0) return results;
+    const { client, dispose } = await this.connect(mailbox);
+    try {
+      let trash = null;
+      if (mode === 'trash') {
+        trash = (await client.list()).find((f) => f.specialUse === '\\Trash')?.path || null;
+        if (!trash) {
+          for (const group of groups.values()) for (const item of group.items) results.set(item.id, { ok: false, error: 'O servidor não tem uma pasta Lixeira identificada.' });
+          return results;
+        }
+      }
+      for (const [folder, group] of groups) {
+        let lock = null;
+        try {
+          lock = await client.getMailboxLock(folder);
+          if (String(client.mailbox?.uidValidity ?? '') !== group.validity) {
+            for (const item of group.items) results.set(item.id, { ok: false, missing: true, error: 'A pasta foi recriada no servidor depois da análise: mensagem não localizada.' });
+            continue;
+          }
+          const present = new Set();
+          for await (const msg of client.fetch(packUids(group.items.map((i) => i.uid)), { uid: true }, { uid: true })) present.add(msg.uid);
+          const uids = group.items.filter((i) => present.has(i.uid)).map((i) => i.uid);
+          let ok = true;
+          if (uids.length) {
+            ok = trash && folder !== trash ? Boolean(await client.messageMove(packUids(uids), trash, { uid: true })) : Boolean(await client.messageDelete(packUids(uids), { uid: true }));
+          }
+          for (const item of group.items) {
+            if (!present.has(item.uid)) results.set(item.id, { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída ou movida).' });
+            else results.set(item.id, ok ? { ok: true } : { ok: false, error: 'O servidor recusou a exclusão.' });
+          }
+        } catch (err) {
+          if (this.signal?.aborted) throw this.signal.reason;
+          const message = imapError(err, this.imap.host).message;
+          for (const item of group.items) results.set(item.id, { ok: false, error: message });
+        } finally {
+          lock?.release();
+        }
+      }
+    } finally {
+      await dispose();
+    }
+    return results;
+  }
+
   async close() {}
 }

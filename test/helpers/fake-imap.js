@@ -54,13 +54,17 @@ function tokenize(text) {
  *             flags?: { folder: '\\Trash' } } }
  */
 export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffset = 0 } = {}) {
+  for (const account of Object.values(accounts)) {
+    for (const list of Object.values(account.folders)) list.forEach((m, i) => (m.uid ??= i + 1));
+  }
+  const nextUid = (list) => list.reduce((max, m) => Math.max(max, m.uid), 0) + 1;
   const server = net.createServer((socket) => {
     let buffer = Buffer.alloc(0);
     let user = null;
     let selected = null;
     let pendingLiteral = null; // { size, line }
     const send = (text) => socket.write(text);
-    send('* OK [CAPABILITY IMAP4rev1 UIDPLUS] Fake IMAP pronto\r\n');
+    send('* OK [CAPABILITY IMAP4rev1 UIDPLUS MOVE] Fake IMAP pronto\r\n');
 
     const handle = (line, literals) => {
       const space = line.indexOf(' ');
@@ -81,13 +85,13 @@ export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffs
       const messages = selected ? folders[selected] : [];
       switch (command) {
         case 'CAPABILITY':
-          send('* CAPABILITY IMAP4rev1 UIDPLUS\r\n');
+          send('* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n');
           return ok();
         case 'LOGIN': {
           const [login, password] = literals.length ? literals : args;
           if (!accounts[login] || accounts[login].password !== password) return send(`${tag} NO [AUTHENTICATIONFAILED] Credenciais inválidas\r\n`);
           user = login;
-          return ok('[CAPABILITY IMAP4rev1 UIDPLUS] Logado');
+          return ok('[CAPABILITY IMAP4rev1 UIDPLUS MOVE] Logado');
         }
         case 'LIST':
         case 'LSUB': {
@@ -108,7 +112,7 @@ export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffs
           if (!folders[name]) return send(`${tag} NO Pasta inexistente\r\n`);
           selected = name;
           const list = folders[name];
-          send(`* FLAGS (\\Seen \\Answered)\r\n* ${list.length} EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 7] ok\r\n* OK [UIDNEXT ${list.length + 1}] ok\r\n`);
+          send(`* FLAGS (\\Seen \\Answered \\Deleted)\r\n* ${list.length} EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 7] ok\r\n* OK [UIDNEXT ${nextUid(list)}] ok\r\n`);
           return ok(command === 'EXAMINE' ? '[READ-ONLY] ok' : '[READ-WRITE] ok');
         }
         case 'STATUS': {
@@ -124,18 +128,18 @@ export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffs
           return ok();
         }
         case 'FETCH': {
-          const set = parseSet(args[0], messages.length);
+          const set = parseSet(args[0], uidMode ? nextUid(messages) - 1 : messages.length);
           const items = args.slice(1).join(' ').toUpperCase();
           for (let i = 0; i < messages.length; i++) {
-            const uid = i + 1;
-            if (!set.has(uid)) continue;
             const m = messages[i];
+            const uid = m.uid;
+            if (!set.has(uidMode ? uid : i + 1)) continue;
             const parts = [`UID ${uid}`];
             // sizeOffset simula o tamanho estimado do Exchange (EnableExactRFC822Size = false).
             if (items.includes('RFC822.SIZE')) parts.push(`RFC822.SIZE ${m.raw.length + sizeOffset}`);
             if (items.includes('INTERNALDATE')) parts.push(`INTERNALDATE "${imapDate(m.date)}"`);
             const partial = /BODY\.PEEK\[\]<(\d+)\.(\d+)>/.exec(items);
-            const head = `* ${uid} FETCH (${parts.join(' ')}`;
+            const head = `* ${i + 1} FETCH (${parts.join(' ')}`;
             if (partial) {
               const data = m.raw.subarray(Number(partial[1]), Number(partial[1]) + Number(partial[2]));
               socket.write(`${head} BODY[]<${partial[1]}> {${data.length}}\r\n`);
@@ -148,6 +152,39 @@ export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffs
             } else {
               send(`${head})\r\n`);
             }
+          }
+          return ok();
+        }
+        case 'STORE': {
+          // UID STORE <conjunto> +FLAGS[.SILENT] (\Deleted)
+          const set = parseSet(args[0], uidMode ? nextUid(messages) - 1 : messages.length);
+          const deleting = /\\Deleted/i.test(args.slice(1).join(' '));
+          messages.forEach((m, i) => {
+            if (set.has(uidMode ? m.uid : i + 1) && deleting) m.deleted = true;
+          });
+          return ok();
+        }
+        case 'EXPUNGE': {
+          // EXPUNGE (todas as marcadas) ou UID EXPUNGE <conjunto> (só as do conjunto)
+          const set = uidMode ? parseSet(args[0], nextUid(messages) - 1) : null;
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].deleted && (!set || set.has(messages[i].uid))) {
+              messages.splice(i, 1);
+              send(`* ${i + 1} EXPUNGE\r\n`);
+            }
+          }
+          return ok();
+        }
+        case 'MOVE': {
+          // UID MOVE <conjunto> <pasta>
+          const set = parseSet(args[0], nextUid(messages) - 1);
+          const target = folders[args[1]];
+          if (!target) return send(`${tag} NO [TRYCREATE] Pasta de destino inexistente\r\n`);
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (!set.has(messages[i].uid)) continue;
+            const [moved] = messages.splice(i, 1);
+            target.push({ ...moved, uid: nextUid(target), deleted: false });
+            send(`* ${i + 1} EXPUNGE\r\n`);
           }
           return ok();
         }

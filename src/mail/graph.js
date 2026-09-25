@@ -28,6 +28,10 @@ const AAD_ERRORS = {
 
 const enc = encodeURIComponent;
 
+// Identificadores imutáveis: continuam válidos se a mensagem for movida de pasta depois da análise
+// (necessário para a exclusão manual pelo relatório).
+const IMMUTABLE_IDS = { Prefer: 'IdType="ImmutableId"' };
+
 /** Traduz erros do Graph/Entra ID para mensagens com a providência a tomar. */
 export function graphError(err) {
   if (!(err instanceof ApiError)) return err;
@@ -220,7 +224,7 @@ export class GraphConnector {
         let url = `${userPath}/mailFolders/${enc(folder.id)}/messages?$select=id,receivedDateTime,webLink&$top=100${size}${filter}`;
         try {
           while (url) {
-            const page = await self.api(url);
+            const page = await self.api(url, { headers: IMMUTABLE_IDS });
             for (const m of page?.value || []) {
               yield {
                 folder: folder.path,
@@ -243,7 +247,7 @@ export class GraphConnector {
     yield* pool(list(), Math.max(1, Math.min(concurrency, MAX_CONCURRENCY)), async (item) => {
       if (item.error) return item;
       try {
-        const res = await this.api(`${userPath}/messages/${enc(item.id)}/$value`, { type: 'buffer', maxBytes, retries: 4, headers: { Accept: '*/*' } });
+        const res = await this.api(`${userPath}/messages/${enc(item.id)}/$value`, { type: 'buffer', maxBytes, retries: 4, headers: { Accept: '*/*', ...IMMUTABLE_IDS } });
         return { ...item, raw: res.data, truncated: res.truncated, size: item.size || res.size };
       } catch (err) {
         if (this.signal?.aborted) throw err;
@@ -290,6 +294,37 @@ export class GraphConnector {
       return { ok: false, message: `Nenhuma das caixas testadas está disponível para o aplicativo.${reason}`, details };
     }
     return { ok: true, message: 'Conexão com o Microsoft 365 funcionando.', details };
+  }
+
+  /**
+   * Exclui mensagens da caixa: 'permanent' = exclusão definitiva (permanentDelete: a mensagem vai
+   * para a área de expurgo e some para o usuário; retenções e bloqueios de litígio continuam
+   * valendo), 'trash' = move para Itens Excluídos. Exige a permissão Mail.ReadWrite.
+   * Retorna Map(id → { ok, missing?, error? }).
+   */
+  async deleteMessages(mailbox, ids, mode = 'permanent') {
+    const user = await this.resolveUser(mailbox);
+    const userPath = `/users/${enc(user.id)}`;
+    const results = new Map();
+    const run = pool(ids, MAX_CONCURRENCY, async (id) => {
+      try {
+        if (mode === 'trash') {
+          await this.api(`${userPath}/messages/${enc(id)}/move`, { method: 'POST', json: { destinationId: 'deleteditems' }, headers: IMMUTABLE_IDS, retries: 4 });
+        } else {
+          await this.api(`${userPath}/messages/${enc(id)}/permanentDelete`, { method: 'POST', headers: IMMUTABLE_IDS, retries: 4 });
+        }
+        return [id, { ok: true }];
+      } catch (err) {
+        if (this.signal?.aborted) throw err;
+        if (err.status === 404) return [id, { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída ou movida).' }];
+        if (err.status === 403) {
+          return [id, { ok: false, error: 'Sem permissão para excluir: conceda ao aplicativo a permissão Mail.ReadWrite (tipo Aplicativo) ou a função "Application Mail.ReadWrite" do RBAC para aplicativos.' }];
+        }
+        return [id, { ok: false, error: err.message }];
+      }
+    });
+    for await (const [id, result] of run) results.set(id, result);
+    return results;
   }
 
   async close() {}

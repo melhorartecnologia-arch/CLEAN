@@ -53,6 +53,43 @@ function matchesHtml(record, phrase) {
 
 const option = (value, label, current) => html`<option value="${value}" ${current === value ? 'selected' : ''}>${label}</option>`;
 
+// ---------- Exclusão dos itens encontrados ----------
+
+const DELETION_STATUS = { deleted: 'Excluído', missing: 'Não encontrado (já excluído ou movido)', failed: 'Falha na exclusão' };
+
+const deletionFilter = (filters) => html`<label class="field"><span>Exclusão</span>
+    <select name="deletion">
+      <option value="">Todos</option>
+      ${option('kept', 'Não excluídos', filters.deletion)}
+      ${option('deleted', 'Excluídos', filters.deletion)}
+      ${option('failed', 'Com falha na exclusão', filters.deletion)}
+    </select>
+  </label>`;
+
+function deletionChip(r) {
+  const d = r.deletion;
+  if (!d) return '';
+  if (d.status === 'failed') return html` <span class="chip danger">falha ao excluir</span>`;
+  return html` <span class="chip deleted">${d.status === 'missing' ? 'não encontrado' : d.method === 'trash' ? 'na lixeira' : 'excluído'}</span>`;
+}
+
+/** Situação da exclusão e botão "Excluir" no detalhe de um item. */
+function deletionBlock(r, noun, { active }) {
+  const d = r.deletion;
+  const how = d ? (d.mode === 'auto' ? 'exclusão automática da análise' : `exclusão manual${d.by ? ` por ${d.by}` : ''}`) : '';
+  const status = d
+    ? html`<p class="small ${d.status === 'failed' ? 'danger-text' : ''}"><b>${DELETION_STATUS[d.status] || d.status}</b> em ${fmtDateTime(d.at)}${d.method === 'trash' && d.status === 'deleted' ? ' (movido para a lixeira)' : ''} — ${how}${d.status === 'failed' && d.error ? html`<br />${d.error}` : ''}</p>`
+    : html`<p class="muted small">Não excluído.</p>`;
+  const done = d && d.status !== 'failed';
+  let action = '';
+  if (r.canDelete) {
+    action = html`<button type="button" class="btn small danger" data-action="delete-item" data-rid="${r.id}">${icon('trash')} ${d?.status === 'failed' ? 'Tentar excluir de novo' : `Excluir ${noun}`}</button>`;
+  } else if (!done) {
+    action = html`<p class="muted small">${active ? 'A exclusão manual fica disponível ao fim da análise.' : noun === 'arquivo' ? 'Exclusão não permitida neste repositório (ative em Repositórios).' : 'Exclusão não permitida nesta conexão (ative em Caixas de e-mail).'}</p>`;
+  }
+  return html`<h4 class="spaced">Exclusão</h4>${status}${action}`;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Análises de arquivos
 
@@ -69,8 +106,8 @@ function folderOf(record) {
 const FILES = {
   base: '#/analises',
   nav: 'analises',
-  filterKeys: ['q', 'term', 'user', 'location', 'extension', 'sort', 'page'],
-  criteria: ['q', 'term', 'user', 'location', 'extension'],
+  filterKeys: ['q', 'term', 'user', 'location', 'extension', 'deletion', 'sort', 'page'],
+  criteria: ['q', 'term', 'user', 'location', 'extension', 'deletion'],
   descSorts: new Set(['modified', 'occurrences', 'terms', 'size']),
   defaultSort: 'path',
   noun: ['arquivo', 'arquivos'],
@@ -93,6 +130,7 @@ const FILES = {
       </select>
     </label>
     <label class="field"><span>Extensão</span><select name="extension"><option value="">Todas</option></select></label>
+    ${deletionFilter(filters)}
     <label class="field"><span>Ordenar por</span>
       <select name="sort">
         ${[
@@ -171,14 +209,14 @@ const FILES = {
 
   tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Arquivo</th><th>Último usuário</th><th>Modificado em</th><th>Informação encontrada</th></tr>`,
 
-  row: (r) => html`<td><div class="name">${r.name}</div><div class="path">${folderOf(r)}</div></td>
+  row: (r) => html`<td><div class="name">${r.name}</div>${deletionChip(r)}<div class="path">${folderOf(r)}</div></td>
     <td>${r.lastUser ? html`${r.lastUser}<div><span class="chip source">${SOURCE_SHORT[r.lastUserSource]}</span></div>` : html`<span class="muted">não identificado</span>`}</td>
     <td class="nowrap">${fmtDateTime(r.modified)}</td>
     <td><div class="chips">${r.matches.map((m) => html`<span class="chip"><b>${m.term}</b> ${fmtNum(m.count)}× · ${FILE_LOCATION[m.location]}</span>`)}</div></td>`,
 
   rowLabel: (r) => r.name,
 
-  detail: (r) => {
+  detail: (r, ctx) => {
     const m = r.metadata || {};
     const a = r.audit;
     return html`<div class="detail-grid">
@@ -194,6 +232,7 @@ const FILES = {
           ${r.contentNote ? html`<dt>Observação</dt><dd>${r.contentNote}</dd>` : ''}
           ${m.title ? html`<dt>Título</dt><dd>${m.title}</dd>` : ''}
         </dl>
+        ${deletionBlock(r, 'arquivo', ctx)}
       </div>
       <div>
         <h4>Quem interagiu com o arquivo</h4>
@@ -232,8 +271,8 @@ const LOCATION_TITLES = { subject: 'Assunto', body: 'Corpo', attachmentName: 'No
 const MAIL = {
   base: '#/email/analises',
   nav: 'email-analises',
-  filterKeys: ['q', 'term', 'mailbox', 'sender', 'location', 'sort', 'page'],
-  criteria: ['q', 'term', 'mailbox', 'sender', 'location'],
+  filterKeys: ['q', 'term', 'mailbox', 'sender', 'location', 'deletion', 'sort', 'page'],
+  criteria: ['q', 'term', 'mailbox', 'sender', 'location', 'deletion'],
   descSorts: new Set(['date', 'occurrences', 'terms', 'size']),
   defaultSort: 'date',
   noun: ['mensagem', 'mensagens'],
@@ -256,6 +295,7 @@ const MAIL = {
         ${Object.entries(LOCATION_TITLES).map(([value, label]) => option(value, label, filters.location))}
       </select>
     </label>
+    ${deletionFilter(filters)}
     <label class="field"><span>Ordenar por</span>
       <select name="sort">
         ${[
@@ -372,7 +412,7 @@ const MAIL = {
 
   row: (r) => {
     const files = (r.attachments || []).filter((a) => !a.inline);
-    return html`<td><div class="name">${r.subject || '(sem assunto)'}</div><div class="path">${r.mailbox} › ${r.folder}${files.length ? html` · ${plural(files.length, 'anexo', 'anexos')}` : ''}</div></td>
+    return html`<td><div class="name">${r.subject || '(sem assunto)'}</div>${deletionChip(r)}<div class="path">${r.mailbox} › ${r.folder}${files.length ? html` · ${plural(files.length, 'anexo', 'anexos')}` : ''}</div></td>
       <td>${r.from || html`<span class="muted">sem remetente</span>`}${r.to?.length ? html`<div class="muted small">para ${r.to[0]}${r.to.length > 1 ? ` e mais ${r.to.length - 1}` : ''}</div>` : ''}</td>
       <td class="nowrap">${fmtDateTime(r.date)}</td>
       <td><div class="chips">${r.matches.map((m) => html`<span class="chip"><b>${m.term}</b> ${fmtNum(m.count)}× · ${MAIL_LOCATION[m.location] || m.location}</span>`)}</div></td>`;
@@ -380,7 +420,7 @@ const MAIL = {
 
   rowLabel: (r) => r.subject || 'mensagem sem assunto',
 
-  detail: (r) => {
+  detail: (r, ctx) => {
     const safeLink = /^https:\/\//i.test(r.webLink || '') ? r.webLink : null;
     const messageId = String(r.internetMessageId || '').replace(/^<|>$/g, '');
     const people = (list) => (list?.length ? list.join('; ') : '—');
@@ -401,6 +441,7 @@ const MAIL = {
           <dt>Conexão</dt><dd>${r.sourceName} (${TYPE_LABELS[r.sourceType] || r.sourceType})</dd>
           ${safeLink ? html`<dt>Abrir</dt><dd><a href="${safeLink}" target="_blank" rel="noopener noreferrer">Abrir no Outlook na Web</a> <span class="muted small">(exige acesso à caixa)</span></dd>` : ''}
         </dl>
+        ${deletionBlock(r, 'mensagem', ctx)}
       </div>
       <div>
         <h4>Remetente e destinatários</h4>
@@ -506,7 +547,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       $('[data-head]'),
       html`<div class="page-head">
         <div>
-          <div class="inline"><h1>${scan.name}</h1>${statusBadge(scan.status)}</div>
+          <div class="inline"><h1>${scan.name}</h1>${statusBadge(scan.status)}${scan.options?.deleteMatches ? html`<span class="badge deleting">com exclusão automática</span>` : ''}</div>
           <div class="sub">Início ${started} · duração ${duration} · ${P.subtitle(scan)}</div>
         </div>
         <div class="actions">
@@ -551,7 +592,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           <span class="muted small">Os resultados aparecem abaixo conforme são encontrados.</span>
         </div>
         <div class="progress-line" role="progressbar" aria-label="Análise em andamento"></div>
-        <div class="progress-stats">${P.progress(scan.stats || {})}</div>
+        <div class="progress-stats">${P.progress(scan.stats || {})}${scan.options?.deleteMatches ? html`<span><b>${fmtNum(scan.stats?.deleted)}</b> excluídos${scan.stats?.deleteErrors ? ` · ${fmtNum(scan.stats.deleteErrors)} com falha` : ''}</span>` : ''}</div>
         ${scan.current?.path ? html`<div class="current">${scan.current.path}</div>` : ''}
       </section>`,
     );
@@ -559,7 +600,15 @@ export async function render(root, { params, query, isCurrent = () => true }) {
 
   const drawTiles = () => {
     const st = scan.stats || {};
-    paint($('[data-tiles]'), P.tiles(st));
+    // Excluídos: pelas ocorrências registradas (automáticas e manuais) quando o resumo já chegou.
+    const totals = summary?.deletions;
+    const deleted = totals ? totals.deleted + totals.missing : st.deleted || 0;
+    const failed = totals ? totals.failed : st.deleteErrors || 0;
+    const tile =
+      scan.options?.deleteMatches || deleted || failed
+        ? html`<div class="tile"><div class="label">Excluídos</div><div class="value">${fmtCompact(deleted)}</div><div class="detail">${failed ? `${fmtNum(failed)} com falha na exclusão` : scan.options?.deleteMatches ? 'exclusão automática ligada' : 'pelo relatório'}</div></div>`
+        : '';
+    paint($('[data-tiles]'), html`${P.tiles(st)}${tile}`);
     $('[data-error-count]').textContent = st.errors ? `(${fmtNum(st.errors)})` : '';
   };
 
@@ -654,11 +703,12 @@ export async function render(root, { params, query, isCurrent = () => true }) {
               ${results.items.map((r) => {
                 const open = expanded.has(r.id);
                 const expandedText = open ? 'true' : 'false';
-                return html`<tr data-id="${r.id}" aria-expanded="${expandedText}">
+                const gone = r.deletion && r.deletion.status !== 'failed';
+                return html`<tr data-id="${r.id}" aria-expanded="${expandedText}" class="${gone ? 'is-deleted' : ''}">
                     <td><button type="button" class="icon-btn" data-action="toggle" aria-label="${open ? 'Ocultar' : 'Mostrar'} detalhes de ${P.rowLabel(r)}" aria-expanded="${expandedText}"><span class="row-toggle">${icon('chevron')}</span></button></td>
                     ${P.row(r)}
                   </tr>
-                  ${open ? html`<tr class="detail"><td colspan="5">${P.detail(r)}</td></tr>` : ''}`;
+                  ${open ? html`<tr class="detail"><td colspan="5">${P.detail(r, { active: isActive(scan) })}</td></tr>` : ''}`;
               })}
             </tbody>
           </table>
@@ -740,6 +790,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       if (stopped || loading !== request) return;
       results = res;
       summary = sum;
+      drawTiles();
       if (results.page !== Number(filters.page || 1)) filters.page = results.page > 1 ? String(results.page) : '';
       stale.results = false;
       drawFilterOptions();
@@ -863,6 +914,40 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         toast(el.dataset.copied || 'Copiado.', 'success');
       } catch {
         toast('Não foi possível copiar. Selecione o texto e copie manualmente.', 'error');
+      }
+    } else if (action === 'delete-item') {
+      const rid = Number(el.dataset.rid);
+      const record = results?.items.find((r) => r.id === rid);
+      if (!record) return;
+      const what = scan.kind === 'mail' ? `a mensagem "${record.subject || '(sem assunto)'}" da caixa ${record.mailbox}` : `o arquivo ${record.path}`;
+      const how =
+        record.deleteMethod === 'trash'
+          ? 'Ela será movida para a Lixeira (Itens Excluídos) da caixa.'
+          : record.deleteMethod === 'permanent'
+            ? 'A exclusão é definitiva: a mensagem não fica na lixeira do usuário.'
+            : 'A exclusão é definitiva: o arquivo não vai para a Lixeira.';
+      if (!(await confirmDialog(`Excluir ${what}? ${how}`, { title: 'Excluir', confirmLabel: 'Excluir' }))) return;
+      el.disabled = true;
+      const send = (force) => post(`/api/scans/${id}/results/${rid}/delete`, { confirm: true, force });
+      try {
+        let res;
+        try {
+          res = await send(false);
+        } catch (err) {
+          if (err.code !== 'changed') throw err;
+          if (!(await confirmDialog(err.message, { title: 'Arquivo alterado depois da análise', confirmLabel: 'Excluir mesmo assim' }))) return;
+          res = await send(true);
+        }
+        const d = res.deletion;
+        if (d.status === 'failed') toast(`Não foi possível excluir: ${d.error}`, 'error');
+        else toast(d.status === 'missing' ? 'O item já não existia (registrado como não encontrado).' : 'Excluído.', 'success');
+        scan = await get(`/api/scans/${id}`);
+        drawScan();
+        await loadResults();
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        if (el.isConnected) el.disabled = false;
       }
     } else if (action === 'cancel') {
       if (!(await confirmDialog('Cancelar esta análise? Os resultados encontrados até agora serão mantidos.', { confirmLabel: 'Cancelar análise' }))) return;

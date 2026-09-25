@@ -12,6 +12,9 @@ export const GOOGLE_ENDPOINTS = {
 };
 
 export const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+// Exclusão: definitiva exige o escopo completo; mover para a lixeira, o de modificação.
+export const GMAIL_DELETE_SCOPE = 'https://mail.google.com/';
+export const GMAIL_TRASH_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 export const DIRECTORY_SCOPE = 'https://www.googleapis.com/auth/admin.directory.user.readonly';
 
 // Downloads simultâneos por caixa: cada mensagem vem inteira no JSON (base64), então o limite
@@ -291,6 +294,32 @@ export class GmailConnector {
     }
     if (checked === 0) return { ok: false, message: 'Nenhuma das caixas testadas tem o Gmail habilitado.', details };
     return { ok: true, message: 'Conexão com o Google Workspace funcionando.', details };
+  }
+
+  /**
+   * Exclui mensagens: 'permanent' = exclusão definitiva (escopo https://mail.google.com/),
+   * 'trash' = move para a Lixeira (escopo gmail.modify). Retorna Map(id → { ok, missing?, error? }).
+   */
+  async deleteMessages(mailbox, ids, mode = 'permanent') {
+    const scope = mode === 'trash' ? GMAIL_TRASH_SCOPE : GMAIL_DELETE_SCOPE;
+    const base = `${this.endpoints.gmail}/users/${enc(mailbox.address)}`;
+    const results = new Map();
+    const run = pool(ids, MAX_CONCURRENCY, async (id) => {
+      try {
+        if (mode === 'trash') await this.api(mailbox.address, scope, `${base}/messages/${enc(id)}/trash`, { method: 'POST', retries: 4 });
+        else await this.api(mailbox.address, scope, `${base}/messages/${enc(id)}`, { method: 'DELETE', retries: 4 });
+        return [id, { ok: true }];
+      } catch (err) {
+        if (this.signal?.aborted) throw err;
+        if (err.status === 404) return [id, { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída).' }];
+        if (err.status === 403 || /não está autorizada/.test(err.message)) {
+          return [id, { ok: false, error: `Sem permissão para excluir: autorize o escopo ${scope} na delegação em todo o domínio da conta de serviço.` }];
+        }
+        return [id, { ok: false, error: err.message }];
+      }
+    });
+    for await (const [id, result] of run) results.set(id, result);
+    return results;
   }
 
   async close() {}

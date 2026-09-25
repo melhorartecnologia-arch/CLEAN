@@ -84,6 +84,9 @@ export function parseMailSource(body = {}, existing = null, box, { forTest = fal
     mailboxes: [],
     excludeMailboxes: lines(body.excludeMailboxes, 500),
     excludeFolders: lines(body.excludeFolders, 200),
+    // Exclusão das mensagens encontradas: definitiva ou movendo para a lixeira.
+    allowDelete: body.allowDelete === true,
+    deleteMode: body.deleteMode === 'trash' ? 'trash' : 'permanent',
     // Os campos dos outros tipos ficam nulos (ao trocar o tipo, os dados antigos são descartados).
     graph: null,
     gmail: null,

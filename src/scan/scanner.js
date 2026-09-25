@@ -9,6 +9,7 @@ import { extractFile } from './extractors/index.js';
 import { OwnerResolver } from './owner.js';
 import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
 import { friendlyError, withTimeout } from './errors.js';
+import { deleteFile, deletionEvent } from './delete.js';
 
 // Tempo máximo para ler um arquivo (o que passar disso é registrado como erro e a análise segue).
 const FILE_TIMEOUT = 5 * 60 * 1000;
@@ -24,6 +25,7 @@ export const DEFAULT_OPTIONS = {
   resolveOwner: true,
   concurrency: 4,
   maxSamples: 3,
+  deleteMatches: false, // exclui automaticamente os arquivos em que algum termo for encontrado
 };
 
 /**
@@ -70,6 +72,8 @@ export function newStats(repositoriesTotal = 0) {
     contentErrors: 0,
     bytesAnalyzed: 0,
     errors: 0,
+    deleted: 0,
+    deleteErrors: 0,
   };
 }
 
@@ -80,6 +84,7 @@ export class Scanner {
    */
   constructor(config, emit, { ownerResolver, auditQuery = queryAuditEvents } = {}) {
     this.repositories = config.repositories || [];
+    this.repoById = new Map(this.repositories.map((r) => [r.id, r]));
     this.options = { ...DEFAULT_OPTIONS, ...(config.options || {}) };
     this.matcher = new Matcher(config.terms || [], { maxSamples: this.options.maxSamples, guard: createGuard(config.regexTimeoutMs || 30000) });
     this.abort = new AbortController();
@@ -297,6 +302,7 @@ export class Scanner {
       if (this.pendingOwners.length >= 200) await this.flushOwners();
     } else {
       this.finishRecords([record]);
+      await this.deleteRecords([record]);
     }
   }
 
@@ -340,7 +346,30 @@ export class Scanner {
         record.ownerError = info?.error || (this.cancelled ? 'Análise cancelada antes de identificar o proprietário.' : null);
       }
       this.finishRecords(batch);
+      await this.deleteRecords(batch);
     }
+  }
+
+  /**
+   * Exclusão automática ("analisar e excluir"): os arquivos são excluídos depois de registrados no
+   * relatório, com o proprietário e o último usuário já identificados. Ao cancelar, nada mais é
+   * excluído.
+   */
+  async deleteRecords(records) {
+    if (!this.options.deleteMatches || this.cancelled || records.length === 0) return;
+    const items = [];
+    for (const record of records) {
+      if (this.cancelled) break;
+      const repo = this.repoById.get(record.repositoryId);
+      const result = repo?.allowDelete
+        ? await deleteFile(record.path, { root: repo.path })
+        : { status: 'failed', error: 'A exclusão não está permitida neste repositório.' };
+      if (result.status === 'deleted' || result.status === 'missing') this.stats.deleted++;
+      else this.stats.deleteErrors++;
+      if (result.status === 'failed') this.error(record.path, `Falha ao excluir: ${result.error}`);
+      items.push(deletionEvent(record.id, result, { mode: 'auto', method: 'file', by: 'análise automática' }));
+    }
+    if (items.length) this.emit({ type: 'deletions', items });
   }
 
   finishRecords(records) {

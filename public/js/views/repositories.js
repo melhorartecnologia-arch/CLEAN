@@ -29,6 +29,17 @@ function repoForm(repo, ctx) {
       <small>Aceita curingas * e ?. Um nome vale para arquivos e pastas; use barra para caminhos (Pasta\\Subpasta). Sempre ignorados: ${defaults}.</small>
     </label>
     <fieldset class="full">
+      <legend>Exclusão dos arquivos encontrados</legend>
+      <label class="check">
+        <input type="checkbox" name="allowDelete" ${repo?.allowDelete ? 'checked' : ''} />
+        <span><b>Permitir excluir os arquivos em que os termos forem encontrados</b><br /><small class="muted">Na análise ("analisar e excluir") ou item a item pelo relatório.</small></span>
+      </label>
+      <p class="hint">
+        A exclusão é <b>definitiva</b>: arquivos apagados pela rede não vão para a Lixeira. A conta do CLEAN
+        (${ctx.info?.user || 'serviço'}) precisa de permissão de <b>modificação</b> (NTFS e compartilhamento) nesta pasta.
+      </p>
+    </fieldset>
+    <fieldset class="full">
       <legend>Log de auditoria do Windows (opcional)</legend>
       <label class="check">
         <input type="checkbox" name="auditEnabled" ${audit.enabled ? 'checked' : ''} />
@@ -73,6 +84,7 @@ function readForm(form) {
     path: f.get('path'),
     description: f.get('description'),
     exclude: f.get('exclude'),
+    allowDelete: f.get('allowDelete') === 'on',
     audit: {
       enabled: f.get('auditEnabled') === 'on',
       computer: f.get('auditComputer') || '',
@@ -126,7 +138,7 @@ export async function render(root, { ctx }) {
               </div>`
             : html`<div class="table-wrap">
                 <table class="data">
-                  <thead><tr><th>Nome</th><th>Caminho</th><th>Ignorar</th><th>Auditoria</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                  <thead><tr><th>Nome</th><th>Caminho</th><th>Ignorar</th><th>Auditoria</th><th>Exclusão</th><th><span class="sr-only">Ações</span></th></tr></thead>
                   <tbody>
                     ${repos.map(
                       (r) => html`<tr>
@@ -134,6 +146,7 @@ export async function render(root, { ctx }) {
                         <td class="path">${r.path}</td>
                         <td class="small">${r.exclude?.length ? r.exclude.join(', ') : html`<span class="muted">—</span>`}</td>
                         <td class="small">${r.audit?.enabled ? `Sim (${fmtNum(r.audit.days)} dias${r.audit.computer ? `, ${r.audit.computer}` : ''})` : html`<span class="muted">Não</span>`}</td>
+                        <td class="small">${r.allowDelete ? html`<span class="chip danger">permitida</span>` : html`<span class="muted">Não</span>`}</td>
                         <td class="actions">
                           <button class="icon-btn" data-action="edit" data-id="${r.id}" aria-label="Editar ${r.name}" title="Editar">${icon('edit')}</button>
                           <button class="icon-btn danger" data-action="delete" data-id="${r.id}" aria-label="Excluir ${r.name}" title="Excluir">${icon('trash')}</button>

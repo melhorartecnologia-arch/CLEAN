@@ -33,7 +33,10 @@ function basicAuth(user, password) {
     if (scheme === 'Basic' && encoded) {
       const decoded = Buffer.from(encoded, 'base64').toString('utf8');
       const sep = decoded.indexOf(':');
-      if (sep !== -1 && sameSecret(decoded.slice(0, sep), user) && sameSecret(decoded.slice(sep + 1), password)) return next();
+      if (sep !== -1 && sameSecret(decoded.slice(0, sep), user) && sameSecret(decoded.slice(sep + 1), password)) {
+        req.cleanUser = user; // registrado nas exclusões manuais
+        return next();
+      }
     }
     res.setHeader('WWW-Authenticate', 'Basic realm="CLEAN", charset="UTF-8"');
     res.status(401).send('Autenticação necessária.');
@@ -147,7 +150,7 @@ export function createApp({ store, manager, config }) {
   api.use('/repositories', repositoriesRouter({ store }));
   api.use('/lists', listsRouter({ store }));
   api.use('/mail-sources', mailSourcesRouter({ store, endpoints: config.mailEndpoints }));
-  api.use('/scans', scansRouter({ store, manager }));
+  api.use('/scans', scansRouter({ store, manager, endpoints: config.mailEndpoints }));
   api.use((req, res, next) => next(new HttpError(404, 'Rota não encontrada.')));
   // eslint-disable-next-line no-unused-vars
   api.use((err, req, res, next) => {

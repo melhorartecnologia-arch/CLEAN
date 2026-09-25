@@ -54,7 +54,7 @@ export async function render(root, { ctx }) {
               ${sources.map(
                 (s) => html`<label class="check">
                   <input type="checkbox" name="sourceIds" value="${s.id}" ${sources.length === 1 ? 'checked' : ''} />
-                  <span><b>${s.name}</b><br /><span class="muted small">${sourceDetail(s)}</span></span>
+                  <span><b>${s.name}</b>${s.allowDelete ? html` <span class="chip danger">exclusão ${s.deleteMode === 'trash' ? 'para a lixeira' : 'definitiva'}</span>` : ''}<br /><span class="muted small">${sourceDetail(s)}</span></span>
                 </label>`,
               )}
             </div>
@@ -107,20 +107,47 @@ export async function render(root, { ctx }) {
               </label>
             </div>
           </fieldset>
+          <fieldset class="full">
+            <legend>O que fazer com as mensagens encontradas</legend>
+            <label class="check">
+              <input type="radio" name="action" value="analyze" checked />
+              <span><b>Somente analisar</b><br /><small class="muted">Gera o relatório; nenhuma mensagem é alterada, movida ou marcada como lida. Depois, se quiser, exclua item a item pelo relatório.</small></span>
+            </label>
+            <label class="check">
+              <input type="radio" name="action" value="delete" />
+              <span><b>Analisar e excluir automaticamente</b><br /><small class="muted">Toda mensagem em que algum termo for encontrado é excluída ao fim de cada caixa, sem confirmação item a item, da forma definida em cada conexão (definitiva ou para a lixeira). Só para conexões com "Permitir exclusão".</small></span>
+            </label>
+            <div class="alert error" data-delete-confirm hidden>
+              ${icon('alert')}
+              <div>
+                <b>Exclusão sem volta.</b> Nas conexões com exclusão definitiva, as mensagens não ficam na lixeira do usuário. Confira as listas de referência antes de continuar: tudo o que for encontrado será excluído, inclusive a mensagem inteira quando o termo estiver só em um anexo.
+                <label class="field"><span>Digite EXCLUIR para confirmar</span><input type="text" name="confirmDelete" autocomplete="off" spellcheck="false" /></label>
+              </div>
+            </div>
+          </fieldset>
         </div>
-        <p class="hint">O acesso às caixas é somente leitura: nenhuma mensagem é alterada, movida ou marcada como lida.</p>
         <div class="inline page-actions">
-          <button type="submit" class="btn primary">${icon('play')} Iniciar análise</button>
+          <button type="submit" class="btn primary" data-submit>${icon('play')} Iniciar análise</button>
           <a class="btn" href="#/email/analises">Cancelar</a>
         </div>
       </form>`,
   );
 
   const form = root.querySelector('[data-form]');
+  const submit = form.querySelector('[data-submit]');
+  const onChange = (event) => {
+    if (event.target.name !== 'action') return;
+    const deleting = form.elements.action.value === 'delete';
+    form.querySelector('[data-delete-confirm]').hidden = !deleting;
+    submit.className = `btn ${deleting ? 'danger' : 'primary'}`;
+    paint(submit, html`${icon('play')} ${deleting ? 'Iniciar análise e exclusão' : 'Iniciar análise'}`);
+  };
+  form.addEventListener('change', onChange);
   const onSubmit = async (event) => {
     event.preventDefault();
     const f = new FormData(form);
     const on = (name) => f.get(name) === 'on';
+    const deleting = f.get('action') === 'delete';
     const body = {
       kind: 'mail',
       name: f.get('name'),
@@ -137,11 +164,18 @@ export async function render(root, { ctx }) {
         receivedAfter: f.get('receivedAfter') ? `${f.get('receivedAfter')}T00:00:00` : null,
         maxMessageSizeMB: Number(f.get('maxMessageSizeMB')),
         concurrency: Number(f.get('concurrency')),
+        deleteMatches: deleting,
       },
+      confirmDelete: deleting ? String(f.get('confirmDelete') || '') : '',
     };
     if (body.sourceIds.length === 0) return toast('Selecione ao menos uma conexão de e-mail.', 'error');
     if (body.listIds.length === 0) return toast('Selecione ao menos uma lista de referência.', 'error');
-    const button = form.querySelector('[type="submit"]');
+    if (deleting) {
+      const blocked = sources.filter((s) => body.sourceIds.includes(s.id) && !s.allowDelete).map((s) => s.name);
+      if (blocked.length) return toast(`A exclusão não está permitida em: ${blocked.join(', ')}. Ative em Caixas de e-mail ou escolha "Somente analisar".`, 'error');
+      if (body.confirmDelete.trim().toUpperCase() !== 'EXCLUIR') return toast('Digite EXCLUIR para confirmar a exclusão.', 'error');
+    }
+    const button = submit;
     button.disabled = true;
     try {
       const scan = await post('/api/scans', body);
@@ -153,5 +187,8 @@ export async function render(root, { ctx }) {
     }
   };
   form.addEventListener('submit', onSubmit);
-  return () => form.removeEventListener('submit', onSubmit);
+  return () => {
+    form.removeEventListener('submit', onSubmit);
+    form.removeEventListener('change', onChange);
+  };
 }

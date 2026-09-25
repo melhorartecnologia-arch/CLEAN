@@ -100,6 +100,22 @@ export function startMockApis({ graph = null, google = null } = {}) {
             ...next,
           });
         }
+        m = /^messages\/([^/]+)\/(permanentDelete|move)$/.exec(rest);
+        if (m && req.method === 'POST') {
+          if (user.readOnly) return json(res, 403, { error: { code: 'ErrorAccessDenied', message: 'Access is denied. Check credentials and try again.' } });
+          const folderId = Object.keys(user.messages).find((f) => user.messages[f].some((x) => x.id === m[1]));
+          if (!folderId) return json(res, 404, { error: { code: 'ErrorItemNotFound', message: 'The specified object was not found in the store.' } });
+          const index = user.messages[folderId].findIndex((x) => x.id === m[1]);
+          const [msg] = user.messages[folderId].splice(index, 1);
+          graph.deleted = [...(graph.deleted || []), { user: user.id, id: m[1], how: m[2], prefer: req.headers.prefer || '' }];
+          if (m[2] === 'move') {
+            const target = user.folders.find((f) => f.wellKnown === JSON.parse(body).destinationId)?.id;
+            (user.messages[target] ||= []).push(msg);
+            return json(res, 201, { id: msg.id });
+          }
+          res.writeHead(204);
+          return res.end();
+        }
         m = /^messages\/([^/]+)\/\$value$/.exec(rest);
         if (m) {
           const msg = Object.values(user.messages).flat().find((x) => x.id === m[1]);
@@ -124,7 +140,9 @@ export function startMockApis({ graph = null, google = null } = {}) {
         const known = claims.sub === google.admin || google.users.some((u) => u.mail === claims.sub);
         if (!known) return json(res, 400, { error: 'invalid_grant', error_description: 'Invalid email or User ID' });
         if (claims.scope.includes('directory') && claims.sub !== google.admin) return json(res, 401, { error: 'unauthorized_client', error_description: 'Client is unauthorized' });
-        return json(res, 200, { access_token: `g|${claims.sub}|${claims.scope.includes('directory') ? 'dir' : 'gmail'}`, expires_in: 3600 });
+        const kind = claims.scope.includes('directory') ? 'dir' : claims.scope === 'https://mail.google.com/' ? 'full' : claims.scope.endsWith('gmail.modify') ? 'modify' : 'gmail';
+        if (google.deniedScopes?.has(claims.scope)) return json(res, 401, { error: 'unauthorized_client', error_description: 'Client is unauthorized to retrieve access tokens using this method, or client not authorized for any of the scopes requested.' });
+        return json(res, 200, { access_token: `g|${claims.sub}|${kind}`, expires_in: 3600 });
       }
       if (url.pathname === '/directory/v1/users') {
         if (req.headers.authorization !== `Bearer g|${google.admin}|dir`) return json(res, 403, { error: { code: 403, message: 'Not Authorized to access this resource/api' } });
@@ -133,7 +151,8 @@ export function startMockApis({ graph = null, google = null } = {}) {
       const g = /^\/gmail\/v1\/users\/([^/]+)\/(.*)$/.exec(url.pathname);
       if (g) {
         const mail = decodeURIComponent(g[1]);
-        if (req.headers.authorization !== `Bearer g|${mail}|gmail`) return json(res, 401, { error: { code: 401, message: 'Invalid Credentials', status: 'UNAUTHENTICATED' } });
+        const tokenKind = String(req.headers.authorization || '').startsWith(`Bearer g|${mail}|`) ? req.headers.authorization.split('|')[2] : null;
+        if (!tokenKind || tokenKind === 'dir') return json(res, 401, { error: { code: 401, message: 'Invalid Credentials', status: 'UNAUTHENTICATED' } });
         const user = google.users.find((u) => u.mail === mail);
         if (user.disabled) return json(res, 400, { error: { code: 400, message: 'Mail service not enabled', status: 'FAILED_PRECONDITION' } });
         if (g[2] === 'labels') return json(res, 200, { labels: user.labels });
@@ -156,6 +175,21 @@ export function startMockApis({ graph = null, google = null } = {}) {
           const start = Number(url.searchParams.get('pageToken') || 0);
           const page = list.slice(start, start + 2);
           return json(res, 200, { messages: page.map((m) => ({ id: m.id, threadId: m.id })), ...(start + 2 < list.length ? { nextPageToken: String(start + 2) } : {}) });
+        }
+        const act = /^messages\/([^/]+)(\/trash)?$/.exec(g[2]);
+        if (act && (req.method === 'DELETE' || act[2])) {
+          const needed = act[2] ? ['modify', 'full'] : ['full'];
+          if (!needed.includes(tokenKind)) return json(res, 403, { error: { code: 403, message: 'Request had insufficient authentication scopes.', status: 'PERMISSION_DENIED' } });
+          const index = user.messages.findIndex((x) => x.id === act[1]);
+          if (index === -1) return json(res, 404, { error: { code: 404, message: 'Requested entity was not found.', status: 'NOT_FOUND' } });
+          google.deleted = [...(google.deleted || []), { user: mail, id: act[1], how: act[2] ? 'trash' : 'delete' }];
+          if (act[2]) {
+            user.messages[index].labelIds = ['TRASH'];
+            return json(res, 200, { id: act[1], labelIds: ['TRASH'] });
+          }
+          user.messages.splice(index, 1);
+          res.writeHead(204);
+          return res.end();
         }
         const msg = /^messages\/([^/]+)$/.exec(g[2]);
         if (msg) {

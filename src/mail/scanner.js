@@ -8,6 +8,7 @@ import { formatAddress } from '../scan/extractors/mime.js';
 import { friendlyError, withTimeout } from '../scan/errors.js';
 import { createConnector } from './connectors.js';
 import { validDate } from './common.js';
+import { deletionEvent } from '../scan/delete.js';
 
 // Tempo máximo para ler uma mensagem já baixada (anexos incluídos).
 const MESSAGE_TIMEOUT = 5 * 60 * 1000;
@@ -24,6 +25,7 @@ export const MAIL_DEFAULT_OPTIONS = {
   maxMessageSizeMB: 50, // mensagens maiores: só o início é baixado
   concurrency: 4,
   maxSamples: 3,
+  deleteMatches: false, // exclui automaticamente as mensagens em que algum termo for encontrado
 };
 
 export function newMailStats(sourcesTotal = 0) {
@@ -47,6 +49,8 @@ export function newMailStats(sourcesTotal = 0) {
     attachmentsErrors: 0,
     bytesDownloaded: 0,
     errors: 0,
+    deleted: 0,
+    deleteErrors: 0,
   };
 }
 
@@ -71,6 +75,7 @@ export class MailScanner {
     this.inFlight = new Set(); // mensagens sendo lidas (para mensagens de erro)
     this.pendingErrors = [];
     this.pendingResults = [];
+    this.pendingDeletes = []; // mensagens da caixa atual a excluir (exclusão automática)
     this.lastProgress = 0;
     this.current = null;
     this.maxBytes = Math.max(1, Number(this.options.maxMessageSizeMB) || 50) * 1048576;
@@ -172,6 +177,7 @@ export class MailScanner {
     this.current = { source: source.name, mailbox: mailbox.address, folder: null, path: mailbox.address };
     this.progress(true);
     const before = this.stats.messagesSeen;
+    this.pendingDeletes = [];
     try {
       const items = connector.messages(mailbox, {
         since: this.since,
@@ -203,7 +209,46 @@ export class MailScanner {
       }
       this.error(mailbox.address, err);
       this.log('error', `Falha na caixa ${mailbox.address}: ${friendlyError(err)}`);
+    } finally {
+      // Exclusão automática ao fim de cada caixa: excluir durante a listagem deslocaria a
+      // paginação do servidor e mensagens poderiam ficar sem análise.
+      const pending = this.pendingDeletes.splice(0);
+      if (!this.cancelled && pending.length) await this.deleteMessages(connector, source, mailbox, pending);
     }
+  }
+
+  async deleteMessages(connector, source, mailbox, pending) {
+    const method = source.deleteMode === 'trash' ? 'trash' : 'permanent';
+    this.current = { source: source.name, mailbox: mailbox.address, folder: null, path: `${mailbox.address} › excluindo ${pending.length} mensagem(ns)` };
+    this.progress(true);
+    this.log('info', `Caixa ${mailbox.address}: excluindo ${pending.length} mensagem(ns) ${method === 'trash' ? '(movendo para a lixeira)' : '(definitivamente)'}.`);
+    let results = new Map();
+    let failure = null;
+    if (!source.allowDelete) {
+      failure = 'A exclusão não está permitida nesta conexão.';
+    } else {
+      try {
+        results = await connector.deleteMessages(mailbox, pending.map((p) => p.messageId), method);
+      } catch (err) {
+        if (this.cancelled) return;
+        failure = friendlyError(err);
+        this.log('error', `Falha ao excluir mensagens da caixa ${mailbox.address}: ${failure}`);
+      }
+    }
+    const items = pending.map((p) => {
+      const r = results.get(p.messageId) || { ok: false, error: failure || 'O servidor não confirmou a exclusão.' };
+      const status = r.ok ? 'deleted' : r.missing ? 'missing' : 'failed';
+      if (status === 'failed') {
+        this.stats.deleteErrors++;
+        this.error(`${mailbox.address} › ${p.folder}`, `Falha ao excluir a mensagem "${p.subject || '(sem assunto)'}": ${r.error}`);
+      } else {
+        this.stats.deleted++;
+      }
+      return deletionEvent(p.recordId, { status, error: r.ok ? null : r.error }, { mode: 'auto', method, by: 'análise automática' });
+    });
+    this.flushResults(); // os registros chegam antes dos eventos de exclusão
+    this.emit({ type: 'deletions', items });
+    this.progress(true);
   }
 
   countAttachments(attachments) {
@@ -329,6 +374,7 @@ export class MailScanner {
         terms: [...new Set(matches.map((m) => m.term))],
         matches,
       });
+      if (options.deleteMatches) this.pendingDeletes.push({ recordId: this.seq, messageId: item.id, folder: item.folder, subject: message.subject });
       if (this.pendingResults.length >= 50) this.flushResults();
     } finally {
       this.inFlight.delete(key);

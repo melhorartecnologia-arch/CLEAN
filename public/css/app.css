@@ -620,6 +620,27 @@ table.data .path {
   flex-wrap: wrap;
   gap: 4px;
 }
+.chip.danger {
+  border-color: var(--critical);
+  background: var(--critical-soft);
+  color: var(--critical-ink);
+}
+.chip.deleted {
+  border-color: var(--line-strong);
+  background: transparent;
+  color: var(--ink-2);
+}
+tr.is-deleted .name {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.danger-text {
+  color: var(--critical-ink);
+}
+.badge.deleting {
+  background: var(--critical-soft);
+  color: var(--critical-ink);
+}
 
 .progress-line {
   position: relative;

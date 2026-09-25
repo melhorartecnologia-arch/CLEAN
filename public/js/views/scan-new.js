@@ -44,7 +44,7 @@ export async function render(root, { ctx }) {
               ${repos.map(
                 (r) => html`<label class="check">
                   <input type="checkbox" name="repositoryIds" value="${r.id}" ${repos.length === 1 ? 'checked' : ''} />
-                  <span><b>${r.name}</b><br /><span class="mono muted">${r.path}</span></span>
+                  <span><b>${r.name}</b>${r.allowDelete ? html` <span class="chip danger">exclusão permitida</span>` : ''}<br /><span class="mono muted">${r.path}</span></span>
                 </label>`,
               )}
             </div>
@@ -103,18 +103,46 @@ export async function render(root, { ctx }) {
               </label>
             </div>
           </fieldset>
+          <fieldset class="full">
+            <legend>O que fazer com os arquivos encontrados</legend>
+            <label class="check">
+              <input type="radio" name="action" value="analyze" checked />
+              <span><b>Somente analisar</b><br /><small class="muted">Gera o relatório. Depois, se quiser, exclua item a item pelo relatório.</small></span>
+            </label>
+            <label class="check">
+              <input type="radio" name="action" value="delete" />
+              <span><b>Analisar e excluir automaticamente</b><br /><small class="muted">Todo arquivo em que algum termo for encontrado é excluído, sem confirmação item a item. Só para repositórios com "Permitir exclusão".</small></span>
+            </label>
+            <div class="alert error" data-delete-confirm hidden>
+              ${icon('alert')}
+              <div>
+                <b>Exclusão definitiva e sem volta.</b> Arquivos excluídos pela rede não vão para a Lixeira. Confira as listas de referência antes de continuar: tudo o que for encontrado será apagado.
+                <label class="field"><span>Digite EXCLUIR para confirmar</span><input type="text" name="confirmDelete" autocomplete="off" spellcheck="false" /></label>
+              </div>
+            </div>
+          </fieldset>
         </div>
         <div class="inline page-actions">
-          <button type="submit" class="btn primary">${icon('play')} Iniciar análise</button>
+          <button type="submit" class="btn primary" data-submit>${icon('play')} Iniciar análise</button>
           <a class="btn" href="#/analises">Cancelar</a>
         </div>
       </form>`,
   );
 
   const form = root.querySelector('[data-form]');
+  const submit = form.querySelector('[data-submit]');
+  const onChange = (event) => {
+    if (event.target.name !== 'action') return;
+    const deleting = form.elements.action.value === 'delete';
+    form.querySelector('[data-delete-confirm]').hidden = !deleting;
+    submit.className = `btn ${deleting ? 'danger' : 'primary'}`;
+    paint(submit, html`${icon('play')} ${deleting ? 'Iniciar análise e exclusão' : 'Iniciar análise'}`);
+  };
+  form.addEventListener('change', onChange);
   const onSubmit = async (event) => {
     event.preventDefault();
     const f = new FormData(form);
+    const deleting = f.get('action') === 'delete';
     const body = {
       name: f.get('name'),
       repositoryIds: f.getAll('repositoryIds'),
@@ -127,11 +155,18 @@ export async function render(root, { ctx }) {
         maxFileSizeMB: Number(f.get('maxFileSizeMB')),
         concurrency: Number(f.get('concurrency')),
         resolveOwner: f.get('resolveOwner') === 'on',
+        deleteMatches: deleting,
       },
+      confirmDelete: deleting ? String(f.get('confirmDelete') || '') : '',
     };
     if (body.repositoryIds.length === 0) return toast('Selecione ao menos um repositório.', 'error');
     if (body.listIds.length === 0) return toast('Selecione ao menos uma lista de referência.', 'error');
-    const button = form.querySelector('[type="submit"]');
+    if (deleting) {
+      const blocked = repos.filter((r) => body.repositoryIds.includes(r.id) && !r.allowDelete).map((r) => r.name);
+      if (blocked.length) return toast(`A exclusão não está permitida em: ${blocked.join(', ')}. Ative em Repositórios ou escolha "Somente analisar".`, 'error');
+      if (body.confirmDelete.trim().toUpperCase() !== 'EXCLUIR') return toast('Digite EXCLUIR para confirmar a exclusão.', 'error');
+    }
+    const button = submit;
     button.disabled = true;
     try {
       const scan = await post('/api/scans', body);
@@ -143,5 +178,8 @@ export async function render(root, { ctx }) {
     }
   };
   form.addEventListener('submit', onSubmit);
-  return () => form.removeEventListener('submit', onSubmit);
+  return () => {
+    form.removeEventListener('submit', onSubmit);
+    form.removeEventListener('change', onChange);
+  };
 }

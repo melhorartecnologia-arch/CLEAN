@@ -18,6 +18,7 @@ export function sanitizeOptions(input) {
   if (input.checkContent !== undefined) o.checkContent = Boolean(input.checkContent);
   if (input.nameTarget === 'path' || input.nameTarget === 'file') o.nameTarget = input.nameTarget;
   if (input.resolveOwner !== undefined) o.resolveOwner = Boolean(input.resolveOwner);
+  if (input.deleteMatches !== undefined) o.deleteMatches = Boolean(input.deleteMatches);
   const size = Number(input.maxFileSizeMB);
   if (Number.isFinite(size) && size > 0) o.maxFileSizeMB = Math.min(size, 2048);
   const concurrency = Number(input.concurrency);
@@ -37,7 +38,7 @@ const MAIL_CHECKS = ['checkSubject', 'checkBody', 'checkAttachmentNames', 'check
 export function sanitizeMailOptions(input) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) input = {};
   const o = { ...MAIL_DEFAULT_OPTIONS };
-  for (const k of [...MAIL_CHECKS, 'includeTrash', 'includeJunk']) if (input[k] !== undefined) o[k] = Boolean(input[k]);
+  for (const k of [...MAIL_CHECKS, 'includeTrash', 'includeJunk', 'deleteMatches']) if (input[k] !== undefined) o[k] = Boolean(input[k]);
   const size = Number(input.maxMessageSizeMB);
   if (Number.isFinite(size) && size > 0) o.maxMessageSizeMB = Math.min(size, 500);
   const concurrency = Number(input.concurrency);
@@ -53,8 +54,19 @@ export function sanitizeMailOptions(input) {
 
 /** Configuração da conexão usada pela análise (sem os segredos). */
 function mailSnapshot(source) {
-  const { id, name, type, scope, mailboxes, excludeMailboxes, excludeFolders, graph, gmail, imap } = source;
-  return { id, name, type, scope, mailboxes, excludeMailboxes, excludeFolders, graph, gmail, imap };
+  const { id, name, type, scope, mailboxes, excludeMailboxes, excludeFolders, graph, gmail, imap, allowDelete, deleteMode } = source;
+  return { id, name, type, scope, mailboxes, excludeMailboxes, excludeFolders, graph, gmail, imap, allowDelete: Boolean(allowDelete), deleteMode: deleteMode === 'trash' ? 'trash' : 'permanent' };
+}
+
+/**
+ * "Analisar e excluir": só com a exclusão permitida em todos os locais escolhidos e com a
+ * confirmação digitada na tela ("EXCLUIR").
+ */
+function checkDeletion(opts, body, targets, noun) {
+  if (!opts.deleteMatches) return;
+  const blocked = targets.filter((t) => !t.allowDelete).map((t) => `"${t.name}"`);
+  if (blocked.length) throw new ScanError(`A exclusão não está permitida em ${blocked.join(', ')}. Ative "Permitir exclusão" no cadastro ${noun} ou escolha "Somente analisar".`);
+  if (String(body?.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') throw new ScanError('Para analisar e excluir, digite EXCLUIR na confirmação.');
 }
 
 const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
@@ -94,6 +106,7 @@ export class ScanManager {
     if (repositories.length === 0 || repositories.some((r) => !r)) throw new ScanError('Selecione repositórios válidos.');
     const { lists, terms } = this.#terms(listIds);
     const opts = sanitizeOptions(options);
+    checkDeletion(opts, body, repositories, 'do repositório');
     const scan = this.store.createScan({
       kind: 'files',
       name: this.#scanName(name, 'Análise'),
@@ -113,7 +126,7 @@ export class ScanManager {
       error: null,
     });
     await this.store.writeScanConfig(scan.id, {
-      repositories: repositories.map(({ id, name, path, exclude, audit }) => ({ id, name, path, exclude, audit })),
+      repositories: repositories.map(({ id, name, path, exclude, audit, allowDelete }) => ({ id, name, path, exclude, audit, allowDelete: Boolean(allowDelete) })),
       terms,
       options: opts,
     });
@@ -122,11 +135,13 @@ export class ScanManager {
     return scan;
   }
 
-  async #startMail({ name, sourceIds, listIds, options }) {
+  async #startMail(body) {
+    const { name, sourceIds, listIds, options } = body;
     const sources = ids(sourceIds).map((id) => this.store.getMailSource(id));
     if (sources.length === 0 || sources.some((s) => !s)) throw new ScanError('Selecione conexões de e-mail válidas.');
     const { lists, terms } = this.#terms(listIds);
     const opts = sanitizeMailOptions(options);
+    checkDeletion(opts, body, sources, 'da conexão de e-mail');
     const scan = this.store.createScan({
       kind: 'mail',
       name: this.#scanName(name, 'Análise de e-mail'),
@@ -231,6 +246,9 @@ export class ScanManager {
         break;
       case 'errors':
         store.appendErrors(id, message.items);
+        break;
+      case 'deletions':
+        store.appendDeletions(id, message.items);
         break;
       case 'log':
         store.appendLog(id, message);

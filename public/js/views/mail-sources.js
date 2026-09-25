@@ -165,6 +165,27 @@ function sourceForm(src) {
       </div>
     </fieldset>
 
+    <fieldset class="full">
+      <legend>Exclusão das mensagens encontradas</legend>
+      <label class="check">
+        <input type="checkbox" name="allowDelete" ${src?.allowDelete ? 'checked' : ''} />
+        <span><b>Permitir excluir as mensagens em que os termos forem encontrados</b><br /><small class="muted">Na análise ("analisar e excluir") ou item a item pelo relatório.</small></span>
+      </label>
+      <label class="field" data-delete-mode ${src?.allowDelete ? '' : 'hidden'}>
+        <span>Como excluir</span>
+        <select name="deleteMode">
+          <option value="permanent" ${src?.deleteMode !== 'trash' ? 'selected' : ''}>Excluir definitivamente</option>
+          <option value="trash" ${src?.deleteMode === 'trash' ? 'selected' : ''}>Mover para a Lixeira (Itens Excluídos)</option>
+        </select>
+      </label>
+      <p class="hint" data-delete-help ${src?.allowDelete ? '' : 'hidden'}>
+        Permissões necessárias — <b>Microsoft 365:</b> Mail.ReadWrite (tipo Aplicativo) no lugar de Mail.Read.
+        <b>Google Workspace:</b> autorize também o escopo <code>https://mail.google.com/</code> (definitiva) ou
+        <code>https://www.googleapis.com/auth/gmail.modify</code> (lixeira) na delegação em todo o domínio.
+        <b>IMAP:</b> a conta precisa poder alterar a caixa. Retenções e bloqueios legais do provedor continuam valendo.
+      </p>
+    </fieldset>
+
     <label class="field full">
       <span>Pastas ignoradas (uma por linha)</span>
       <textarea name="excludeFolders" rows="2" placeholder="Pessoal&#10;Caixa de Entrada/Newsletters">${(src?.excludeFolders || []).join('\n')}</textarea>
@@ -185,7 +206,14 @@ function sourceForm(src) {
 function readForm(form, existing) {
   const f = new FormData(form);
   const type = f.get('type');
-  const body = { name: f.get('name'), type, description: f.get('description'), excludeFolders: f.get('excludeFolders') };
+  const body = {
+    name: f.get('name'),
+    type,
+    description: f.get('description'),
+    excludeFolders: f.get('excludeFolders'),
+    allowDelete: f.get('allowDelete') === 'on',
+    deleteMode: f.get('deleteMode') || 'permanent',
+  };
   if (existing) body.id = existing.id;
   if (type === 'graph') body.graph = { tenantId: f.get('tenantId'), clientId: f.get('clientId'), clientSecret: f.get('clientSecret') };
   if (type === 'gmail') body.gmail = { serviceAccountJson: f.get('serviceAccountJson'), adminEmail: f.get('adminEmail') };
@@ -257,6 +285,9 @@ function wireForm(form, existing) {
       el.hidden = el.dataset.scope !== scope;
     });
     form.querySelector('[data-domain]').textContent = TYPES[type]?.domain || '';
+    const deletion = form.elements.allowDelete.checked;
+    form.querySelector('[data-delete-mode]').hidden = !deletion;
+    form.querySelector('[data-delete-help]').hidden = !deletion;
   };
   form.addEventListener('change', (event) => {
     if (event.target.name === 'security') {
@@ -352,6 +383,11 @@ function credentialText(s) {
   return `${im.host}:${im.port} · ${SECURITY[im.security]?.label || im.security}`;
 }
 
+function deletionText(s) {
+  if (!s.allowDelete) return html`<span class="muted">Não</span>`;
+  return html`<span class="chip danger">${s.deleteMode === 'trash' ? 'para a lixeira' : 'definitiva'}</span>`;
+}
+
 export async function render(root) {
   let sources = [];
 
@@ -375,7 +411,7 @@ export async function render(root) {
               </div>`
             : html`<div class="table-wrap">
                 <table class="data">
-                  <thead><tr><th>Nome</th><th>Tipo</th><th>Caixas</th><th>Credencial</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                  <thead><tr><th>Nome</th><th>Tipo</th><th>Caixas</th><th>Credencial</th><th>Exclusão</th><th><span class="sr-only">Ações</span></th></tr></thead>
                   <tbody>
                     ${sources.map(
                       (s) => html`<tr>
@@ -383,6 +419,7 @@ export async function render(root) {
                         <td class="nowrap">${TYPES[s.type]?.label || s.type}</td>
                         <td class="small">${scopeText(s)}${s.type === 'imap' || s.scope === 'list' ? html`<div class="muted">${s.mailboxes.slice(0, 3).map((m) => m.address).join(', ')}${s.mailboxes.length > 3 ? '…' : ''}</div>` : ''}</td>
                         <td class="small">${credentialText(s)}</td>
+                        <td class="small">${deletionText(s)}</td>
                         <td class="actions">
                           <button class="icon-btn" data-action="test" data-id="${s.id}" aria-label="Testar ${s.name}" title="Testar conexão">${icon('check')}</button>
                           <button class="icon-btn" data-action="edit" data-id="${s.id}" aria-label="Editar ${s.name}" title="Editar">${icon('edit')}</button>

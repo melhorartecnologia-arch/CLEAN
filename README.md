@@ -24,6 +24,8 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   as pastas, assunto, corpo, nomes e conteúdo dos anexos (os mesmos formatos acima, inclusive
   e-mails encaminhados como anexo). O relatório mostra a caixa, a pasta, o remetente, os
   destinatários e a data de cada mensagem encontrada. Senhas e chaves ficam gravadas cifradas.
+- **Exclusão** opcional dos arquivos e mensagens encontrados: automática durante a análise
+  ("analisar e excluir") ou item a item pelo relatório, com registro de cada exclusão.
 - Sem banco de dados e sem etapa de compilação: basta instalar o Node.js e executar.
 
 ## Sumário
@@ -38,11 +40,12 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
    - [Microsoft 365 (Exchange Online)](#microsoft-365-exchange-online)
    - [Google Workspace (Gmail)](#google-workspace-gmail)
    - [Servidores IMAP](#servidores-imap)
-8. [Executando como serviço](#executando-como-serviço)
-9. [Configuração](#configuração)
-10. [Segurança](#segurança)
-11. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
-12. [Desenvolvimento](#desenvolvimento)
+8. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
+9. [Executando como serviço](#executando-como-serviço)
+10. [Configuração](#configuração)
+11. [Segurança](#segurança)
+12. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
+13. [Desenvolvimento](#desenvolvimento)
 
 ## Requisitos
 
@@ -316,6 +319,50 @@ sem repetir as mensagens de cada marcador.
   (Base-64) e defina, também antes de iniciar, `NODE_EXTRA_CA_CERTS=C:\CLEAN\certificado-empresa.pem`
   (há uma linha pronta no `iniciar.bat`).
 
+## Exclusão dos itens encontrados
+
+Além de só analisar, o CLEAN pode **excluir** os arquivos e as mensagens de e-mail em que algum
+termo das listas for encontrado — sem critério adicional: basta um termo encontrado para o item ser
+excluído. Há três formas de trabalhar:
+
+| Modo | Como usar | O que acontece |
+|---|---|---|
+| **Somente analisar** | *Nova análise › O que fazer com os itens encontrados › Somente analisar* (padrão) | Gera o relatório; nada é alterado. |
+| **Analisar e excluir automaticamente** | *Nova análise › Analisar e excluir automaticamente* e digitar **EXCLUIR** para confirmar | Cada item encontrado é excluído durante a análise, sem confirmação item a item. Arquivos: logo depois de registrados no relatório. E-mails: ao fim de cada caixa (para não atrapalhar a leitura das pastas). |
+| **Excluir depois, item a item** | No relatório, abra o item e clique em **Excluir arquivo** / **Excluir mensagem** | Exclui só aquele item, depois de uma confirmação. Se o arquivo mudou depois da análise, o CLEAN avisa e pede uma segunda confirmação. |
+
+Salvaguardas:
+
+- a exclusão só funciona nos repositórios e nas conexões de e-mail com **Permitir exclusão**
+  marcado no cadastro (desmarcado por padrão);
+- o modo automático exige digitar **EXCLUIR** ao iniciar a análise; ao **cancelar** a análise, nada
+  mais é excluído;
+- cada exclusão fica registrada: no relatório (situação de cada item, filtro *Exclusão* e o bloco
+  *Excluídos*), no **Registro** da análise (exclusões manuais, com quem excluiu) e na aba
+  **Exclusões** do Excel (quando, o quê, automática ou manual, por quem e o resultado); os arquivos
+  CSV e HTML têm a coluna *Exclusão*;
+- "quem excluiu" é o usuário da autenticação (`AUTH_USER`) ou o endereço de acesso.
+
+Como cada tipo é excluído e a permissão necessária:
+
+| Onde | Exclusão | Permissão |
+|---|---|---|
+| Arquivos (pastas e compartilhamentos) | **Definitiva**: arquivos apagados pela rede não vão para a Lixeira do Windows. Arquivos somente leitura também são excluídos. | A conta do CLEAN precisa de permissão de **modificação** (NTFS e compartilhamento), não só de leitura. |
+| Microsoft 365 | *Excluir definitivamente* (a mensagem vai para a área de expurgo e some para o usuário) ou *Mover para a Lixeira* (Itens Excluídos), conforme a conexão. | **`Mail.ReadWrite`** (tipo Aplicativo) no lugar de `Mail.Read`; com o RBAC para aplicativos, a função `Application Mail.ReadWrite`. |
+| Google Workspace | Definitiva ou para a Lixeira, conforme a conexão. | Na delegação em todo o domínio, inclua o escopo `https://mail.google.com/` (definitiva) ou `https://www.googleapis.com/auth/gmail.modify` (lixeira). |
+| IMAP | Definitiva (marca e expurga só as mensagens encontradas) ou para a pasta Lixeira do servidor. | A conta precisa poder alterar a caixa. |
+
+Importante:
+
+- **não há como desfazer** a exclusão definitiva pelo CLEAN. Confira as listas de referência e rode
+  primeiro *Somente analisar* para ver o que seria excluído;
+- em e-mails, a mensagem inteira é excluída mesmo quando o termo está só em um anexo;
+- retenções, bloqueios de litígio (Microsoft Purview, Google Vault) e backups do provedor ou do
+  servidor de arquivos (cópias de sombra, snapshots) continuam valendo: o item pode continuar
+  preservado neles, como exige a política da empresa;
+- o Microsoft 365 é acessado com identificadores imutáveis: uma mensagem movida de pasta depois da
+  análise ainda pode ser excluída pelo relatório.
+
 ## Executando como serviço
 
 Para que o CLEAN inicie com o Windows, sem sessão aberta, use o Agendador de Tarefas (nativo). Em
@@ -364,7 +411,10 @@ lista, dados pessoais e senhas encontradas. Por isso:
   credenciais cifradas das caixas de e-mail e a chave que as decifra), por exemplo:
   `icacls C:\CLEAN\data /inheritance:r /grant:r "Administradores:(OI)(CI)F" "EMPRESA\svc-clean:(OI)(CI)M"`;
 - dê à conexão de e-mail apenas o acesso necessário (permissões de leitura; no Microsoft 365, de
-  preferência limitado às caixas analisadas pelo RBAC para aplicativos);
+  preferência limitado às caixas analisadas pelo RBAC para aplicativos) e só conceda permissões de
+  escrita e marque *Permitir exclusão* onde a exclusão for realmente usada;
+- com a exclusão permitida, qualquer pessoa com acesso à interface pode excluir itens pelo
+  relatório: defina `AUTH_USER`/`AUTH_PASSWORD` para que fique registrado quem excluiu;
 - a interface tem proteção contra CSRF e política de segurança de conteúdo; o CLEAN nunca altera
   os arquivos analisados, apenas os lê.
 
@@ -411,6 +461,7 @@ src/
   routes/                                  API REST (/api/repositories, /api/lists, /api/mail-sources, /api/scans)
   scan/
     scanner.js, worker.js, manager.js      análise em worker thread, fila e cancelamento
+    delete.js                              exclusão dos arquivos encontrados
     walker.js                              percurso das pastas e exclusões
     matcher.js, presets.js                 busca de termos (Aho-Corasick), regex e validadores
     owner.js, audit.js, powershell.js      proprietário NTFS e log de auditoria via PowerShell

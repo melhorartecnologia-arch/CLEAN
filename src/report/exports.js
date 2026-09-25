@@ -11,6 +11,8 @@ import {
   STATUS_LABELS,
   LOCATION_LABELS,
   SCAN_STATUS_LABELS,
+  DELETION_LABELS,
+  deletionText,
 } from './model.js';
 
 export const toDate = (iso) => (iso ? new Date(iso) : null);
@@ -51,6 +53,7 @@ const FILE_COLUMNS = [
   ['Ocorrências', 11],
   ['Encontrado em', 14],
   ['Situação do conteúdo', 20],
+  ['Exclusão', 34],
   ['Caminho completo', 60],
 ];
 
@@ -76,8 +79,29 @@ function fileRow(r) {
     r.occurrences,
     locations(r),
     STATUS_LABELS[r.contentStatus] || r.contentStatus || '',
+    deletionText(r.deletion),
     r.path,
   ];
+}
+
+/**
+ * Aba "Exclusões": todas as exclusões (automáticas e manuais) da análise, na ordem em que
+ * aconteceram. label(record) descreve o item (caminho do arquivo ou caixa e assunto).
+ */
+export function deletionsSheet(deletions, records, columns, label) {
+  const byId = new Map(records.map((r) => [r.id, r]));
+  return {
+    name: 'Exclusões',
+    cols: [17, ...columns.map(([, w]) => w), 22, 26, 22, 50],
+    header: ['Quando', ...columns.map(([h]) => h), 'Resultado', 'Como', 'Por', 'Detalhe'],
+    rows: (function* () {
+      for (const d of deletions) {
+        const record = byId.get(d.recordId);
+        const how = `${d.mode === 'auto' ? 'Automática (na análise)' : 'Manual (relatório)'}${d.method === 'trash' ? ' – para a lixeira' : d.method === 'permanent' ? ' – definitiva' : ''}`;
+        yield [toDate(d.at), ...label(record), DELETION_LABELS[d.status] || d.status, how, d.by || '', d.error || ''];
+      }
+    })(),
+  };
 }
 
 const MATCH_COLUMNS = [
@@ -134,6 +158,8 @@ function scanInfoRows(scan) {
     ['Protegidos por senha', s.contentEncrypted ?? 0],
     ['Grandes demais (só nome)', s.contentSkippedSize ?? 0],
     ['Erros de acesso/leitura', s.errors ?? 0],
+    ['Ação', opts.deleteMatches ? 'Analisar e excluir automaticamente' : 'Somente analisar'],
+    ...(opts.deleteMatches ? [['Excluídos na análise', s.deleted ?? 0], ['Falhas na exclusão', s.deleteErrors ?? 0]] : []),
   ];
 }
 
@@ -150,7 +176,7 @@ export async function writeAll(out, chunks) {
   if (buffer) out.write(buffer);
 }
 
-export async function exportXlsx(scan, records, errors, out) {
+export async function exportXlsx(scan, records, errors, out, { deletions = [], records: all = records } = {}) {
   const sorted = sortRecords(records);
   const summary = summarize(sorted);
 
@@ -183,6 +209,7 @@ export async function exportXlsx(scan, records, errors, out) {
       })(),
     },
   ];
+  if (deletions.length) sheets.push(deletionsSheet(deletions, all, [['Arquivo', 70]], (r) => [r?.path || '']));
   if (errors.length) {
     sheets.push({
       name: 'Erros',
@@ -221,13 +248,13 @@ export function csvCell(value) {
  * como o Excel em português espera.
  */
 export async function exportCsv(records, out) {
-  const header = [...MATCH_COLUMNS.map(([h]) => h), 'Fonte do último usuário', 'Proprietário (NTFS)', 'Salvo por último por (metadados)', 'Último acesso (auditoria)'];
+  const header = [...MATCH_COLUMNS.map(([h]) => h), 'Fonte do último usuário', 'Proprietário (NTFS)', 'Salvo por último por (metadados)', 'Último acesso (auditoria)', 'Exclusão'];
   await writeAll(
     out,
     (function* () {
       yield `\uFEFF${header.map(csvCell).join(';')}\r\n`;
       for (const r of sortRecords(records)) {
-        const extra = [SOURCE_LABELS[r.lastUserSource] || '', r.owner || '', r.metadata?.lastModifiedBy || '', auditText(r.audit)];
+        const extra = [SOURCE_LABELS[r.lastUserSource] || '', r.owner || '', r.metadata?.lastModifiedBy || '', auditText(r.audit), deletionText(r.deletion)];
         for (const row of matchRows(r)) yield `${[...row, ...extra].map(csvCell).join(';')}\r\n`;
       }
     })(),
@@ -294,7 +321,8 @@ export async function exportHtml(scan, records, out) {
       .map((m) => `<div><span class="term">${escapeHtml(m.term)}</span> ${escapeHtml(LOCATION_LABELS[m.location])} · ${m.count}×${m.samples.map(sample).join('')}</div>`)
       .join('');
     const user = r.lastUser ? `${escapeHtml(r.lastUser)}<div class="muted">${escapeHtml(SOURCE_LABELS[r.lastUserSource] || '')}</div>` : '<span class="muted">não identificado</span>';
-    return `<tr><td><b>${escapeHtml(r.name)}</b><div class="path">${escapeHtml(r.path)}</div></td><td>${user}</td><td>${escapeHtml(formatDateTime(r.modified))}</td><td>${found}</td></tr>`;
+    const deleted = r.deletion ? `<div class="muted">${escapeHtml(deletionText(r.deletion))}</div>` : '';
+    return `<tr><td><b>${escapeHtml(r.name)}</b><div class="path">${escapeHtml(r.path)}</div>${deleted}</td><td>${user}</td><td>${escapeHtml(formatDateTime(r.modified))}</td><td>${found}</td></tr>`;
   };
   await writeAll(
     out,
