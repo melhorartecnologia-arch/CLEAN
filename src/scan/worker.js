@@ -2,8 +2,10 @@
 // permite interromper uma análise a qualquer momento.
 import { parentPort, workerData } from 'node:worker_threads';
 import { Scanner } from './scanner.js';
+import { MailScanner } from '../mail/scanner.js';
 
-const scanner = new Scanner(workerData, (message) => parentPort.postMessage(message));
+const emit = (message) => parentPort.postMessage(message);
+const scanner = workerData.kind === 'mail' ? new MailScanner(workerData, emit) : new Scanner(workerData, emit);
 
 // Bibliotecas de leitura (ex.: pdf.js com um PDF danificado) podem gerar erros fora da promessa
 // aguardada. Sem estes tratadores a thread inteira seria encerrada e a análise falharia; com eles o
@@ -13,8 +15,8 @@ function report(kind, err) {
   const message = `${err?.name || 'Erro'}: ${err?.message || err}`;
   if (seen.has(message) || seen.size > 50) return;
   seen.add(message);
-  const files = scanner.inFlight.size ? ` Arquivos em leitura: ${[...scanner.inFlight].join(' | ')}` : '';
-  scanner.log('warn', `Erro interno ignorado (${kind}) ao ler um arquivo: ${message}.${files}`);
+  const items = scanner.inFlight.size ? ` Em leitura: ${[...scanner.inFlight].join(' | ')}` : '';
+  scanner.log('warn', `Erro interno ignorado (${kind}): ${message}.${items}`);
 }
 process.on('unhandledRejection', (reason) => report('promessa', reason));
 process.on('uncaughtException', (err) => report('exceção', err));

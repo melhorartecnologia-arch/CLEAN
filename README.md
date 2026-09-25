@@ -1,9 +1,11 @@
-# CLEAN — Análise de repositórios de arquivos
+# CLEAN — Análise de repositórios de arquivos e caixas de e-mail
 
 Aplicação web em Node.js que percorre repositórios de arquivos do Windows (pastas locais e
 compartilhamentos de rede), procura os termos de uma **lista de referência** no **nome** e no
 **conteúdo** dos arquivos e gera relatórios com **a informação encontrada** e **o último usuário que
-interagiu com cada arquivo**.
+interagiu com cada arquivo**. A seção **E-mail** faz a mesma busca em **caixas de e-mail
+pré-configuradas** (Microsoft 365, Google Workspace ou servidores IMAP): varre todas as caixas e
+pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada mensagem.
 
 - Listas de referência com termos de texto (sem diferenciar maiúsculas e acentos: "salario" encontra
   "SALÁRIO") ou expressões regulares, com modelos prontos e validados: CPF, CNPJ (inclusive o novo
@@ -17,6 +19,11 @@ interagiu com cada arquivo**.
   por") e **proprietário do arquivo (NTFS)**.
 - Relatório na tela com filtros, gráficos e trechos em que cada termo aparece (com página, planilha,
   slide ou linha), e exportação para **Excel**, **CSV**, **HTML** (para imprimir) e **JSON**.
+- Caixas de e-mail do **Microsoft 365** (API Microsoft Graph), do **Google Workspace** (API do
+  Gmail) ou de qualquer servidor **IMAP**: todas as caixas do locatário/domínio ou uma lista, todas
+  as pastas, assunto, corpo, nomes e conteúdo dos anexos (os mesmos formatos acima, inclusive
+  e-mails encaminhados como anexo). O relatório mostra a caixa, a pasta, o remetente, os
+  destinatários e a data de cada mensagem encontrada. Senhas e chaves ficam gravadas cifradas.
 - Sem banco de dados e sem etapa de compilação: basta instalar o Node.js e executar.
 
 ## Sumário
@@ -27,11 +34,15 @@ interagiu com cada arquivo**.
 4. [Como o último usuário é identificado](#como-o-último-usuário-é-identificado)
 5. [Habilitando a auditoria do Windows (opcional)](#habilitando-a-auditoria-do-windows-opcional)
 6. [Conta de serviço e permissões](#conta-de-serviço-e-permissões)
-7. [Executando como serviço](#executando-como-serviço)
-8. [Configuração](#configuração)
-9. [Segurança](#segurança)
-10. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
-11. [Desenvolvimento](#desenvolvimento)
+7. [Análise de caixas de e-mail](#análise-de-caixas-de-e-mail)
+   - [Microsoft 365 (Exchange Online)](#microsoft-365-exchange-online)
+   - [Google Workspace (Gmail)](#google-workspace-gmail)
+   - [Servidores IMAP](#servidores-imap)
+8. [Executando como serviço](#executando-como-serviço)
+9. [Configuração](#configuração)
+10. [Segurança](#segurança)
+11. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
+12. [Desenvolvimento](#desenvolvimento)
 
 ## Requisitos
 
@@ -91,6 +102,9 @@ de exemplo. Depois é só iniciar uma análise.
 
 As análises rodam em segundo plano (é possível fechar o navegador) e podem ser canceladas a qualquer
 momento; o que já foi encontrado é mantido.
+
+Para as caixas de e-mail, use o grupo **E-mail** do menu: *Caixas de e-mail* (conexões) e *Análises
+de e-mail* — veja [Análise de caixas de e-mail](#análise-de-caixas-de-e-mail).
 
 ## Como o último usuário é identificado
 
@@ -160,6 +174,140 @@ dedicada (por exemplo `EMPRESA\svc-clean`) com:
 
 Pastas que a conta não consegue abrir aparecem na aba **Erros** do relatório.
 
+## Análise de caixas de e-mail
+
+A seção **E-mail** procura os termos das listas de referência nas mensagens de caixas de e-mail
+cadastradas previamente:
+
+1. **Caixas de e-mail** — cadastre uma ou mais conexões. Cada conexão é de um tipo:
+   - **Microsoft 365** (Exchange Online): pela API Microsoft Graph, com um registro de aplicativo.
+     Analisa **todas as caixas do locatário** (inclusive caixas compartilhadas) ou só as informadas.
+   - **Google Workspace** (Gmail): pela API do Gmail, com uma conta de serviço com delegação em todo
+     o domínio. Analisa **todas as caixas do domínio** ou só as informadas.
+   - **IMAP**: qualquer servidor IMAP (Exchange local, Zimbra, Dovecot, provedores de hospedagem...),
+     com o login e a senha de cada caixa ou uma senha padrão de uma conta de serviço.
+
+   Em cada conexão é possível ignorar caixas (`noreply@*`) e pastas (`Pessoal`,
+   `Caixa de Entrada/Newsletters`; aceita `*` e `?` e vale também para as subpastas). O botão
+   **Testar conexão** confere as credenciais, as permissões e o acesso a até três caixas.
+2. **Análises de e-mail › Nova análise** — escolha as conexões, as listas e onde procurar:
+   **assunto**, **corpo**, **nomes dos anexos**, **conteúdo dos anexos** e, se quiser, remetente e
+   destinatários. Opções: somente mensagens recebidas a partir de uma data, incluir a **Lixeira**
+   (Itens Excluídos, marcada por padrão) e o **Lixo Eletrônico** (spam, desmarcado), tamanho máximo
+   por mensagem (maiores: só o início é baixado) e downloads em paralelo.
+3. **Relatório** — números da análise (caixas, mensagens, anexos lidos), gráficos de termos,
+   **caixas**, **remetentes** e **onde foi encontrado** (clique numa barra para filtrar), e a lista de
+   mensagens com ocorrências. Cada mensagem mostra caixa, pasta, datas de recebimento e envio,
+   remetente, destinatários, anexos (com a situação da leitura de cada um), Message-ID, o link para
+   abrir no Outlook na Web (Microsoft 365) e os trechos encontrados — em anexos, com o nome do anexo
+   e a página, planilha ou slide. Exportações: **Excel** (abas *Resumo*, *Mensagens*, *Ocorrências* e
+   *Erros*), **CSV**, **HTML** e **JSON**.
+
+Nas mensagens, "quem interagiu" é o **remetente** (quem enviou a informação), os **destinatários** e
+o **dono da caixa** em que a mensagem está guardada.
+
+Todas as pastas de cada caixa são percorridas, com as subpastas. O conteúdo dos anexos é lido pelos
+mesmos leitores dos arquivos (Word, Excel, PowerPoint, PDF, OpenDocument, RTF, textos, HTML e nomes
+dentro de .zip), inclusive **mensagens encaminhadas como anexo** (.eml e .msg) e os anexos delas. O
+acesso é **somente leitura**: nenhuma mensagem é alterada, movida ou marcada como lida.
+
+### Microsoft 365 (Exchange Online)
+
+Crie um registro de aplicativo no Microsoft Entra ID (é preciso ser administrador global ou de
+aplicativos):
+
+1. Em [entra.microsoft.com](https://entra.microsoft.com), abra *Identidade › Aplicativos ›
+   Registros de aplicativo › Novo registro*. Nome: `CLEAN`; tipos de conta: *somente contas deste
+   diretório organizacional*. Não é preciso URI de redirecionamento.
+2. Em *Permissões de API › Adicionar uma permissão › Microsoft Graph › Permissões de aplicativo*,
+   inclua **`Mail.Read`** e **`User.Read.All`** e clique em **Conceder consentimento do administrador**.
+   (`Mail.Read` lê as mensagens; `User.Read.All` lista as caixas do locatário e encontra cada caixa
+   pelo endereço de e-mail.)
+3. Em *Certificados e segredos › Novo segredo do cliente*, escolha a validade e copie o **Valor**
+   (ele só é exibido uma vez; não confunda com o *ID do segredo*). Anote a data de expiração: ao
+   vencer, gere outro e atualize a conexão no CLEAN.
+4. Na página *Visão geral*, copie o **ID do aplicativo (cliente)** e o **ID do diretório
+   (locatário)**.
+5. No CLEAN, em *Caixas de e-mail › Nova conexão › Microsoft 365*, informe os dois IDs e o segredo,
+   escolha *Todas as caixas do locatário* ou informe as caixas, e clique em *Testar conexão*.
+
+A permissão de aplicativo `Mail.Read` dá acesso de leitura a **todas** as caixas do locatário. Para
+limitar o CLEAN a algumas caixas, não conceda `Mail.Read` no Entra ID e use o **RBAC para
+aplicativos** do Exchange Online (PowerShell com o módulo *ExchangeOnlineManagement*):
+
+```powershell
+Connect-ExchangeOnline
+# ID do aplicativo e ID de objeto da entidade de serviço (Entra ID › Aplicativos empresariais › CLEAN)
+New-ServicePrincipal -AppId <ID do aplicativo> -ObjectId <ID de objeto> -DisplayName 'CLEAN'
+New-ManagementScope -Name 'Caixas analisadas pelo CLEAN' -RecipientRestrictionFilter "MemberOfGroup -eq '<DN do grupo com as caixas>'"
+New-ManagementRoleAssignment -App <ID do aplicativo> -Role 'Application Mail.Read' -CustomResourceScope 'Caixas analisadas pelo CLEAN'
+```
+
+Observações: usuários sem licença do Exchange (sem caixa) são ignorados e aparecem no registro da
+análise; o **arquivo morto online** (In-Place Archive) não é acessível pela API; o Exchange Online
+aceita até 4 downloads simultâneos por caixa e, ao atingir o limite de requisições, o CLEAN espera o
+tempo indicado pelo serviço e continua (aviso no registro).
+
+### Google Workspace (Gmail)
+
+1. No [Google Cloud Console](https://console.cloud.google.com), crie ou escolha um projeto e ative
+   a **Gmail API** e a **Admin SDK API** (*APIs e serviços › Biblioteca*).
+2. Em *IAM e administrador › Contas de serviço*, crie uma conta (ex.: `clean`). Em *Chaves ›
+   Adicionar chave › Criar nova chave › JSON*, baixe o arquivo. (Se a organização bloqueia chaves de
+   contas de serviço, um administrador precisa liberar a política
+   `iam.disableServiceAccountKeyCreation` para o projeto.)
+3. No [Admin Console](https://admin.google.com), abra *Segurança › Acesso e controle de dados ›
+   Controles de API › Delegação em todo o domínio › Adicionar novo*. Informe o **ID do cliente** da
+   conta de serviço (campo `client_id` do JSON) e os escopos:
+
+   ```
+   https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly
+   ```
+
+4. No CLEAN, em *Nova conexão › Google Workspace*, envie o arquivo JSON e informe o e-mail de um
+   **administrador** (usado só para listar os usuários do domínio quando todas as caixas são
+   analisadas). *Testar conexão* confere a delegação e o acesso a até três caixas.
+
+A "pasta" de cada mensagem são os seus **marcadores** (ex.: `Caixa de entrada; Clientes/2026`); as
+pastas ignoradas valem para os marcadores. Usuários sem Gmail habilitado são ignorados.
+
+### Servidores IMAP
+
+Informe o servidor, a porta e a segurança (*SSL/TLS*, porta 993, recomendado; ou *STARTTLS*, porta
+143) e as caixas. Cada caixa usa o seu **login** (por padrão, o próprio e-mail) e a sua **senha**;
+caixas sem senha própria usam a **senha padrão** da conexão. *Adicionar várias* inclui uma lista de
+e-mails de uma vez. Para servidores internos com certificado próprio, marque *Aceitar certificado
+não confiável*.
+
+Com uma conta de serviço, não é preciso saber a senha de cada usuário:
+
+- **Exchange Server local** (com o serviço IMAP4 habilitado): dê à conta de serviço acesso total às
+  caixas (`Add-MailboxPermission -Identity <caixa> -User svc-clean -AccessRights FullAccess
+  -AutoMapping $false`) e use como login `DOMINIO\svc-clean\<alias da caixa>` com a senha da conta de
+  serviço como senha padrão.
+- **Dovecot** com usuário mestre: login `<caixa>*<usuário mestre>` e a senha do usuário mestre.
+- **Provedores de hospedagem** e outros servidores: o login e a senha de cada caixa (ou uma senha de
+  aplicativo, quando o provedor exige verificação em duas etapas).
+
+O Microsoft 365 e o Gmail não aceitam mais senha simples por IMAP: para eles, use os tipos próprios
+acima. No Gmail via IMAP, a pasta *Todos os e-mails* é analisada uma única vez (com os marcadores),
+sem repetir as mensagens de cada marcador.
+
+### Credenciais e rede
+
+- Senhas, segredos do cliente e chaves privadas são gravados **cifrados** (AES-256-GCM) no
+  `db.json`. A chave fica em `data\chave-segredos.key` (criada na primeira execução) ou na variável
+  `CLEAN_SECRET_KEY`. **Faça cópia da chave junto com o backup da pasta `data`**: sem ela, as senhas
+  precisam ser informadas de novo.
+- As credenciais nunca voltam para o navegador: nos formulários, deixar um campo de senha em branco
+  mantém a senha salva. Ao trocar o servidor IMAP, as senhas salvas são descartadas (e precisam ser
+  informadas de novo), para que não sejam enviadas a outro endereço.
+- O CLEAN precisa acessar `login.microsoftonline.com` e `graph.microsoft.com` (Microsoft 365) ou
+  `oauth2.googleapis.com`, `gmail.googleapis.com` e `admin.googleapis.com` (Google) pela porta 443.
+  Se a rede exige **proxy**, defina, antes de iniciar o CLEAN (Node.js 22.21 ou superior), as
+  variáveis de ambiente `NODE_USE_ENV_PROXY=1` e `HTTPS_PROXY=http://proxy.empresa.local:3128` — por
+  exemplo, retirando o `rem` das linhas correspondentes no `iniciar.bat`.
+
 ## Executando como serviço
 
 Para que o CLEAN inicie com o Windows, sem sessão aberta, use o Agendador de Tarefas (nativo). Em
@@ -190,6 +338,8 @@ projeto (copie o `.env.example`):
 | `DATA_DIR` | `data` | Pasta com a configuração (`db.json`) e os resultados de cada análise (`scans\<id>`). |
 | `MAX_CONCURRENT_SCANS` | `1` | Análises simultâneas; as demais aguardam na fila. |
 | `POWERSHELL_PATH` | `powershell.exe` | PowerShell usado para o proprietário e o log de auditoria. |
+| `CLEAN_SECRET_KEY` | — | Chave (32 bytes em base64) que cifra as senhas das caixas de e-mail. Sem ela, é usada a chave do arquivo `data\chave-segredos.key`. |
+| `NODE_USE_ENV_PROXY` / `HTTPS_PROXY` | — | Proxy de saída para o Microsoft 365 e o Google (precisam estar definidas antes de iniciar o Node.js; veja *Credenciais e rede*). |
 
 ## Segurança
 
@@ -202,7 +352,11 @@ lista, dados pessoais e senhas encontradas. Por isso:
 - ao liberar o acesso pela rede, defina `AUTH_USER` e `AUTH_PASSWORD` e, de preferência, publique o
   CLEAN atrás de um proxy HTTPS (IIS com URL Rewrite/ARR, por exemplo) e inclua o endereço público
   em `ALLOWED_HOSTS`;
-- proteja a pasta `data` com permissões NTFS restritas (ela guarda os resultados das análises);
+- proteja a pasta `data` com permissões NTFS restritas (ela guarda os resultados das análises, as
+  credenciais cifradas das caixas de e-mail e a chave que as decifra), por exemplo:
+  `icacls C:\CLEAN\data /inheritance:r /grant:r "Administradores:(OI)(CI)F" "EMPRESA\svc-clean:(OI)(CI)M"`;
+- dê à conexão de e-mail apenas o acesso necessário (permissões de leitura; no Microsoft 365, de
+  preferência limitado às caixas analisadas pelo RBAC para aplicativos);
 - a interface tem proteção contra CSRF e política de segurança de conteúdo; o CLEAN nunca altera
   os arquivos analisados, apenas os lê.
 
@@ -215,7 +369,7 @@ lista, dados pessoais e senhas encontradas. Por isso:
 | PowerPoint | .pptx, .pptm, .ppsx, .ppt | Informa o slide (.pptx); inclui anotações. |
 | PDF | .pdf | Informa a página. |
 | OpenDocument | .odt, .ods, .odp | |
-| E-mails e páginas | .msg, .eml, .mht/.mhtml | Assunto, remetente, destinatários, corpo e nomes dos anexos. |
+| E-mails e páginas | .msg, .eml, .mht/.mhtml | Assunto, remetente, destinatários, corpo, nomes e conteúdo dos anexos (inclusive mensagens anexadas). |
 | Outros | .rtf, .htm/.html, .txt, .csv, .log, .xml, .json e demais textos | Codificação detectada automaticamente. |
 | Compactados | .zip | Apenas os nomes dos arquivos internos (inclusive os criados pelo Explorer do Windows). |
 
@@ -223,6 +377,8 @@ Limitações conhecidas:
 
 - imagens e PDFs digitalizados não são lidos (não há OCR);
 - o conteúdo de arquivos dentro de .zip, .7z, .rar e de caixas de correio .pst/.ost não é analisado;
+- mensagens criptografadas (S/MIME, PGP) ou protegidas pelo Microsoft Purview (IRM) têm apenas o
+  assunto e os remetentes verificados; anexos `winmail.dat` (TNEF) aparecem só pelo nome;
 - arquivos protegidos por senha têm apenas o nome verificado (aparecem como "Protegido por senha");
 - arquivos danificados ou que demoram demais para ser lidos aparecem na aba **Erros** e a análise
   continua; expressões regulares muito lentas são interrompidas por arquivo;
@@ -243,13 +399,18 @@ Estrutura:
 ```
 src/
   server.js, app.js, config.js, store.js   servidor, rotas e persistência (JSON/NDJSON)
-  routes/                                  API REST (/api/repositories, /api/lists, /api/scans)
+  secrets.js                               cifragem das credenciais das caixas de e-mail
+  routes/                                  API REST (/api/repositories, /api/lists, /api/mail-sources, /api/scans)
   scan/
     scanner.js, worker.js, manager.js      análise em worker thread, fila e cancelamento
     walker.js                              percurso das pastas e exclusões
     matcher.js, presets.js                 busca de termos (Aho-Corasick), regex e validadores
     owner.js, audit.js, powershell.js      proprietário NTFS e log de auditoria via PowerShell
-    extractors/                            leitura de cada formato de arquivo
+    extractors/                            leitura de cada formato de arquivo (e das mensagens MIME e anexos)
+  mail/
+    scanner.js                             análise das caixas de e-mail (na mesma worker thread)
+    graph.js, gmail.js, imap.js            conectores Microsoft 365, Google Workspace e IMAP
+    http.js, common.js                     requisições com novas tentativas, pastas e caixas ignoradas
   report/                                  filtros, resumo e exportações (xlsx, csv, html)
 public/                                    interface web (HTML, CSS e JavaScript, sem build)
 test/                                      testes e arquivos de exemplo (fixtures)
@@ -257,4 +418,6 @@ scripts/criar-dados-demo.js                dados de demonstração
 ```
 
 Os testes dos scripts PowerShell usam versões simuladas de `Get-Acl` e `Get-WinEvent` e rodam no
-Windows ou onde houver PowerShell 7 (`pwsh`); sem PowerShell, são ignorados.
+Windows ou onde houver PowerShell 7 (`pwsh`); sem PowerShell, são ignorados. Os testes de e-mail usam
+servidores simulados do Microsoft Graph, das APIs do Google e de IMAP (`test/helpers`), sem acesso à
+internet.

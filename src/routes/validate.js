@@ -11,16 +11,16 @@ export class HttpError extends Error {
   }
 }
 
-const bad = (message) => new HttpError(400, message);
+export const bad = (message) => new HttpError(400, message);
 
-function text(value, field, { required = false, max = 500 } = {}) {
+export function text(value, field, { required = false, max = 500 } = {}) {
   const v = typeof value === 'string' ? value.trim() : value === undefined || value === null ? '' : String(value).trim();
   if (required && !v) throw bad(`Informe ${field}.`);
   if (v.length > max) throw bad(`${field} deve ter no máximo ${max} caracteres.`);
   return v;
 }
 
-function lines(value, max = 500) {
+export function lines(value, max = 500) {
   const items = Array.isArray(value) ? value : String(value || '').split(/\r?\n/);
   return [...new Set(items.map((v) => String(v).trim()).filter(Boolean))].slice(0, max);
 }

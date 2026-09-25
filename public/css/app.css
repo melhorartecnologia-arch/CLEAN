@@ -206,6 +206,14 @@ code,
   background: var(--accent-soft);
   color: var(--accent-ink);
 }
+.nav-group {
+  margin: 14px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
 
 .sidebar-foot {
   margin-top: auto;
@@ -370,6 +378,8 @@ input[type='text'],
 input[type='search'],
 input[type='number'],
 input[type='date'],
+input[type='email'],
+input[type='password'],
 select,
 textarea {
   width: 100%;
@@ -398,6 +408,7 @@ textarea:focus {
   cursor: pointer;
 }
 .check input {
+  flex: none;
   margin: 3px 0 0;
   width: 16px;
   height: 16px;
@@ -417,6 +428,13 @@ textarea:focus {
 .inline > select {
   flex: 0 1 300px;
   width: auto;
+}
+.inline > input[type='number'] {
+  flex: 0 0 96px;
+  width: 96px;
+}
+.inline > input[type='number'] + select {
+  flex: 1 1 160px;
 }
 [data-audit-fields] {
   margin-top: 12px;
@@ -462,6 +480,7 @@ legend {
 /* ---------- Tabelas ---------- */
 
 .table-wrap {
+  position: relative; /* contém os textos .sr-only (posição absoluta) das colunas que rolam */
   overflow-x: auto;
 }
 table.data {
@@ -883,6 +902,9 @@ tr.detail > td {
   letter-spacing: 0.04em;
   color: var(--muted);
 }
+.detail-grid h4.spaced {
+  margin-top: 16px;
+}
 dl.kv {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1010,6 +1032,107 @@ mark {
   content: '✓';
   background: var(--good-soft);
   color: var(--good-ink);
+}
+
+/* ---------- E-mail ---------- */
+
+.type-choice {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.type-choice label {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.type-choice label:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.type-choice input {
+  margin-top: 3px;
+}
+.type-choice small {
+  display: block;
+  color: var(--muted);
+}
+table.mailbox-rows {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.mailbox-rows th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 6px;
+}
+table.mailbox-rows td {
+  padding: 4px 6px;
+  vertical-align: middle;
+}
+table.mailbox-rows input {
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+}
+input[type='file'] {
+  max-width: 100%;
+  font: inherit;
+}
+.test-details {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+details.help {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+details.help summary {
+  cursor: pointer;
+  color: var(--accent-ink);
+  font-weight: 500;
+}
+details.help ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+details.help li {
+  margin-bottom: 4px;
+}
+details.help code {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.attachment-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+.attachment-list li {
+  padding: 3px 0;
+  overflow-wrap: anywhere;
+}
+.kind-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  white-space: nowrap;
 }
 
 /* ---------- Diálogos e avisos ---------- */
@@ -1154,6 +1277,9 @@ dialog::backdrop {
   }
   .nav {
     flex-direction: row;
+  }
+  .nav-group {
+    display: none;
   }
   .nav a {
     white-space: nowrap;

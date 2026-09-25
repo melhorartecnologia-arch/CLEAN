@@ -2,8 +2,51 @@
 import { Router } from 'express';
 import { HttpError } from './validate.js';
 import { ScanError } from '../scan/manager.js';
-import { filterRecords, publicRecord, summarize, FILTER_KEYS } from '../report/model.js';
+import { filterRecords, publicRecord, summarize, FILTER_KEYS, filterMailRecords, summarizeMail, MAIL_FILTER_KEYS } from '../report/model.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
+import { exportMailXlsx, exportMailCsv, exportMailHtml } from '../report/mail-exports.js';
+
+const byName = (a, b) => a.localeCompare(b, 'pt-BR');
+
+/** Filtros, resumos e exportações de cada tipo de análise (arquivos ou e-mail). */
+const MODELS = {
+  files: {
+    keys: FILTER_KEYS,
+    filter: filterRecords,
+    summarize,
+    options: (records) => {
+      const all = summarize(records);
+      return {
+        terms: [...new Set(all.byTerm.map((t) => t.term))].sort(byName),
+        users: all.byUser.filter((u) => u.identified).map((u) => u.user).sort(byName),
+        extensions: [...new Set(records.map((r) => r.extension).filter(Boolean))].sort(),
+      };
+    },
+    xlsx: exportXlsx,
+    csv: exportCsv,
+    html: exportHtml,
+  },
+  mail: {
+    keys: MAIL_FILTER_KEYS,
+    filter: filterMailRecords,
+    summarize: summarizeMail,
+    options: (records) => {
+      const all = summarizeMail(records);
+      return {
+        terms: [...new Set(all.byTerm.map((t) => t.term))].sort(byName),
+        mailboxes: all.byMailbox.map((m) => m.mailbox).sort(byName),
+        // Os remetentes mais frequentes (a lista completa pode ter milhares de endereços).
+        senders: all.bySender.filter((s) => s.sender).slice(0, 500).map((s) => ({ value: s.sender, label: s.label })).sort((a, b) => byName(a.label, b.label)),
+        sources: all.bySource.map((s) => ({ value: s.sourceId, label: s.source })),
+      };
+    },
+    xlsx: exportMailXlsx,
+    csv: exportMailCsv,
+    html: exportMailHtml,
+  },
+};
+
+const modelOf = (scan) => (scan.kind === 'mail' ? MODELS.mail : MODELS.files);
 
 const listFields = (scan) => {
   const { log, ...rest } = scan;
@@ -22,9 +65,9 @@ function downloadName(scan, ext) {
 }
 
 /** Apenas os filtros conhecidos, como texto (parâmetros repetidos usam o primeiro valor). */
-function readFilters(query) {
+function readFilters(query, keys = FILTER_KEYS) {
   const filters = {};
-  for (const key of FILTER_KEYS) {
+  for (const key of keys) {
     const raw = Array.isArray(query[key]) ? query[key][0] : query[key];
     if (typeof raw === 'string' && raw) filters[key] = raw.slice(0, 500);
   }
@@ -87,12 +130,15 @@ export function scansRouter({ store, manager }) {
     const records = await store.readResults(scan.id);
     const { page, pageSize, ...criteria } = filters;
     const key = `${scan.id}|${records.length}|f|${JSON.stringify(criteria)}`;
-    return { records, list: memo.get(key, () => filterRecords(records, criteria)) };
+    return { records, list: memo.get(key, () => modelOf(scan).filter(records, criteria)) };
   };
+  const filtersOf = (scan, query) => readFilters(query, modelOf(scan).keys);
 
   router.get('/', (req, res) => {
+    const kind = req.query.kind === 'mail' || req.query.kind === 'files' ? req.query.kind : '';
     const scans = store
       .listScans()
+      .filter((scan) => !kind || (scan.kind || 'files') === kind)
       .map(listFields)
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
     res.json(scans);
@@ -128,7 +174,7 @@ export function scansRouter({ store, manager }) {
 
   router.get('/:id/results', async (req, res) => {
     const scan = getScan(req);
-    const filters = readFilters(req.query);
+    const filters = filtersOf(scan, req.query);
     const { records, list } = await filtered(scan, filters);
     const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 50, 1), 500);
     const pages = Math.max(1, Math.ceil(list.length / pageSize));
@@ -146,18 +192,12 @@ export function scansRouter({ store, manager }) {
   // Resumo do recorte filtrado (gráficos) e opções de filtro calculadas sobre todos os resultados.
   router.get('/:id/summary', async (req, res) => {
     const scan = getScan(req);
-    const filters = readFilters(req.query);
+    const model = modelOf(scan);
+    const filters = filtersOf(scan, req.query);
     const { records, list } = await filtered(scan, filters);
     const { page, pageSize, sort, dir, ...criteria } = filters;
-    const summary = memo.get(`${scan.id}|${records.length}|s|${JSON.stringify(criteria)}`, () => summarize(list));
-    const options = memo.get(`${scan.id}|${records.length}|o`, () => {
-      const all = summarize(records);
-      return {
-        terms: [...new Set(all.byTerm.map((t) => t.term))].sort((a, b) => a.localeCompare(b, 'pt-BR')),
-        users: all.byUser.filter((u) => u.identified).map((u) => u.user).sort((a, b) => a.localeCompare(b, 'pt-BR')),
-        extensions: [...new Set(records.map((r) => r.extension).filter(Boolean))].sort(),
-      };
-    });
+    const summary = memo.get(`${scan.id}|${records.length}|s|${JSON.stringify(criteria)}`, () => model.summarize(list));
+    const options = memo.get(`${scan.id}|${records.length}|o`, () => model.options(records));
     res.json({ ...summary, options });
   });
 
@@ -170,28 +210,28 @@ export function scansRouter({ store, manager }) {
 
   router.get('/:id/export.xlsx', async (req, res) => {
     const scan = getScan(req);
-    const { list } = await filtered(scan, readFilters(req.query));
+    const { list } = await filtered(scan, filtersOf(scan, req.query));
     const errors = await store.readErrors(scan.id);
     await stream(res, downloadName(scan, 'xlsx'), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', (out) =>
-      exportXlsx(scan, list, errors, out),
+      modelOf(scan).xlsx(scan, list, errors, out),
     );
   });
 
   router.get('/:id/export.csv', async (req, res) => {
     const scan = getScan(req);
-    const { list } = await filtered(scan, readFilters(req.query));
-    await stream(res, downloadName(scan, 'csv'), 'text/csv; charset=utf-8', (out) => exportCsv(list, out));
+    const { list } = await filtered(scan, filtersOf(scan, req.query));
+    await stream(res, downloadName(scan, 'csv'), 'text/csv; charset=utf-8', (out) => modelOf(scan).csv(list, out));
   });
 
   router.get('/:id/export.html', async (req, res) => {
     const scan = getScan(req);
-    const { list } = await filtered(scan, readFilters(req.query));
-    await stream(res, downloadName(scan, 'html'), 'text/html; charset=utf-8', (out) => exportHtml(scan, list, out));
+    const { list } = await filtered(scan, filtersOf(scan, req.query));
+    await stream(res, downloadName(scan, 'html'), 'text/html; charset=utf-8', (out) => modelOf(scan).html(scan, list, out));
   });
 
   router.get('/:id/export.json', async (req, res) => {
     const scan = getScan(req);
-    const { list } = await filtered(scan, readFilters(req.query));
+    const { list } = await filtered(scan, filtersOf(scan, req.query));
     await stream(res, downloadName(scan, 'json'), 'application/json; charset=utf-8', (out) => exportJson(scan, list, out));
   });
 

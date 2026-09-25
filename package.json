@@ -1,8 +1,8 @@
 {
   "name": "clean",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "CLEAN - Aplicação web para análise de repositórios de arquivos Windows: procura termos de uma lista de referência no nome e no conteúdo dos arquivos e gera relatórios com o último usuário que interagiu com cada arquivo.",
+  "description": "CLEAN - Aplicação web para análise de repositórios de arquivos Windows e caixas de e-mail (Microsoft 365, Google Workspace e IMAP): procura termos de uma lista de referência no nome e no conteúdo dos arquivos e nas mensagens e anexos, e gera relatórios com quem interagiu com cada item.",
   "type": "module",
   "main": "src/server.js",
   "scripts": {
@@ -19,6 +19,7 @@
     "cfb": "^1.2.2",
     "express": "^5.2.1",
     "fflate": "^0.8.3",
+    "imapflow": "^2.0.7",
     "unpdf": "^1.8.1"
   }
 }

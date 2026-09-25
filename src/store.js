@@ -3,8 +3,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { SecretBox } from './secrets.js';
 
-const EMPTY_DB = { version: 1, repositories: [], lists: [], scans: [] };
+const EMPTY_DB = { version: 1, repositories: [], lists: [], mailSources: [], scans: [] };
 const MAX_LOG = 200;
 
 function now() {
@@ -37,6 +38,7 @@ export class Store {
     this.appendChains = new Map();
     this.resultCache = new Map();
     this.readChains = new Map();
+    this.secrets = null;
   }
 
   async init() {
@@ -47,7 +49,8 @@ export class Store {
       if (err.code !== 'ENOENT') throw new Error(`Não foi possível ler ${this.dbFile}: ${err.message}`);
       this.db = structuredClone(EMPTY_DB);
     }
-    for (const key of ['repositories', 'lists', 'scans']) if (!Array.isArray(this.db[key])) this.db[key] = [];
+    for (const key of ['repositories', 'lists', 'mailSources', 'scans']) if (!Array.isArray(this.db[key])) this.db[key] = [];
+    this.secrets = await SecretBox.open(this.dataDir);
     // Análises que estavam em andamento quando o servidor parou
     for (const scan of this.db.scans) {
       if (scan.status === 'running' || scan.status === 'queued') {
@@ -155,6 +158,34 @@ export class Store {
   }
   deleteList(id) {
     return this.#delete('lists', id);
+  }
+
+  listMailSources() {
+    return this.#list('mailSources');
+  }
+  getMailSource(id) {
+    return this.#get('mailSources', id);
+  }
+  createMailSource(data) {
+    return this.#create('mailSources', data);
+  }
+  updateMailSource(id, data) {
+    return this.#update('mailSources', id, data);
+  }
+  deleteMailSource(id) {
+    return this.#delete('mailSources', id);
+  }
+
+  /** Segredos decifrados de uma conexão de e-mail (nunca são gravados em claro nem enviados ao navegador). */
+  openMailSecrets(source) {
+    const s = source?.secrets || {};
+    const open = (value) => (value ? this.secrets.open(value) : '');
+    return {
+      clientSecret: open(s.clientSecret),
+      privateKey: open(s.privateKey),
+      defaultPassword: open(s.defaultPassword),
+      passwords: Object.fromEntries(Object.entries(s.passwords || {}).map(([address, value]) => [address, open(value)])),
+    };
   }
 
   listScans() {

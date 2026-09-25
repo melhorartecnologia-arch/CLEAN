@@ -1,6 +1,7 @@
 // Roteador da interface (rotas no fragmento da URL: #/analises/123?termo=...).
 import { get } from './api.js';
 import { html, render, icon } from './ui.js';
+import { setActiveNav } from './nav.js';
 import * as dashboard from './views/dashboard.js';
 import * as scans from './views/scans.js';
 import * as scanNew from './views/scan-new.js';
@@ -8,13 +9,20 @@ import * as report from './views/report.js';
 import * as repositories from './views/repositories.js';
 import * as lists from './views/lists.js';
 import * as listEdit from './views/list-edit.js';
+import * as mailSources from './views/mail-sources.js';
+import * as mailScanNew from './views/mail-scan-new.js';
 
+// [caminho, tela, item do menu, propriedades extras da tela]
 const ROUTES = [
   [/^\/$/, dashboard, 'painel'],
-  [/^\/analises$/, scans, 'analises'],
+  [/^\/analises$/, scans, 'analises', { kind: 'files' }],
   [/^\/analises\/nova$/, scanNew, 'analises'],
   [/^\/analises\/([\w-]+)$/, report, 'analises'],
   [/^\/repositorios$/, repositories, 'repositorios'],
+  [/^\/email\/caixas$/, mailSources, 'email-caixas'],
+  [/^\/email\/analises$/, scans, 'email-analises', { kind: 'mail' }],
+  [/^\/email\/analises\/nova$/, mailScanNew, 'email-analises'],
+  [/^\/email\/analises\/([\w-]+)$/, report, 'email-analises'],
   [/^\/listas$/, lists, 'listas'],
   [/^\/listas\/nova$/, listEdit, 'listas'],
   [/^\/listas\/([\w-]+)$/, listEdit, 'listas'],
@@ -42,7 +50,7 @@ async function route() {
   const token = ++navigation;
   const hash = location.hash.replace(/^#/, '') || '/';
   const [path, query = ''] = hash.split('?');
-  const match = ROUTES.map(([re, mod, nav]) => [re.exec(path), mod, nav]).find(([m]) => m);
+  const match = ROUTES.map(([re, mod, nav, props]) => [re.exec(path), mod, nav, props]).find(([m]) => m);
   if (cleanup) {
     try {
       cleanup();
@@ -52,10 +60,7 @@ async function route() {
     cleanup = null;
   }
   leaveGuard = null;
-  document.querySelectorAll('.nav a').forEach((a) => {
-    if (match && a.dataset.nav === match[2]) a.setAttribute('aria-current', 'page');
-    else a.removeAttribute('aria-current');
-  });
+  setActiveNav(match?.[2]);
   document.getElementById('tooltip').hidden = true;
   // Cada navegação desenha em um contêiner novo: respostas atrasadas da tela anterior vão para um
   // elemento que já saiu da página e não aparecem por cima da tela atual.
@@ -65,13 +70,14 @@ async function route() {
     render(container, html`<div class="empty"><h1>Página não encontrada</h1><p><a href="#/">Voltar ao painel</a></p></div>`);
     return;
   }
-  const [m, mod] = match;
+  const [m, mod, , props = {}] = match;
   render(container, html`<p class="loading">Carregando…</p>`);
   const isCurrent = () => token === navigation;
   try {
     if (!ctx.info) ctx.info = await get('/api/info');
     const result = await mod.render(container, {
       params: m.slice(1),
+      props,
       query: new URLSearchParams(query),
       ctx,
       isCurrent,

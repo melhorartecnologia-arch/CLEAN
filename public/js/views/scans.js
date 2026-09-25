@@ -1,4 +1,4 @@
-// Lista de análises, com progresso das que estão em andamento.
+// Lista de análises (de arquivos ou de e-mail), com progresso das que estão em andamento.
 import { get, post, del } from '../api.js';
 import { html, render as paint, icon, toast, confirmDialog, fmtNum, fmtDateTime, fmtDuration, statusBadge } from '../ui.js';
 
@@ -10,7 +10,30 @@ function duration(scan) {
   return fmtDuration(end - new Date(scan.startedAt));
 }
 
-export async function render(root) {
+const KINDS = {
+  files: {
+    title: 'Análises de arquivos',
+    sub: 'Cada análise percorre os repositórios escolhidos e gera um relatório com os arquivos em que algum termo foi encontrado.',
+    base: '#/analises',
+    empty: 'Nenhuma análise de arquivos realizada ainda.',
+    where: (s) => (s.summary?.repositories || []).map((r) => r.name).join(', '),
+    columns: ['Arquivos verificados', 'Com ocorrências'],
+    values: (s) => [s.stats?.filesSeen, s.stats?.filesMatched],
+  },
+  mail: {
+    title: 'Análises de e-mail',
+    sub: 'Cada análise percorre as caixas de e-mail escolhidas (corpo, assunto e anexos das mensagens) e gera um relatório com as mensagens em que algum termo foi encontrado.',
+    base: '#/email/analises',
+    empty: 'Nenhuma análise de e-mail realizada ainda.',
+    where: (s) => (s.summary?.sources || []).map((r) => r.name).join(', '),
+    columns: ['Mensagens verificadas', 'Com ocorrências'],
+    values: (s) => [s.stats?.messagesSeen, s.stats?.messagesMatched],
+  },
+};
+
+export async function render(root, { props = {} }) {
+  const kind = props.kind === 'mail' ? 'mail' : 'files';
+  const K = KINDS[kind];
   let scans = [];
   let timer = null;
   let stopped = false;
@@ -20,45 +43,46 @@ export async function render(root) {
       root,
       html`<div class="page-head">
           <div>
-            <h1>Análises</h1>
-            <div class="sub">Cada análise percorre os repositórios escolhidos e gera um relatório com os arquivos em que algum termo foi encontrado.</div>
+            <h1>${K.title}</h1>
+            <div class="sub">${K.sub}</div>
           </div>
-          <div class="actions"><a class="btn primary" href="#/analises/nova">${icon('play')} Nova análise</a></div>
+          <div class="actions"><a class="btn primary" href="${K.base}/nova">${icon('play')} Nova análise</a></div>
         </div>
         <section class="card">
           ${scans.length === 0
-            ? html`<div class="empty"><p>Nenhuma análise realizada ainda.</p><a class="btn primary" href="#/analises/nova">${icon('play')} Iniciar a primeira</a></div>`
+            ? html`<div class="empty"><p>${K.empty}</p><a class="btn primary" href="${K.base}/nova">${icon('play')} Iniciar a primeira</a></div>`
             : html`<div class="table-wrap">
                 <table class="data">
                   <thead>
                     <tr>
                       <th>Análise</th><th>Situação</th><th>Início</th><th>Duração</th>
-                      <th class="num">Arquivos verificados</th><th class="num">Com ocorrências</th><th class="num">Erros</th>
+                      <th class="num">${K.columns[0]}</th><th class="num">${K.columns[1]}</th><th class="num">Erros</th>
                       <th><span class="sr-only">Ações</span></th>
                     </tr>
                   </thead>
                   <tbody>
-                    ${scans.map(
-                      (s) => html`<tr>
+                    ${scans.map((s) => {
+                      const [seen, matched] = K.values(s);
+                      return html`<tr>
                         <td>
-                          <a href="#/analises/${s.id}"><b>${s.name}</b></a>
-                          <div class="muted small">${(s.summary?.repositories || []).map((r) => r.name).join(', ')} · ${(s.summary?.lists || []).map((l) => l.name).join(', ')}</div>
+                          <a href="${K.base}/${s.id}"><b>${s.name}</b></a>
+                          <div class="muted small">${K.where(s)} · ${(s.summary?.lists || []).map((l) => l.name).join(', ')}</div>
                           ${active(s) ? html`<div class="progress-line" role="progressbar" aria-label="Análise em andamento"></div>` : ''}
                         </td>
                         <td>${statusBadge(s.status)}</td>
                         <td class="nowrap">${fmtDateTime(s.startedAt || s.createdAt)}</td>
                         <td class="nowrap">${duration(s)}</td>
-                        <td class="num">${fmtNum(s.stats?.filesSeen)}</td>
-                        <td class="num">${fmtNum(s.stats?.filesMatched)}</td>
+                        <td class="num">${fmtNum(seen)}</td>
+                        <td class="num">${fmtNum(matched)}</td>
                         <td class="num">${fmtNum(s.stats?.errors)}</td>
                         <td class="actions">
-                          <a class="icon-btn" href="#/analises/${s.id}" aria-label="Abrir relatório de ${s.name}" title="Abrir relatório">${icon('file')}</a>
+                          <a class="icon-btn" href="${K.base}/${s.id}" aria-label="Abrir relatório de ${s.name}" title="Abrir relatório">${icon('file')}</a>
                           ${active(s)
                             ? html`<button class="icon-btn danger" data-action="cancel" data-id="${s.id}" aria-label="Cancelar ${s.name}" title="Cancelar">${icon('stop')}</button>`
                             : html`<button class="icon-btn danger" data-action="delete" data-id="${s.id}" aria-label="Excluir ${s.name}" title="Excluir">${icon('trash')}</button>`}
                         </td>
-                      </tr>`,
-                    )}
+                      </tr>`;
+                    })}
                   </tbody>
                 </table>
               </div>`}
@@ -66,7 +90,7 @@ export async function render(root) {
     );
 
   const refresh = async () => {
-    const latest = await get('/api/scans');
+    const latest = await get(`/api/scans?kind=${kind}`);
     if (stopped) return;
     scans = latest;
     draw();

@@ -1,4 +1,5 @@
-// Relatório de uma análise: progresso, indicadores, gráficos, filtros, arquivos encontrados e exportações.
+// Relatório de uma análise (de arquivos ou de e-mail): progresso, indicadores, gráficos, filtros,
+// resultados e exportações. O que muda entre os dois tipos fica nos perfis FILES e MAIL.
 import { get, post } from '../api.js';
 import {
   html,
@@ -18,10 +19,8 @@ import {
   debounce,
   redraw,
 } from '../ui.js';
-import { replaceQuery } from '../nav.js';
+import { replaceQuery, setActiveNav } from '../nav.js';
 
-const SOURCE = { audit: 'Log de auditoria', metadata: 'Metadados do documento', owner: 'Proprietário do arquivo (NTFS)' };
-const SOURCE_SHORT = { audit: 'auditoria', metadata: 'metadados', owner: 'proprietário' };
 const CONTENT_STATUS = {
   ok: 'Analisado',
   partial: 'Analisado parcialmente',
@@ -32,13 +31,34 @@ const CONTENT_STATUS = {
   error: 'Erro de leitura',
   'not-requested': 'Conteúdo não verificado',
 };
-const LOCATION = { name: 'nome', content: 'conteúdo' };
-const FILTER_KEYS = ['q', 'term', 'user', 'location', 'extension', 'sort', 'page'];
-const DESC_SORTS = new Set(['modified', 'occurrences', 'terms', 'size']);
 const TOP = 10;
 const PAGE_SIZE = 50;
 
 const isActive = (scan) => scan.status === 'running' || scan.status === 'queued';
+const sampleHtml = (s) => html`<div class="sample">${s.where ? html`<span class="where">${s.where}</span>` : ''}${s.before}<mark>${s.match}</mark>${s.after}</div>`;
+
+/** Lista de ocorrências de um resultado (termo, lista, local, contagem, valores e exemplos). */
+function matchesHtml(record, phrase) {
+  return record.matches.map(
+    (mt) => html`<div class="match">
+      <div class="match-head">
+        <span class="chip"><b>${mt.term}</b></span>
+        <span class="muted small">lista ${mt.list} · ${phrase[mt.location] || mt.location} · ${plural(mt.count, 'ocorrência', 'ocorrências')}${mt.truncated ? '+' : ''}</span>
+      </div>
+      ${mt.values?.length && mt.kind === 'regex' ? html`<div class="small"><span class="muted">Valores:</span> ${mt.values.join(' · ')}</div>` : ''}
+      ${mt.samples.map(sampleHtml)}
+    </div>`,
+  );
+}
+
+const option = (value, label, current) => html`<option value="${value}" ${current === value ? 'selected' : ''}>${label}</option>`;
+
+// ---------------------------------------------------------------------------------------------
+// Análises de arquivos
+
+const SOURCE = { audit: 'Log de auditoria', metadata: 'Metadados do documento', owner: 'Proprietário do arquivo (NTFS)' };
+const SOURCE_SHORT = { audit: 'auditoria', metadata: 'metadados', owner: 'proprietário' };
+const FILE_LOCATION = { name: 'nome', content: 'conteúdo' };
 
 function folderOf(record) {
   const rel = record.relativePath || '';
@@ -46,29 +66,403 @@ function folderOf(record) {
   return idx === -1 ? record.repositoryName : `${record.repositoryName} › ${rel.slice(0, idx)}`;
 }
 
-function queryString(filters, extra = {}) {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries({ ...filters, ...extra })) if (value !== '' && value !== null && value !== undefined) params.set(key, value);
-  if (filters.sort) params.set('dir', DESC_SORTS.has(filters.sort) ? 'desc' : 'asc');
-  return params.toString();
-}
+const FILES = {
+  base: '#/analises',
+  nav: 'analises',
+  filterKeys: ['q', 'term', 'user', 'location', 'extension', 'sort', 'page'],
+  criteria: ['q', 'term', 'user', 'location', 'extension'],
+  descSorts: new Set(['modified', 'occurrences', 'terms', 'size']),
+  defaultSort: 'path',
+  noun: ['arquivo', 'arquivos'],
+  resultsTitle: 'Arquivos com ocorrências',
+  charts: { terms: 'chart', users: 'chart' },
+
+  subtitle: (scan) => {
+    const s = scan.summary || {};
+    return `${(s.repositories || []).map((r) => r.name).join(', ')} · ${(s.lists || []).map((l) => `${l.name} (${fmtNum(l.termCount)})`).join(', ')}`;
+  },
+
+  filterFields: (filters) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Caminho, usuário ou termo" /></label>
+    <label class="field"><span>Termo</span><select name="term"><option value="">Todos</option></select></label>
+    <label class="field"><span>Último usuário</span><select name="user"><option value="">Todos</option></select></label>
+    <label class="field"><span>Encontrado em</span>
+      <select name="location">
+        <option value="">Nome ou conteúdo</option>
+        ${option('name', 'Nome', filters.location)}
+        ${option('content', 'Conteúdo', filters.location)}
+      </select>
+    </label>
+    <label class="field"><span>Extensão</span><select name="extension"><option value="">Todas</option></select></label>
+    <label class="field"><span>Ordenar por</span>
+      <select name="sort">
+        ${[
+          ['path', 'Caminho'],
+          ['occurrences', 'Mais ocorrências'],
+          ['terms', 'Mais termos'],
+          ['modified', 'Modificados recentemente'],
+          ['lastUser', 'Último usuário'],
+          ['size', 'Maiores arquivos'],
+        ].map(([value, label]) => option(value, label, filters.sort))}
+      </select>
+    </label>`,
+
+  fillOptions: (form, options, filters, fill) => {
+    const o = options || { terms: [], users: [], extensions: [] };
+    fill(form.elements.term, o.terms, filters.term);
+    fill(form.elements.user, o.users, filters.user);
+    fill(form.elements.extension, o.extensions, filters.extension);
+  },
+
+  progress: (st) => html`<span><b>${fmtNum(st.filesSeen)}</b> arquivos verificados</span>
+    <span><b>${fmtNum(st.directories)}</b> pastas</span>
+    <span><b>${fmtNum(st.filesMatched)}</b> com ocorrências</span>
+    <span><b>${fmtBytes(st.bytesAnalyzed)}</b> de conteúdo lido</span>
+    <span><b>${fmtNum(st.errors)}</b> erros</span>
+    <span>repositório <b>${Math.min((st.repositoriesDone || 0) + 1, st.repositoriesTotal || 1)}</b> de <b>${st.repositoriesTotal || 1}</b></span>`,
+
+  tiles: (st) => {
+    const pct = st.filesSeen ? Math.round((st.filesMatched / st.filesSeen) * 1000) / 10 : 0;
+    const notRead = (st.contentEncrypted || 0) + (st.contentSkippedSize || 0) + (st.contentErrors || 0);
+    return html`<div class="tile"><div class="label">Arquivos verificados</div><div class="value">${fmtCompact(st.filesSeen)}</div><div class="detail">em ${plural(st.directories || 0, 'pasta', 'pastas')}${st.filesSkippedByDate ? ` · ${fmtNum(st.filesSkippedByDate)} fora do período` : ''}</div></div>
+      <div class="tile"><div class="label">Arquivos com ocorrências</div><div class="value">${fmtCompact(st.filesMatched)}</div><div class="detail">${pct.toLocaleString('pt-BR')}% dos verificados</div></div>
+      <div class="tile"><div class="label">Ocorrências</div><div class="value">${fmtCompact(st.occurrences)}</div><div class="detail">somando nome e conteúdo</div></div>
+      <div class="tile"><div class="label">Conteúdos lidos</div><div class="value">${fmtCompact(st.contentAnalyzed)}</div><div class="detail">${notRead ? `${fmtNum(st.contentEncrypted)} com senha · ${fmtNum(st.contentSkippedSize)} grandes · ${fmtNum(st.contentErrors)} com erro` : fmtBytes(st.bytesAnalyzed)}</div></div>
+      <div class="tile"><div class="label">Erros de acesso ou leitura</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`;
+  },
+
+  charts: (summary, barChart) => {
+    const terms = summary.byTerm.map((t) => ({
+      label: t.term,
+      value: t.files,
+      filterValue: t.term,
+      tipValue: `${plural(t.files, 'arquivo', 'arquivos')} · ${plural(t.occurrences, 'ocorrência', 'ocorrências')}`,
+      tipLabel: `${t.term} — lista ${t.list}${t.inName ? ` · ${fmtNum(t.inName)} no nome` : ''}`,
+      raw: t,
+    }));
+    const users = summary.byUser.map((u) => ({
+      label: u.user,
+      value: u.files,
+      filterValue: u.identified ? u.user : '',
+      tipValue: `${plural(u.files, 'arquivo', 'arquivos')} · ${plural(u.occurrences, 'ocorrência', 'ocorrências')}`,
+      tipLabel: `${u.user} — ${Object.entries(u.sources).map(([k, n]) => `${SOURCE_SHORT[k]}: ${n}`).join(', ') || 'sem fonte'}`,
+      raw: u,
+    }));
+    return html`${barChart({
+      key: 'terms',
+      title: 'Termos encontrados',
+      subtitle: 'Arquivos em que cada termo aparece. Clique para filtrar.',
+      rows: terms,
+      filterKey: 'term',
+      emptyText: 'Nenhum termo encontrado.',
+      tableHead: html`<tr><th>Termo</th><th>Lista</th><th class="num">Arquivos</th><th class="num">Ocorrências</th><th class="num">No nome</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.term}</td><td>${r.raw.list}</td><td class="num">${fmtNum(r.raw.files)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td><td class="num">${fmtNum(r.raw.inName)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'users',
+      title: 'Últimos usuários',
+      subtitle: 'Quem interagiu por último com os arquivos encontrados. Clique para filtrar.',
+      rows: users,
+      filterKey: 'user',
+      emptyText: 'Nenhum arquivo encontrado.',
+      tableHead: html`<tr><th>Usuário</th><th>Fontes</th><th class="num">Arquivos</th><th class="num">Ocorrências</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.user}</td><td class="small">${Object.entries(r.raw.sources).map(([k, n]) => `${SOURCE_SHORT[k]}: ${n}`).join(', ')}</td><td class="num">${fmtNum(r.raw.files)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td></tr>`,
+    })}`;
+  },
+
+  tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Arquivo</th><th>Último usuário</th><th>Modificado em</th><th>Informação encontrada</th></tr>`,
+
+  row: (r) => html`<td><div class="name">${r.name}</div><div class="path">${folderOf(r)}</div></td>
+    <td>${r.lastUser ? html`${r.lastUser}<div><span class="chip source">${SOURCE_SHORT[r.lastUserSource]}</span></div>` : html`<span class="muted">não identificado</span>`}</td>
+    <td class="nowrap">${fmtDateTime(r.modified)}</td>
+    <td><div class="chips">${r.matches.map((m) => html`<span class="chip"><b>${m.term}</b> ${fmtNum(m.count)}× · ${FILE_LOCATION[m.location]}</span>`)}</div></td>`,
+
+  rowLabel: (r) => r.name,
+
+  detail: (r) => {
+    const m = r.metadata || {};
+    const a = r.audit;
+    return html`<div class="detail-grid">
+      <div>
+        <h4>Arquivo</h4>
+        <dl class="kv">
+          <dt>Caminho</dt>
+          <dd><span class="mono">${r.path}</span> <button type="button" class="btn small" data-action="copy" data-copy="${r.path}" data-copied="Caminho copiado.">${icon('copy')} Copiar</button></dd>
+          <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
+          <dt>Criado em</dt><dd>${fmtDateTime(r.created)}</dd>
+          <dt>Modificado em</dt><dd>${fmtDateTime(r.modified)}</dd>
+          <dt>Tipo</dt><dd>${(r.contentType || r.extension || '—').toString().toUpperCase()} · ${CONTENT_STATUS[r.contentStatus] || r.contentStatus || '—'}</dd>
+          ${r.contentNote ? html`<dt>Observação</dt><dd>${r.contentNote}</dd>` : ''}
+          ${m.title ? html`<dt>Título</dt><dd>${m.title}</dd>` : ''}
+        </dl>
+      </div>
+      <div>
+        <h4>Quem interagiu com o arquivo</h4>
+        <dl class="kv">
+          <dt>Último usuário</dt><dd><b>${r.lastUser || 'não identificado'}</b>${r.lastUserSource ? html`<br /><span class="muted small">fonte: ${SOURCE[r.lastUserSource]}</span>` : ''}</dd>
+          ${a ? html`<dt>Último acesso (auditoria)</dt><dd>${a.user} · ${a.action} · ${fmtDateTime(a.time)}</dd>` : ''}
+          ${a?.lastWrite ? html`<dt>Última alteração (auditoria)</dt><dd>${a.lastWrite.user} · ${a.lastWrite.action} · ${fmtDateTime(a.lastWrite.time)}</dd>` : ''}
+          ${m.lastModifiedBy ? html`<dt>Salvo por último por</dt><dd>${m.lastModifiedBy}${m.modified ? html` <span class="muted small">em ${fmtDateTime(m.modified)}</span>` : ''}</dd>` : ''}
+          ${m.author ? html`<dt>Autor</dt><dd>${m.author}${m.created ? html` <span class="muted small">em ${fmtDateTime(m.created)}</span>` : ''}</dd>` : ''}
+          <dt>Proprietário (NTFS)</dt><dd>${r.owner || html`<span class="muted">${r.ownerError ? `não obtido: ${r.ownerError}` : 'não verificado'}</span>`}</dd>
+        </dl>
+      </div>
+      <div>
+        <h4>Informação encontrada</h4>
+        ${matchesHtml(r, { name: 'no nome', content: 'no conteúdo' })}
+      </div>
+    </div>`;
+  },
+
+  empty: { filtered: 'Nenhum arquivo corresponde aos filtros.', running: 'Nenhuma ocorrência encontrada até agora.', none: 'Nenhum termo da lista foi encontrado nos arquivos analisados.' },
+  errors: {
+    column: 'Caminho',
+    help: 'Pastas ou arquivos que a conta do CLEAN não conseguiu abrir (permissão, arquivo em uso, caminho longo...). Eles não foram analisados.',
+    empty: 'Nenhum erro de acesso ou leitura.',
+  },
+};
+
+// ---------------------------------------------------------------------------------------------
+// Análises de e-mail
+
+const TYPE_LABELS = { graph: 'Microsoft 365', gmail: 'Google Workspace', imap: 'IMAP' };
+const MAIL_LOCATION = { subject: 'assunto', body: 'corpo', attachmentName: 'nome do anexo', attachment: 'anexo', address: 'remetente/destinatários' };
+const MAIL_PHRASE = { subject: 'no assunto', body: 'no corpo', attachmentName: 'no nome do anexo', attachment: 'no conteúdo do anexo', address: 'no remetente ou destinatários' };
+const LOCATION_TITLES = { subject: 'Assunto', body: 'Corpo', attachmentName: 'Nome do anexo', attachment: 'Conteúdo do anexo', address: 'Remetente/destinatários' };
+
+const MAIL = {
+  base: '#/email/analises',
+  nav: 'email-analises',
+  filterKeys: ['q', 'term', 'mailbox', 'sender', 'location', 'sort', 'page'],
+  criteria: ['q', 'term', 'mailbox', 'sender', 'location'],
+  descSorts: new Set(['date', 'occurrences', 'terms', 'size']),
+  defaultSort: 'date',
+  noun: ['mensagem', 'mensagens'],
+  resultsTitle: 'Mensagens com ocorrências',
+  charts: { terms: 'chart', mailboxes: 'chart', senders: 'chart', locations: 'chart' },
+
+  subtitle: (scan) => {
+    const s = scan.summary || {};
+    const sources = (s.sources || []).map((x) => `${x.name} (${TYPE_LABELS[x.type] || x.type}${x.scope === 'all' ? ', todas as caixas' : ''})`);
+    return `${sources.join(', ')} · ${(s.lists || []).map((l) => `${l.name} (${fmtNum(l.termCount)})`).join(', ')}`;
+  },
+
+  filterFields: (filters) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Assunto, pessoa, anexo ou termo" /></label>
+    <label class="field"><span>Termo</span><select name="term"><option value="">Todos</option></select></label>
+    <label class="field"><span>Caixa</span><select name="mailbox"><option value="">Todas</option></select></label>
+    <label class="field"><span>Remetente</span><select name="sender"><option value="">Todos</option></select></label>
+    <label class="field"><span>Encontrado em</span>
+      <select name="location">
+        <option value="">Qualquer parte</option>
+        ${Object.entries(LOCATION_TITLES).map(([value, label]) => option(value, label, filters.location))}
+      </select>
+    </label>
+    <label class="field"><span>Ordenar por</span>
+      <select name="sort">
+        ${[
+          ['date', 'Mais recentes'],
+          ['occurrences', 'Mais ocorrências'],
+          ['terms', 'Mais termos'],
+          ['mailbox', 'Caixa'],
+          ['sender', 'Remetente'],
+          ['subject', 'Assunto'],
+          ['size', 'Maiores mensagens'],
+        ].map(([value, label]) => option(value, label, filters.sort))}
+      </select>
+    </label>`,
+
+  fillOptions: (form, options, filters, fill) => {
+    const o = options || { terms: [], mailboxes: [], senders: [] };
+    fill(form.elements.term, o.terms, filters.term);
+    fill(form.elements.mailbox, o.mailboxes, filters.mailbox);
+    const senders = new Map((o.senders || []).map((s) => [s.value, s.label]));
+    fill(form.elements.sender, [...senders.keys()], filters.sender, (v) => senders.get(v) || v);
+  },
+
+  progress: (st) => html`<span><b>${fmtNum(st.messagesSeen)}</b> mensagens verificadas</span>
+    <span><b>${fmtNum(st.messagesMatched)}</b> com ocorrências</span>
+    <span><b>${fmtNum(st.attachmentsAnalyzed)}</b> anexos lidos</span>
+    <span><b>${fmtBytes(st.bytesDownloaded)}</b> baixados</span>
+    <span><b>${fmtNum(st.errors)}</b> erros</span>
+    <span>${st.mailboxesTotal ? html`caixa <b>${Math.min((st.mailboxesDone || 0) + 1, st.mailboxesTotal)}</b> de <b>${fmtNum(st.mailboxesTotal)}</b>` : 'listando as caixas…'}</span>`,
+
+  tiles: (st) => {
+    const pct = st.messagesSeen ? Math.round((st.messagesMatched / st.messagesSeen) * 1000) / 10 : 0;
+    const notRead = (st.attachmentsEncrypted || 0) + (st.attachmentsSkippedSize || 0) + (st.attachmentsErrors || 0);
+    return html`<div class="tile"><div class="label">Mensagens verificadas</div><div class="value">${fmtCompact(st.messagesSeen)}</div><div class="detail">em ${plural(Math.max(0, (st.mailboxesDone || 0) - (st.mailboxesSkipped || 0)), 'caixa', 'caixas')}${st.mailboxesSkipped ? ` · ${fmtNum(st.mailboxesSkipped)} sem e-mail` : ''}</div></div>
+      <div class="tile"><div class="label">Mensagens com ocorrências</div><div class="value">${fmtCompact(st.messagesMatched)}</div><div class="detail">${pct.toLocaleString('pt-BR')}% das verificadas</div></div>
+      <div class="tile"><div class="label">Ocorrências</div><div class="value">${fmtCompact(st.occurrences)}</div><div class="detail">no assunto, no corpo e nos anexos</div></div>
+      <div class="tile"><div class="label">Anexos lidos</div><div class="value">${fmtCompact(st.attachmentsAnalyzed)}</div><div class="detail">${notRead ? `${fmtNum(st.attachmentsEncrypted)} com senha · ${fmtNum(st.attachmentsSkippedSize)} grandes · ${fmtNum(st.attachmentsErrors)} com erro` : `${fmtBytes(st.bytesDownloaded)} baixados`}</div></div>
+      <div class="tile"><div class="label">Erros</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : st.messagesEncrypted ? `${fmtNum(st.messagesEncrypted)} mensagens criptografadas` : 'nenhum'}</div></div>`;
+  },
+
+  charts: (summary, barChart) => {
+    const count = (n) => plural(n, 'mensagem', 'mensagens');
+    const terms = summary.byTerm.map((t) => ({
+      label: t.term,
+      value: t.messages,
+      filterValue: t.term,
+      tipValue: `${count(t.messages)} · ${plural(t.occurrences, 'ocorrência', 'ocorrências')}`,
+      tipLabel: `${t.term} — lista ${t.list}`,
+      raw: t,
+    }));
+    const boxes = summary.byMailbox.map((m) => ({
+      label: m.mailbox,
+      value: m.messages,
+      filterValue: m.mailbox,
+      tipValue: `${count(m.messages)} · ${plural(m.occurrences, 'ocorrência', 'ocorrências')}`,
+      tipLabel: m.name ? `${m.name} <${m.mailbox}>` : m.mailbox,
+      raw: m,
+    }));
+    const senders = summary.bySender.map((s) => ({
+      label: s.label,
+      value: s.messages,
+      filterValue: s.sender,
+      tipValue: `${count(s.messages)} · ${plural(s.occurrences, 'ocorrência', 'ocorrências')}`,
+      tipLabel: s.label,
+      raw: s,
+    }));
+    const locations = Object.entries(summary.byLocation)
+      .filter(([, n]) => n > 0)
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, n]) => ({ label: LOCATION_TITLES[key], value: n, filterValue: key, tipValue: count(n), tipLabel: `Termos encontrados ${MAIL_PHRASE[key]}`, raw: { key, n } }));
+    return html`${barChart({
+      key: 'terms',
+      title: 'Termos encontrados',
+      subtitle: 'Mensagens em que cada termo aparece. Clique para filtrar.',
+      rows: terms,
+      filterKey: 'term',
+      emptyText: 'Nenhum termo encontrado.',
+      tableHead: html`<tr><th>Termo</th><th>Lista</th><th class="num">Mensagens</th><th class="num">Ocorrências</th><th class="num">No assunto</th><th class="num">No corpo</th><th class="num">Em anexos</th></tr>`,
+      tableRow: (r) =>
+        html`<tr><td>${r.raw.term}</td><td>${r.raw.list}</td><td class="num">${fmtNum(r.raw.messages)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td><td class="num">${fmtNum(r.raw.inSubject)}</td><td class="num">${fmtNum(r.raw.inBody)}</td><td class="num">${fmtNum(r.raw.inAttachments)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'mailboxes',
+      title: 'Caixas',
+      subtitle: 'Caixas que guardam mensagens com os termos. Clique para filtrar.',
+      rows: boxes,
+      filterKey: 'mailbox',
+      emptyText: 'Nenhuma mensagem encontrada.',
+      tableHead: html`<tr><th>Caixa</th><th>Nome</th><th class="num">Mensagens</th><th class="num">Ocorrências</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.mailbox}</td><td>${r.raw.name}</td><td class="num">${fmtNum(r.raw.messages)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'senders',
+      title: 'Remetentes',
+      subtitle: 'Quem enviou as mensagens encontradas. Clique para filtrar.',
+      rows: senders,
+      filterKey: 'sender',
+      emptyText: 'Nenhuma mensagem encontrada.',
+      tableHead: html`<tr><th>Remetente</th><th class="num">Mensagens</th><th class="num">Ocorrências</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.label}</td><td class="num">${fmtNum(r.raw.messages)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'locations',
+      title: 'Onde foi encontrado',
+      subtitle: 'Mensagens por parte em que os termos aparecem. Clique para filtrar.',
+      rows: locations,
+      filterKey: 'location',
+      emptyText: 'Nenhuma mensagem encontrada.',
+      tableHead: html`<tr><th>Parte da mensagem</th><th class="num">Mensagens</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.label}</td><td class="num">${fmtNum(r.value)}</td></tr>`,
+    })}`;
+  },
+
+  tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Mensagem</th><th>Remetente</th><th>Data</th><th>Informação encontrada</th></tr>`,
+
+  row: (r) => {
+    const files = (r.attachments || []).filter((a) => !a.inline);
+    return html`<td><div class="name">${r.subject || '(sem assunto)'}</div><div class="path">${r.mailbox} › ${r.folder}${files.length ? html` · ${plural(files.length, 'anexo', 'anexos')}` : ''}</div></td>
+      <td>${r.from || html`<span class="muted">sem remetente</span>`}${r.to?.length ? html`<div class="muted small">para ${r.to[0]}${r.to.length > 1 ? ` e mais ${r.to.length - 1}` : ''}</div>` : ''}</td>
+      <td class="nowrap">${fmtDateTime(r.date)}</td>
+      <td><div class="chips">${r.matches.map((m) => html`<span class="chip"><b>${m.term}</b> ${fmtNum(m.count)}× · ${MAIL_LOCATION[m.location] || m.location}</span>`)}</div></td>`;
+  },
+
+  rowLabel: (r) => r.subject || 'mensagem sem assunto',
+
+  detail: (r) => {
+    const safeLink = /^https:\/\//i.test(r.webLink || '') ? r.webLink : null;
+    const messageId = String(r.internetMessageId || '').replace(/^<|>$/g, '');
+    const people = (list) => (list?.length ? list.join('; ') : '—');
+    return html`<div class="detail-grid">
+      <div>
+        <h4>Mensagem</h4>
+        <dl class="kv">
+          <dt>Assunto</dt><dd><b>${r.subject || '(sem assunto)'}</b></dd>
+          <dt>Caixa</dt><dd>${r.mailboxName ? `${r.mailboxName} <${r.mailbox}>` : r.mailbox}</dd>
+          <dt>Pasta</dt><dd>${r.folder}</dd>
+          <dt>Recebida em</dt><dd>${fmtDateTime(r.date)}</dd>
+          ${r.sent && r.sent !== r.date ? html`<dt>Enviada em</dt><dd>${fmtDateTime(r.sent)}</dd>` : ''}
+          <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
+          <dt>Conteúdo</dt><dd>${CONTENT_STATUS[r.contentStatus] || r.contentStatus}${r.contentNote ? html`<br /><span class="muted small">${r.contentNote}</span>` : ''}</dd>
+          ${messageId
+            ? html`<dt>Message-ID</dt><dd><span class="mono small">${messageId}</span> <button type="button" class="btn small" data-action="copy" data-copy="${messageId}" data-copied="Message-ID copiado.">${icon('copy')} Copiar</button></dd>`
+            : ''}
+          <dt>Conexão</dt><dd>${r.sourceName} (${TYPE_LABELS[r.sourceType] || r.sourceType})</dd>
+          ${safeLink ? html`<dt>Abrir</dt><dd><a href="${safeLink}" target="_blank" rel="noopener noreferrer">Abrir no Outlook na Web</a> <span class="muted small">(exige acesso à caixa)</span></dd>` : ''}
+        </dl>
+      </div>
+      <div>
+        <h4>Remetente e destinatários</h4>
+        <dl class="kv">
+          <dt>De</dt><dd><b>${r.from || '—'}</b></dd>
+          <dt>Para</dt><dd>${people(r.to)}</dd>
+          ${r.cc?.length ? html`<dt>Cc</dt><dd>${people(r.cc)}</dd>` : ''}
+        </dl>
+        <h4 class="spaced">Anexos</h4>
+        ${r.attachments?.length
+          ? html`<ul class="attachment-list">
+              ${r.attachments.map(
+                (a) => html`<li>${icon('file')} ${a.name} <span class="muted small">· ${fmtBytes(a.size)}${a.inline ? ' · imagem no corpo' : ''}${a.status ? ` · ${CONTENT_STATUS[a.status] || a.status}` : ''}</span>${a.note ? html`<div class="muted small">${a.note}</div>` : ''}</li>`,
+              )}
+            </ul>`
+          : html`<p class="muted small">Sem anexos.</p>`}
+      </div>
+      <div>
+        <h4>Informação encontrada</h4>
+        ${matchesHtml(r, MAIL_PHRASE)}
+      </div>
+    </div>`;
+  },
+
+  empty: { filtered: 'Nenhuma mensagem corresponde aos filtros.', running: 'Nenhuma ocorrência encontrada até agora.', none: 'Nenhum termo da lista foi encontrado nas mensagens analisadas.' },
+  errors: {
+    column: 'Local',
+    help: 'Caixas, pastas ou mensagens que não puderam ser lidas (credenciais, permissões, limites do provedor...). Elas não foram analisadas.',
+    empty: 'Nenhum erro de acesso ou leitura.',
+  },
+};
+
+// ---------------------------------------------------------------------------------------------
 
 export async function render(root, { params, query }) {
   const id = params[0];
   let scan = await get(`/api/scans/${id}`);
-  const filters = Object.fromEntries(FILTER_KEYS.map((k) => [k, query.get(k) || '']));
+  const P = scan.kind === 'mail' ? MAIL : FILES;
+  // Endereço e menu de acordo com o tipo da análise (ex.: link antigo para uma análise de e-mail).
+  if (!location.hash.startsWith(`${P.base}/`)) history.replaceState(null, '', `${P.base}/${id}${query.toString() ? `?${query}` : ''}`);
+  setActiveNav(P.nav);
+
+  const filters = Object.fromEntries(P.filterKeys.map((k) => [k, query.get(k) || '']));
   let tab = ['arquivos', 'erros', 'registro'].includes(query.get('aba')) ? query.get('aba') : 'arquivos';
   let results = null;
   let summary = null;
   let errors = null;
   const expanded = new Set();
-  const chartView = { terms: 'chart', users: 'chart' };
+  const chartView = { ...P.charts };
   let stopped = false;
   let timer = null;
   let lastResults = 0;
   let loading = null;
   const stale = { results: false, errors: false };
   let lastAnnounced = '';
+
+  const queryString = (values, extra = {}) => {
+    const out = new URLSearchParams();
+    for (const [key, value] of Object.entries({ ...values, ...extra })) if (value !== '' && value !== null && value !== undefined) out.set(key, value);
+    if (values.sort) out.set('dir', P.descSorts.has(values.sort) ? 'desc' : 'asc');
+    return out.toString();
+  };
 
   // ---------- Estrutura fixa (os blocos abaixo são redesenhados separadamente) ----------
   paint(
@@ -78,35 +472,13 @@ export async function render(root, { params, query }) {
       <div data-progress></div>
       <section class="tiles" data-tiles aria-label="Números da análise"></section>
       <div class="tabs" role="tablist">
-        <button type="button" role="tab" data-tab="arquivos">Arquivos com ocorrências</button>
+        <button type="button" role="tab" data-tab="arquivos">${P.resultsTitle}</button>
         <button type="button" role="tab" data-tab="erros">Erros <span data-error-count></span></button>
         <button type="button" role="tab" data-tab="registro">Registro</button>
       </div>
       <div data-panel="arquivos">
         <form class="filters" data-filters role="search">
-          <label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Caminho, usuário ou termo" /></label>
-          <label class="field"><span>Termo</span><select name="term"><option value="">Todos</option></select></label>
-          <label class="field"><span>Último usuário</span><select name="user"><option value="">Todos</option></select></label>
-          <label class="field"><span>Encontrado em</span>
-            <select name="location">
-              <option value="">Nome ou conteúdo</option>
-              <option value="name" ${filters.location === 'name' ? 'selected' : ''}>Nome</option>
-              <option value="content" ${filters.location === 'content' ? 'selected' : ''}>Conteúdo</option>
-            </select>
-          </label>
-          <label class="field"><span>Extensão</span><select name="extension"><option value="">Todas</option></select></label>
-          <label class="field"><span>Ordenar por</span>
-            <select name="sort">
-              ${[
-                ['path', 'Caminho'],
-                ['occurrences', 'Mais ocorrências'],
-                ['terms', 'Mais termos'],
-                ['modified', 'Modificados recentemente'],
-                ['lastUser', 'Último usuário'],
-                ['size', 'Maiores arquivos'],
-              ].map(([value, label]) => html`<option value="${value}" ${filters.sort === value ? 'selected' : ''}>${label}</option>`)}
-            </select>
-          </label>
+          ${P.filterFields(filters)}
           <button type="button" class="btn" data-action="clear-filters">Limpar filtros</button>
         </form>
         <div class="grid-2" data-charts></div>
@@ -123,22 +495,18 @@ export async function render(root, { params, query }) {
   // ---------- Cabeçalho, avisos, progresso e indicadores ----------
 
   const drawHead = () => {
-    const s = scan.summary || {};
     const started = scan.startedAt ? fmtDateTime(scan.startedAt) : '—';
     const end = scan.finishedAt ? new Date(scan.finishedAt) : new Date();
     const duration = scan.startedAt ? fmtDuration(end - new Date(scan.startedAt)) : '—';
     const qs = queryString({ ...filters, page: '' });
-    const filtered = ['q', 'term', 'user', 'location', 'extension'].some((k) => filters[k]);
+    const filtered = P.criteria.some((k) => filters[k]);
     const exportsLabel = filtered ? 'Exportar (com os filtros atuais):' : 'Exportar:';
     paint(
       $('[data-head]'),
       html`<div class="page-head">
         <div>
           <div class="inline"><h1>${scan.name}</h1>${statusBadge(scan.status)}</div>
-          <div class="sub">
-            Início ${started} · duração ${duration} ·
-            ${(s.repositories || []).map((r) => r.name).join(', ')} · ${(s.lists || []).map((l) => `${l.name} (${fmtNum(l.termCount)})`).join(', ')}
-          </div>
+          <div class="sub">Início ${started} · duração ${duration} · ${P.subtitle(scan)}</div>
         </div>
         <div class="actions">
           ${isActive(scan) ? html`<button type="button" class="btn danger" data-action="cancel">${icon('stop')} Cancelar análise</button>` : ''}
@@ -174,7 +542,6 @@ export async function render(root, { params, query }) {
       paint($('[data-progress]'), '');
       return;
     }
-    const st = scan.stats || {};
     paint(
       $('[data-progress]'),
       html`<section class="card progress-card">
@@ -183,14 +550,7 @@ export async function render(root, { params, query }) {
           <span class="muted small">Os resultados aparecem abaixo conforme são encontrados.</span>
         </div>
         <div class="progress-line" role="progressbar" aria-label="Análise em andamento"></div>
-        <div class="progress-stats">
-          <span><b>${fmtNum(st.filesSeen)}</b> arquivos verificados</span>
-          <span><b>${fmtNum(st.directories)}</b> pastas</span>
-          <span><b>${fmtNum(st.filesMatched)}</b> com ocorrências</span>
-          <span><b>${fmtBytes(st.bytesAnalyzed)}</b> de conteúdo lido</span>
-          <span><b>${fmtNum(st.errors)}</b> erros</span>
-          <span>repositório <b>${Math.min((st.repositoriesDone || 0) + 1, st.repositoriesTotal || 1)}</b> de <b>${st.repositoriesTotal || 1}</b></span>
-        </div>
+        <div class="progress-stats">${P.progress(scan.stats || {})}</div>
         ${scan.current?.path ? html`<div class="current">${scan.current.path}</div>` : ''}
       </section>`,
     );
@@ -198,16 +558,7 @@ export async function render(root, { params, query }) {
 
   const drawTiles = () => {
     const st = scan.stats || {};
-    const pct = st.filesSeen ? Math.round((st.filesMatched / st.filesSeen) * 1000) / 10 : 0;
-    const notRead = (st.contentEncrypted || 0) + (st.contentSkippedSize || 0) + (st.contentErrors || 0);
-    paint(
-      $('[data-tiles]'),
-      html`<div class="tile"><div class="label">Arquivos verificados</div><div class="value">${fmtCompact(st.filesSeen)}</div><div class="detail">em ${plural(st.directories || 0, 'pasta', 'pastas')}${st.filesSkippedByDate ? ` · ${fmtNum(st.filesSkippedByDate)} fora do período` : ''}</div></div>
-        <div class="tile"><div class="label">Arquivos com ocorrências</div><div class="value">${fmtCompact(st.filesMatched)}</div><div class="detail">${pct.toLocaleString('pt-BR')}% dos verificados</div></div>
-        <div class="tile"><div class="label">Ocorrências</div><div class="value">${fmtCompact(st.occurrences)}</div><div class="detail">somando nome e conteúdo</div></div>
-        <div class="tile"><div class="label">Conteúdos lidos</div><div class="value">${fmtCompact(st.contentAnalyzed)}</div><div class="detail">${notRead ? `${fmtNum(st.contentEncrypted)} com senha · ${fmtNum(st.contentSkippedSize)} grandes · ${fmtNum(st.contentErrors)} com erro` : fmtBytes(st.bytesAnalyzed)}</div></div>
-        <div class="tile"><div class="label">Erros de acesso ou leitura</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`,
-    );
+    paint($('[data-tiles]'), P.tiles(st));
     $('[data-error-count]').textContent = st.errors ? `(${fmtNum(st.errors)})` : '';
   };
 
@@ -216,33 +567,29 @@ export async function render(root, { params, query }) {
   const fillSelect = (select, values, current, labelFn = (v) => v) => {
     const keep = select.querySelector('option[value=""]');
     const options = values.map((v) => {
-      const option = document.createElement('option');
-      option.value = v;
-      option.textContent = labelFn(v);
-      return option;
+      const el = document.createElement('option');
+      el.value = v;
+      el.textContent = labelFn(v);
+      return el;
     });
     if (current && !values.includes(current)) {
-      const option = document.createElement('option');
-      option.value = current;
-      option.textContent = labelFn(current);
-      options.push(option);
+      const el = document.createElement('option');
+      el.value = current;
+      el.textContent = labelFn(current);
+      options.push(el);
     }
     select.replaceChildren(keep, ...options);
     select.value = current || '';
   };
 
-  const drawFilterOptions = () => {
-    const o = summary?.options || { terms: [], users: [], extensions: [] };
-    fillSelect(filtersForm.elements.term, o.terms, filters.term);
-    fillSelect(filtersForm.elements.user, o.users, filters.user);
-    fillSelect(filtersForm.elements.extension, o.extensions, filters.extension);
-  };
+  const drawFilterOptions = () => P.fillOptions(filtersForm, summary?.options, filters, fillSelect);
 
   // ---------- Gráficos (barras horizontais de uma série: cor única, valor na ponta) ----------
 
-  const barChart = ({ key, title, subtitle, rows, max, filterKey, emptyText, tableHead, tableRow }) => {
+  const barChart = ({ key, title, subtitle, rows, filterKey, emptyText, tableHead, tableRow }) => {
     const view = chartView[key];
     const top = rows.slice(0, TOP);
+    const max = rows[0]?.value || 0;
     const body =
       rows.length === 0
         ? html`<div class="empty">${emptyText}</div>`
@@ -275,96 +622,10 @@ export async function render(root, { params, query }) {
 
   const drawCharts = () => {
     if (!summary) return;
-    const terms = summary.byTerm.map((t) => ({
-      label: t.term,
-      value: t.files,
-      filterValue: t.term,
-      tipValue: `${plural(t.files, 'arquivo', 'arquivos')} · ${plural(t.occurrences, 'ocorrência', 'ocorrências')}`,
-      tipLabel: `${t.term} — lista ${t.list}${t.inName ? ` · ${fmtNum(t.inName)} no nome` : ''}`,
-      raw: t,
-    }));
-    const users = summary.byUser.map((u) => ({
-      label: u.user,
-      value: u.files,
-      filterValue: u.identified ? u.user : '',
-      tipValue: `${plural(u.files, 'arquivo', 'arquivos')} · ${plural(u.occurrences, 'ocorrência', 'ocorrências')}`,
-      tipLabel: `${u.user} — ${Object.entries(u.sources).map(([k, n]) => `${SOURCE_SHORT[k]}: ${n}`).join(', ') || 'sem fonte'}`,
-      raw: u,
-    }));
-    paint(
-      $('[data-charts]'),
-      html`${barChart({
-        key: 'terms',
-        title: 'Termos encontrados',
-        subtitle: 'Arquivos em que cada termo aparece. Clique para filtrar.',
-        rows: terms,
-        max: terms[0]?.value || 0,
-        filterKey: 'term',
-        emptyText: 'Nenhum termo encontrado.',
-        tableHead: html`<tr><th>Termo</th><th>Lista</th><th class="num">Arquivos</th><th class="num">Ocorrências</th><th class="num">No nome</th></tr>`,
-        tableRow: (r) => html`<tr><td>${r.raw.term}</td><td>${r.raw.list}</td><td class="num">${fmtNum(r.raw.files)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td><td class="num">${fmtNum(r.raw.inName)}</td></tr>`,
-      })}
-      ${barChart({
-        key: 'users',
-        title: 'Últimos usuários',
-        subtitle: 'Quem interagiu por último com os arquivos encontrados. Clique para filtrar.',
-        rows: users,
-        max: users[0]?.value || 0,
-        filterKey: 'user',
-        emptyText: 'Nenhum arquivo encontrado.',
-        tableHead: html`<tr><th>Usuário</th><th>Fontes</th><th class="num">Arquivos</th><th class="num">Ocorrências</th></tr>`,
-        tableRow: (r) => html`<tr><td>${r.raw.user}</td><td class="small">${Object.entries(r.raw.sources).map(([k, n]) => `${SOURCE_SHORT[k]}: ${n}`).join(', ')}</td><td class="num">${fmtNum(r.raw.files)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td></tr>`,
-      })}`,
-    );
+    paint($('[data-charts]'), P.charts(summary, barChart));
   };
 
   // ---------- Tabela de resultados ----------
-
-  const sampleHtml = (s) => html`<div class="sample">${s.where ? html`<span class="where">${s.where}</span>` : ''}${s.before}<mark>${s.match}</mark>${s.after}</div>`;
-
-  const detail = (r) => {
-    const m = r.metadata || {};
-    const a = r.audit;
-    return html`<div class="detail-grid">
-      <div>
-        <h4>Arquivo</h4>
-        <dl class="kv">
-          <dt>Caminho</dt>
-          <dd><span class="mono">${r.path}</span> <button type="button" class="btn small" data-action="copy" data-path="${r.path}">${icon('copy')} Copiar</button></dd>
-          <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
-          <dt>Criado em</dt><dd>${fmtDateTime(r.created)}</dd>
-          <dt>Modificado em</dt><dd>${fmtDateTime(r.modified)}</dd>
-          <dt>Tipo</dt><dd>${(r.contentType || r.extension || '—').toString().toUpperCase()} · ${CONTENT_STATUS[r.contentStatus] || r.contentStatus || '—'}</dd>
-          ${r.contentNote ? html`<dt>Observação</dt><dd>${r.contentNote}</dd>` : ''}
-          ${m.title ? html`<dt>Título</dt><dd>${m.title}</dd>` : ''}
-        </dl>
-      </div>
-      <div>
-        <h4>Quem interagiu com o arquivo</h4>
-        <dl class="kv">
-          <dt>Último usuário</dt><dd><b>${r.lastUser || 'não identificado'}</b>${r.lastUserSource ? html`<br /><span class="muted small">fonte: ${SOURCE[r.lastUserSource]}</span>` : ''}</dd>
-          ${a ? html`<dt>Último acesso (auditoria)</dt><dd>${a.user} · ${a.action} · ${fmtDateTime(a.time)}</dd>` : ''}
-          ${a?.lastWrite ? html`<dt>Última alteração (auditoria)</dt><dd>${a.lastWrite.user} · ${a.lastWrite.action} · ${fmtDateTime(a.lastWrite.time)}</dd>` : ''}
-          ${m.lastModifiedBy ? html`<dt>Salvo por último por</dt><dd>${m.lastModifiedBy}${m.modified ? html` <span class="muted small">em ${fmtDateTime(m.modified)}</span>` : ''}</dd>` : ''}
-          ${m.author ? html`<dt>Autor</dt><dd>${m.author}${m.created ? html` <span class="muted small">em ${fmtDateTime(m.created)}</span>` : ''}</dd>` : ''}
-          <dt>Proprietário (NTFS)</dt><dd>${r.owner || html`<span class="muted">${r.ownerError ? `não obtido: ${r.ownerError}` : 'não verificado'}</span>`}</dd>
-        </dl>
-      </div>
-      <div>
-        <h4>Informação encontrada</h4>
-        ${r.matches.map(
-          (mt) => html`<div class="match">
-            <div class="match-head">
-              <span class="chip"><b>${mt.term}</b></span>
-              <span class="muted small">lista ${mt.list} · no ${LOCATION[mt.location]} · ${plural(mt.count, 'ocorrência', 'ocorrências')}${mt.truncated ? '+' : ''}</span>
-            </div>
-            ${mt.values?.length && mt.kind === 'regex' ? html`<div class="small"><span class="muted">Valores:</span> ${mt.values.join(' · ')}</div>` : ''}
-            ${mt.samples.map(sampleHtml)}
-          </div>`,
-        )}
-      </div>
-    </div>`;
-  };
 
   const drawResults = () => {
     const box = $('[data-results]');
@@ -372,16 +633,14 @@ export async function render(root, { params, query }) {
       paint(box, html`<p class="loading">Carregando resultados…</p>`);
       return;
     }
+    const [one, many] = P.noun;
     const filtered = results.total !== results.totalAll;
     const heading = html`<div class="card-head">
-      <h2>${plural(results.total, 'arquivo', 'arquivos')}${filtered ? html` <span class="muted">de ${fmtNum(results.totalAll)}</span>` : ''}</h2>
+      <h2>${plural(results.total, one, many)}${filtered ? html` <span class="muted">de ${fmtNum(results.totalAll)}</span>` : ''}</h2>
       ${isActive(scan) ? html`<span class="muted small">atualizando enquanto a análise roda…</span>` : ''}
     </div>`;
     if (results.total === 0) {
-      paint(
-        box,
-        html`${heading}<div class="empty">${filtered ? 'Nenhum arquivo corresponde aos filtros.' : isActive(scan) ? 'Nenhuma ocorrência encontrada até agora.' : 'Nenhum termo da lista foi encontrado nos arquivos analisados.'}</div>`,
-      );
+      paint(box, html`${heading}<div class="empty">${filtered ? P.empty.filtered : isActive(scan) ? P.empty.running : P.empty.none}</div>`);
       return;
     }
     paint(
@@ -389,18 +648,15 @@ export async function render(root, { params, query }) {
       html`${heading}
         <div class="table-wrap">
           <table class="data results">
-            <thead><tr><th><span class="sr-only">Detalhes</span></th><th>Arquivo</th><th>Último usuário</th><th>Modificado em</th><th>Informação encontrada</th></tr></thead>
+            <thead>${P.tableHead}</thead>
             <tbody>
               ${results.items.map((r) => {
                 const open = expanded.has(r.id);
                 return html`<tr data-id="${r.id}" aria-expanded="${open}">
-                    <td><button type="button" class="icon-btn" data-action="toggle" aria-label="${open ? 'Ocultar' : 'Mostrar'} detalhes de ${r.name}" aria-expanded="${open}"><span class="row-toggle">${icon('chevron')}</span></button></td>
-                    <td><div class="name">${r.name}</div><div class="path">${folderOf(r)}</div></td>
-                    <td>${r.lastUser ? html`${r.lastUser}<div><span class="chip source">${SOURCE_SHORT[r.lastUserSource]}</span></div>` : html`<span class="muted">não identificado</span>`}</td>
-                    <td class="nowrap">${fmtDateTime(r.modified)}</td>
-                    <td><div class="chips">${r.matches.map((m) => html`<span class="chip"><b>${m.term}</b> ${fmtNum(m.count)}× · ${LOCATION[m.location]}</span>`)}</div></td>
+                    <td><button type="button" class="icon-btn" data-action="toggle" aria-label="${open ? 'Ocultar' : 'Mostrar'} detalhes de ${P.rowLabel(r)}" aria-expanded="${open}"><span class="row-toggle">${icon('chevron')}</span></button></td>
+                    ${P.row(r)}
                   </tr>
-                  ${open ? html`<tr class="detail"><td colspan="5">${detail(r)}</td></tr>` : ''}`;
+                  ${open ? html`<tr class="detail"><td colspan="5">${P.detail(r)}</td></tr>` : ''}`;
               })}
             </tbody>
           </table>
@@ -426,12 +682,12 @@ export async function render(root, { params, query }) {
     paint(
       box,
       errors.total === 0
-        ? html`<div class="empty">Nenhum erro de acesso ou leitura.</div>`
+        ? html`<div class="empty">${P.errors.empty}</div>`
         : html`<div class="card-head"><h2>${plural(errors.total, 'erro', 'erros')}</h2>${errors.total > errors.items.length ? html`<span class="muted small">Mostrando ${fmtNum(errors.items.length)}. Exporte para Excel para ver todos.</span>` : ''}</div>
-            <p class="muted small">Pastas ou arquivos que a conta do CLEAN não conseguiu abrir (permissão, arquivo em uso, caminho longo...). Eles não foram analisados.</p>
+            <p class="muted small">${P.errors.help}</p>
             <div class="table-wrap">
               <table class="data">
-                <thead><tr><th>Caminho</th><th>Erro</th><th>Quando</th></tr></thead>
+                <thead><tr><th>${P.errors.column}</th><th>Erro</th><th>Quando</th></tr></thead>
                 <tbody>${errors.items.map((e) => html`<tr><td class="path">${e.path}</td><td>${e.message}</td><td class="nowrap">${fmtDateTime(e.time)}</td></tr>`)}</tbody>
               </table>
             </div>`,
@@ -460,6 +716,14 @@ export async function render(root, { params, query }) {
 
   const syncUrl = () => replaceQuery({ ...filters, aba: tab === 'arquivos' ? '' : tab });
 
+  /** Mensagem curta para leitores de tela (só quando muda). */
+  const announce = (message) => {
+    if (message === lastAnnounced) return;
+    lastAnnounced = message;
+    const live = root.querySelector('[data-live]');
+    if (live) live.textContent = message;
+  };
+
   const loadResults = async () => {
     lastResults = Date.now();
     const busy = [$('[data-charts]'), $('[data-results]')];
@@ -481,7 +745,8 @@ export async function render(root, { params, query }) {
         drawCharts();
         drawResults();
       });
-      announce(`${plural(results.total, 'arquivo encontrado', 'arquivos encontrados')}.`);
+      const [one, many] = P.noun;
+      announce(`${plural(results.total, `${one} encontrad${one === 'mensagem' ? 'a' : 'o'}`, `${many} encontrad${one === 'mensagem' ? 'as' : 'os'}`)}.`);
     } catch (err) {
       if (!stopped) toast(err.message, 'error');
     } finally {
@@ -499,14 +764,6 @@ export async function render(root, { params, query }) {
     } catch (err) {
       if (!stopped) toast(err.message, 'error');
     }
-  };
-
-  /** Mensagem curta para leitores de tela (só quando muda). */
-  const announce = (message) => {
-    if (message === lastAnnounced) return;
-    lastAnnounced = message;
-    const live = root.querySelector('[data-live]');
-    if (live) live.textContent = message;
   };
 
   const drawScan = () => {
@@ -576,7 +833,9 @@ export async function render(root, { params, query }) {
     if (bar) {
       const key = bar.dataset.filterKey;
       const value = bar.dataset.filterValue;
-      applyFilters({ [key]: filters[key] === value ? '' : value });
+      const changes = { [key]: filters[key] === value ? '' : value };
+      if (key === 'location' && filtersForm.elements.location) filtersForm.elements.location.value = changes.location;
+      applyFilters(changes);
       document.getElementById('tooltip').hidden = true;
       return;
     }
@@ -594,14 +853,14 @@ export async function render(root, { params, query }) {
     } else if (action === 'clear-filters') {
       filtersForm.elements.q.value = '';
       filtersForm.elements.location.value = '';
-      filtersForm.elements.sort.value = 'path';
-      applyFilters({ q: '', term: '', user: '', location: '', extension: '', sort: '' });
+      filtersForm.elements.sort.value = P.defaultSort;
+      applyFilters({ ...Object.fromEntries(P.criteria.map((k) => [k, ''])), sort: '' });
     } else if (action === 'copy') {
       try {
-        await copyText(el.dataset.path);
-        toast('Caminho copiado.', 'success');
+        await copyText(el.dataset.copy);
+        toast(el.dataset.copied || 'Copiado.', 'success');
       } catch {
-        toast('Não foi possível copiar. Selecione o caminho e copie manualmente.', 'error');
+        toast('Não foi possível copiar. Selecione o texto e copie manualmente.', 'error');
       }
     } else if (action === 'cancel') {
       if (!(await confirmDialog('Cancelar esta análise? Os resultados encontrados até agora serão mantidos.', { confirmLabel: 'Cancelar análise' }))) return;
@@ -623,7 +882,7 @@ export async function render(root, { params, query }) {
 
   const onFilterChange = (event) => {
     const { name, value } = event.target;
-    if (name && name !== 'q' && FILTER_KEYS.includes(name)) applyFilters({ [name]: value });
+    if (name && name !== 'q' && P.filterKeys.includes(name)) applyFilters({ [name]: value });
   };
   const onSearch = debounce((value) => {
     if (!stopped) applyFilters({ q: value.trim() });

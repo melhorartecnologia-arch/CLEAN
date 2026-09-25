@@ -425,7 +425,7 @@ function powerPointText(cfb) {
 
 const MSG_SKIP = new Set(['007D', '1035', '1042', '0E1D', '0064', '0C1E', '3002', '0070', '5D0A', '5D0B']);
 
-function msgText(cfb) {
+function msgText(cfb, { attachments = true } = {}) {
   const parts = [];
   const metadata = {};
   let hasBody = false;
@@ -453,14 +453,41 @@ function msgText(cfb) {
     }
   });
   if (!hasBody && htmlBody) parts.push(htmlToText(decodeText(htmlBody)));
-  return { text: parts.join('\n'), metadata };
+  return { text: parts.join('\n'), metadata, attachments: attachments ? msgAttachments(cfb) : [] };
+}
+
+/**
+ * Anexos binários da mensagem (PR_ATTACH_DATA_BIN), inclusive os de mensagens anexadas, com o
+ * nome longo (PR_ATTACH_LONG_FILENAME) ou curto do anexo.
+ */
+function msgAttachments(cfb) {
+  const byPath = new Map();
+  cfb.FullPaths.forEach((full, i) => byPath.set(full.toLowerCase(), cfb.FileIndex[i]));
+  const text = (entry, unicode) => {
+    if (!entry || entry.type !== 2 || !entry.content || !entry.content.length) return '';
+    const buf = Buffer.from(entry.content);
+    return (unicode ? buf.toString('utf16le') : decoderFor('windows-1252').decode(buf)).replace(/\0+$/, '').trim();
+  };
+  const out = [];
+  cfb.FullPaths.forEach((full, i) => {
+    const entry = cfb.FileIndex[i];
+    if (!/\/__substg1\.0_37010102$/i.test(full) || entry.type !== 2 || !entry.content || !entry.content.length) return;
+    const dir = full.slice(0, full.lastIndexOf('/') + 1).toLowerCase();
+    let name = '';
+    for (const prop of ['3707', '3704', '3001']) {
+      name = text(byPath.get(`${dir}__substg1.0_${prop}001f`), true) || text(byPath.get(`${dir}__substg1.0_${prop}001e`), false);
+      if (name) break;
+    }
+    out.push({ name: name || 'anexo-sem-nome', data: Buffer.from(entry.content) });
+  });
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------
 
 /**
  * Extrai texto e metadados de um arquivo OLE.
- * Retorna { kind, segments, metadata, encrypted? }.
+ * Retorna { kind, segments, metadata, attachments?, encrypted? } (attachments: anexos binários de um .msg).
  */
 export function oleExtract(buf, { withText = true } = {}) {
   const cfb = openOle(buf);
@@ -468,7 +495,7 @@ export function oleExtract(buf, { withText = true } = {}) {
   if (kind === 'encrypted') return { kind, segments: [], metadata: {}, encrypted: true };
   let metadata = oleMetadata(cfb);
   if (!withText) {
-    if (kind === 'msg') metadata = { ...msgText(cfb).metadata, ...metadata };
+    if (kind === 'msg') metadata = { ...msgText(cfb, { attachments: false }).metadata, ...metadata };
     return { kind, segments: [], metadata };
   }
   const parsers = { doc: wordText, xls: excelText, ppt: powerPointText, msg: msgText };
@@ -487,5 +514,5 @@ export function oleExtract(buf, { withText = true } = {}) {
   if (result.encrypted) return { kind, segments: [], metadata, encrypted: true };
   if (result.metadata) metadata = { ...result.metadata, ...metadata };
   const segments = result.segments || [{ text: result.text || '' }];
-  return { kind, segments, metadata };
+  return { kind, segments, metadata, attachments: result.attachments || [] };
 }

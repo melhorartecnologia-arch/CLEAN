@@ -18,7 +18,18 @@ export const STATUS_LABELS = {
   'not-requested': 'Não verificado',
 };
 
-export const LOCATION_LABELS = { name: 'Nome', content: 'Conteúdo' };
+export const LOCATION_LABELS = {
+  name: 'Nome',
+  content: 'Conteúdo',
+  // análises de e-mail
+  subject: 'Assunto',
+  body: 'Corpo',
+  attachmentName: 'Nome do anexo',
+  attachment: 'Conteúdo do anexo',
+  address: 'Remetente/destinatários',
+};
+
+export const MAIL_TYPE_LABELS = { graph: 'Microsoft 365', gmail: 'Google Workspace', imap: 'IMAP' };
 
 export const SCAN_STATUS_LABELS = {
   queued: 'Na fila',
@@ -159,4 +170,116 @@ export function formatDateTime(iso) {
 export function auditText(audit) {
   if (!audit) return '';
   return `${audit.user} – ${audit.action} em ${formatDateTime(audit.time)}`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Análises de e-mail
+
+function mailHaystack(record) {
+  if (!record._search) {
+    record._search = foldText(
+      [record.subject, record.from, ...(record.to || []), ...(record.cc || []), record.mailbox, record.folder, ...(record.attachments || []).map((a) => a.name), ...record.terms]
+        .filter(Boolean)
+        .join(' | '),
+    );
+  }
+  return record._search;
+}
+
+const byDate = (a, b) => String(a.date || '').localeCompare(String(b.date || ''));
+
+const MAIL_SORTERS = {
+  date: byDate,
+  mailbox: (a, b) => a.mailbox.localeCompare(b.mailbox, 'pt-BR') || byDate(a, b),
+  sender: (a, b) => String(a.from || '').localeCompare(String(b.from || ''), 'pt-BR') || byDate(a, b),
+  subject: (a, b) => String(a.subject || '').localeCompare(String(b.subject || ''), 'pt-BR'),
+  occurrences: (a, b) => a.occurrences - b.occurrences,
+  terms: (a, b) => a.terms.length - b.terms.length,
+  size: (a, b) => a.size - b.size,
+};
+
+export const MAIL_FILTER_KEYS = ['q', 'term', 'mailbox', 'sender', 'location', 'source', 'sort', 'dir', 'page'];
+
+/** Anexos "de verdade" (sem as imagens embutidas no corpo, como logotipos de assinatura). */
+export function realAttachments(record) {
+  return (record.attachments || []).filter((a) => !a.inline);
+}
+
+/**
+ * Filtra e ordena as mensagens.
+ * filters: { q, term, mailbox, sender, location, source, sort, dir } — padrão: mais recentes primeiro.
+ */
+export function filterMailRecords(records, filters = {}) {
+  const q = filters.q ? foldText(filters.q) : '';
+  let out = records.filter((r) => {
+    if (filters.term && !r.terms.includes(filters.term)) return false;
+    if (filters.mailbox && r.mailbox !== filters.mailbox) return false;
+    if (filters.sender && (r.fromAddress || '') !== filters.sender) return false;
+    if (filters.location && !r.matches.some((m) => m.location === filters.location)) return false;
+    if (filters.source && r.sourceId !== filters.source) return false;
+    if (q && !mailHaystack(r).includes(q)) return false;
+    return true;
+  });
+  const known = Object.hasOwn(MAIL_SORTERS, filters.sort || '');
+  out = out.slice().sort(known ? MAIL_SORTERS[filters.sort] : byDate);
+  if (known ? filters.dir === 'desc' : filters.dir !== 'asc') out.reverse();
+  return out;
+}
+
+/** Agregações do relatório de e-mail. */
+export function summarizeMail(records) {
+  const terms = new Map();
+  for (const r of records) {
+    for (const m of r.matches) {
+      let t = terms.get(m.termId);
+      if (!t) {
+        t = { termId: m.termId, term: m.term, list: m.list, kind: m.kind, messages: new Set(), occurrences: 0, inSubject: 0, inBody: 0, inAttachments: 0 };
+        terms.set(m.termId, t);
+      }
+      t.messages.add(r.id);
+      t.occurrences += m.count;
+      if (m.location === 'subject') t.inSubject++;
+      else if (m.location === 'body') t.inBody++;
+      else if (m.location === 'attachment' || m.location === 'attachmentName') t.inAttachments++;
+    }
+  }
+  const byTerm = [...terms.values()]
+    .map(({ messages, ...t }) => ({ ...t, messages: messages.size }))
+    .sort((a, b) => b.messages - a.messages || b.occurrences - a.occurrences);
+
+  const group = (keyFn, make) => {
+    const map = new Map();
+    for (const r of records) {
+      const k = keyFn(r);
+      let g = map.get(k);
+      if (!g) {
+        g = { ...make(r), messages: 0, occurrences: 0 };
+        map.set(k, g);
+      }
+      g.messages++;
+      g.occurrences += r.occurrences;
+    }
+    return [...map.values()].sort((a, b) => b.messages - a.messages || b.occurrences - a.occurrences);
+  };
+  const locations = Object.fromEntries(['subject', 'body', 'attachmentName', 'attachment', 'address'].map((k) => [k, records.filter((r) => r.matches.some((m) => m.location === k)).length]));
+  return {
+    messages: records.length,
+    occurrences: records.reduce((sum, r) => sum + r.occurrences, 0),
+    withAttachments: records.filter((r) => realAttachments(r).length > 0).length,
+    byTerm,
+    byMailbox: group(
+      (r) => r.mailbox,
+      (r) => ({ mailbox: r.mailbox, name: r.mailboxName || '' }),
+    ),
+    bySender: group(
+      (r) => r.fromAddress || '',
+      (r) => ({ sender: r.fromAddress || '', label: r.from || '(sem remetente)' }),
+    ),
+    bySource: group(
+      (r) => r.sourceId,
+      (r) => ({ sourceId: r.sourceId, source: r.sourceName }),
+    ),
+    byLocation: locations,
+    byStatus: Object.fromEntries(countBy(records, (r) => r.contentStatus || 'none')),
+  };
 }

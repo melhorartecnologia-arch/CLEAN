@@ -8,10 +8,13 @@ import { PROJECT_ROOT } from './config.js';
 import { repositoriesRouter } from './routes/repositories.js';
 import { listsRouter } from './routes/lists.js';
 import { scansRouter } from './routes/scans.js';
+import { mailSourcesRouter } from './routes/mail-sources.js';
 import { HttpError } from './routes/validate.js';
 import { PRESETS, VALIDATORS } from './scan/presets.js';
 import { DEFAULT_OPTIONS } from './scan/scanner.js';
 import { DEFAULT_EXCLUDES } from './scan/walker.js';
+import { MAIL_DEFAULT_OPTIONS } from './mail/scanner.js';
+import { MAIL_TYPES } from './mail/connectors.js';
 
 // Versão exibida na interface (lida do package.json).
 const VERSION = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')).version;
@@ -137,10 +140,13 @@ export function createApp({ store, manager, config }) {
       validators: Object.fromEntries(Object.entries(VALIDATORS).map(([k, v]) => [k, v.label])),
       defaults: DEFAULT_OPTIONS,
       defaultExcludes: DEFAULT_EXCLUDES,
+      mailDefaults: MAIL_DEFAULT_OPTIONS,
+      mailTypes: MAIL_TYPES,
     });
   });
   api.use('/repositories', repositoriesRouter({ store }));
   api.use('/lists', listsRouter({ store }));
+  api.use('/mail-sources', mailSourcesRouter({ store, endpoints: config.mailEndpoints }));
   api.use('/scans', scansRouter({ store, manager }));
   api.use((req, res, next) => next(new HttpError(404, 'Rota não encontrada.')));
   // eslint-disable-next-line no-unused-vars

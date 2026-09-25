@@ -1,6 +1,7 @@
 // Fila de análises: cada análise roda em uma worker thread; o resultado é gravado conforme chega.
 import { Worker } from 'node:worker_threads';
 import { newStats, DEFAULT_OPTIONS } from './scanner.js';
+import { newMailStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
 
 export class ScanError extends Error {
   constructor(message, status = 400) {
@@ -30,29 +31,72 @@ export function sanitizeOptions(input) {
   return o;
 }
 
+const MAIL_CHECKS = ['checkSubject', 'checkBody', 'checkAttachmentNames', 'checkAttachments', 'checkAddresses'];
+
+/** Normaliza as opções de uma análise de e-mail. */
+export function sanitizeMailOptions(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) input = {};
+  const o = { ...MAIL_DEFAULT_OPTIONS };
+  for (const k of [...MAIL_CHECKS, 'includeTrash', 'includeJunk']) if (input[k] !== undefined) o[k] = Boolean(input[k]);
+  const size = Number(input.maxMessageSizeMB);
+  if (Number.isFinite(size) && size > 0) o.maxMessageSizeMB = Math.min(size, 500);
+  const concurrency = Number(input.concurrency);
+  if (Number.isInteger(concurrency) && concurrency > 0) o.concurrency = Math.min(concurrency, 8);
+  if (input.receivedAfter) {
+    const d = new Date(input.receivedAfter);
+    if (Number.isNaN(d.getTime())) throw new ScanError('Data "recebidas a partir de" inválida.');
+    o.receivedAfter = d.toISOString();
+  }
+  if (!MAIL_CHECKS.some((k) => o[k])) throw new ScanError('Selecione ao menos uma verificação: assunto, corpo ou anexos.');
+  return o;
+}
+
+/** Configuração da conexão usada pela análise (sem os segredos). */
+function mailSnapshot(source) {
+  const { id, name, type, scope, mailboxes, excludeMailboxes, excludeFolders, graph, gmail, imap } = source;
+  return { id, name, type, scope, mailboxes, excludeMailboxes, excludeFolders, graph, gmail, imap };
+}
+
+const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
+
 export class ScanManager {
-  constructor(store, { maxConcurrent = 1, workerUrl = new URL('./worker.js', import.meta.url) } = {}) {
+  /** mailEndpoints: endereços alternativos das APIs de e-mail (usado nos testes). */
+  constructor(store, { maxConcurrent = 1, workerUrl = new URL('./worker.js', import.meta.url), mailEndpoints = {} } = {}) {
     this.store = store;
+    this.mailEndpoints = mailEndpoints;
     this.maxConcurrent = Math.max(1, maxConcurrent);
     this.workerUrl = workerUrl;
     this.running = new Map();
     this.queue = [];
   }
 
-  async start({ name, repositoryIds, listIds, options } = {}) {
-    const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
-    const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
+  /** Termos das listas escolhidas (o identificador do termo inclui o da lista). */
+  #terms(listIds) {
     const lists = ids(listIds).map((id) => this.store.getList(id));
-    if (repositories.length === 0 || repositories.some((r) => !r)) throw new ScanError('Selecione repositórios válidos.');
     if (lists.length === 0 || lists.some((l) => !l)) throw new ScanError('Selecione listas de referência válidas.');
     const terms = lists.flatMap((list) =>
       (list.terms || []).map((term) => ({ ...term, id: `${list.id}:${term.id}`, listName: list.name })),
     );
     if (terms.length === 0) throw new ScanError('As listas selecionadas não possuem termos.');
-    const opts = sanitizeOptions(options);
+    return { lists, terms };
+  }
+
+  #scanName(name, prefix) {
     const stamp = new Date().toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+    return String(name || '').trim().slice(0, 200) || `${prefix} de ${stamp}`;
+  }
+
+  /** Inicia uma análise. body.kind = 'mail' para caixas de e-mail; senão, repositórios de arquivos. */
+  async start(body = {}) {
+    if (body?.kind === 'mail') return this.#startMail(body);
+    const { name, repositoryIds, listIds, options } = body || {};
+    const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
+    if (repositories.length === 0 || repositories.some((r) => !r)) throw new ScanError('Selecione repositórios válidos.');
+    const { lists, terms } = this.#terms(listIds);
+    const opts = sanitizeOptions(options);
     const scan = this.store.createScan({
-      name: String(name || '').trim().slice(0, 200) || `Análise de ${stamp}`,
+      kind: 'files',
+      name: this.#scanName(name, 'Análise'),
       status: 'queued',
       repositoryIds: repositories.map((r) => r.id),
       listIds: lists.map((l) => l.id),
@@ -78,6 +122,50 @@ export class ScanManager {
     return scan;
   }
 
+  async #startMail({ name, sourceIds, listIds, options }) {
+    const sources = ids(sourceIds).map((id) => this.store.getMailSource(id));
+    if (sources.length === 0 || sources.some((s) => !s)) throw new ScanError('Selecione conexões de e-mail válidas.');
+    const { lists, terms } = this.#terms(listIds);
+    const opts = sanitizeMailOptions(options);
+    const scan = this.store.createScan({
+      kind: 'mail',
+      name: this.#scanName(name, 'Análise de e-mail'),
+      status: 'queued',
+      sourceIds: sources.map((s) => s.id),
+      listIds: lists.map((l) => l.id),
+      options: opts,
+      summary: {
+        sources: sources.map((s) => ({ id: s.id, name: s.name, type: s.type, scope: s.scope, mailboxCount: s.scope === 'all' ? null : (s.mailboxes || []).length })),
+        lists: lists.map((l) => ({ id: l.id, name: l.name, termCount: (l.terms || []).length })),
+        termCount: terms.length,
+      },
+      stats: newMailStats(sources.length),
+      current: null,
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+    });
+    await this.store.writeScanConfig(scan.id, { kind: 'mail', sources: sources.map(mailSnapshot), terms, options: opts });
+    this.queue.push(scan.id);
+    this.#pump();
+    return scan;
+  }
+
+  /**
+   * Configuração entregue à thread. Nas análises de e-mail, os segredos são decifrados só agora e
+   * vão apenas para a memória da thread (o config.json da análise não os contém).
+   */
+  async #workerConfig(id) {
+    const config = await this.store.readScanConfig(id);
+    if (config.kind !== 'mail') return config;
+    const sources = config.sources.map((s) => {
+      const current = this.store.getMailSource(s.id);
+      if (!current) throw new ScanError(`A conexão de e-mail "${s.name}" foi excluída antes do início da análise.`);
+      return { ...mailSnapshot(current), secrets: this.store.openMailSecrets(current) };
+    });
+    return { ...config, sources, endpoints: this.mailEndpoints };
+  }
+
   #pump() {
     while (this.running.size < this.maxConcurrent && this.queue.length > 0) {
       const id = this.queue.shift();
@@ -98,7 +186,7 @@ export class ScanManager {
   }
 
   async #run(id, entry) {
-    const config = await this.store.readScanConfig(id);
+    const config = await this.#workerConfig(id);
     if (entry.cancelRequested) {
       this.running.delete(id);
       this.store.updateScan(id, { status: 'cancelled', finishedAt: new Date().toISOString(), current: null });
@@ -121,7 +209,8 @@ export class ScanManager {
           if (entry.cancelRequested) {
             this.store.updateScan(id, { status: 'cancelled', finishedAt: new Date().toISOString(), current: null });
           } else {
-            const where = scan.current?.path ? ` Último arquivo em leitura: ${scan.current.path}` : '';
+            const label = scan.kind === 'mail' ? 'Última mensagem em leitura' : 'Último arquivo em leitura';
+            const where = scan.current?.path ? ` ${label}: ${scan.current.path}` : '';
             const reason = entry.fatal ? `Falha na análise: ${entry.fatal.split('\n')[0]}` : `A análise terminou inesperadamente (código ${code}).`;
             this.#fail(id, `${reason}${where}`);
           }

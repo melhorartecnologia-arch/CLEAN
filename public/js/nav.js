@@ -14,3 +14,11 @@ export function replaceQuery(params) {
 export function go(path) {
   location.hash = `#${path}`;
 }
+
+/** Destaca o item do menu (data-nav) correspondente à tela atual. */
+export function setActiveNav(key) {
+  document.querySelectorAll('.nav a').forEach((a) => {
+    if (key && a.dataset.nav === key) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
+}

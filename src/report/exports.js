@@ -13,8 +13,8 @@ import {
   SCAN_STATUS_LABELS,
 } from './model.js';
 
-const toDate = (iso) => (iso ? new Date(iso) : null);
-const kb = (bytes) => Math.round((bytes / 1024) * 10) / 10;
+export const toDate = (iso) => (iso ? new Date(iso) : null);
+export const kb = (bytes) => Math.round((bytes / 1024) * 10) / 10;
 
 function sortRecords(records) {
   return records.slice().sort((a, b) => a.repositoryName.localeCompare(b.repositoryName, 'pt-BR') || a.path.localeCompare(b.path, 'pt-BR'));
@@ -138,7 +138,7 @@ function scanInfoRows(scan) {
 }
 
 /** Grava textos em `out` respeitando o controle de fluxo (espera o "drain" quando necessário). */
-async function writeAll(out, chunks) {
+export async function writeAll(out, chunks) {
   let buffer = '';
   for (const chunk of chunks) {
     buffer += chunk;
@@ -205,7 +205,7 @@ function csvDate(date) {
   return `${p(date.getDate())}/${p(date.getMonth() + 1)}/${date.getFullYear()} ${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
 }
 
-function csvCell(value) {
+export function csvCell(value) {
   if (value === null || value === undefined) return '';
   if (value instanceof Date) return csvDate(value);
   if (typeof value === 'number') return String(value).replace('.', ',');
@@ -262,7 +262,7 @@ export function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-const REPORT_CSS = `
+export const REPORT_CSS = `
 :root{--ink:#1d2433;--muted:#5b6475;--line:#d9dee7;--accent:#1f4e79;--mark:#fff1a8;--bg:#fff}
 *{box-sizing:border-box}body{font:14px/1.45 "Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--bg);margin:24px}
 h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 8px;color:var(--accent)}
