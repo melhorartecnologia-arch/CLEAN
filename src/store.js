@@ -191,6 +191,12 @@ export class Store {
     };
   }
 
+  /** Segredo do repositório do OneDrive/SharePoint, decifrado (nunca vai para o navegador). */
+  openRepositorySecrets(repo) {
+    const value = repo?.secrets?.clientSecret;
+    return { clientSecret: value ? this.secrets.open(value) : '' };
+  }
+
   listScans() {
     return this.#list('scans');
   }

@@ -15,6 +15,10 @@ export class HttpError extends Error {
 
 export const bad = (message) => new HttpError(400, message);
 
+export const EMAIL_RE = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+$/;
+export const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const DOMAIN_RE = /^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
+
 export function text(value, field, { required = false, max = 500 } = {}) {
   const v = typeof value === 'string' ? value.trim() : value === undefined || value === null ? '' : String(value).trim();
   if (required && !v) throw bad(`Informe ${field}.`);
@@ -25,6 +29,62 @@ export function text(value, field, { required = false, max = 500 } = {}) {
 export function lines(value, max = 500) {
   const items = Array.isArray(value) ? value : String(value || '').split(/\r?\n/);
   return [...new Set(items.map((v) => String(v).trim()).filter(Boolean))].slice(0, max);
+}
+
+/** Um endereço de e-mail (vazio é aceito; o chamador decide se é obrigatório). */
+export function email(value, field) {
+  const v = text(value, field, { max: 320 });
+  if (v && !EMAIL_RE.test(v)) throw bad(`${field[0].toUpperCase()}${field.slice(1)} inválido: "${v.slice(0, 80)}".`);
+  return v;
+}
+
+/** Lista de e-mails (texto com um por linha, vírgula ou ponto e vírgula, ou lista), sem repetições. */
+export function emailList(value, field, { max = 5000, noun = 'endereços' } = {}) {
+  const items = Array.isArray(value) ? value.map((v) => (typeof v === 'object' && v ? v.address : v)) : String(value || '').split(/[\r\n,;]+/);
+  const seen = new Set();
+  const out = [];
+  for (const raw of items) {
+    const address = email(raw, field);
+    const key = address.toLowerCase();
+    if (!address || seen.has(key)) continue;
+    seen.add(key);
+    out.push(address);
+  }
+  if (out.length > max) throw bad(`Informe no máximo ${max} ${noun}.`);
+  return out;
+}
+
+/**
+ * Credenciais do Microsoft Graph (registro de aplicativo no Microsoft Entra ID). Campo de segredo
+ * vazio mantém o segredo salvo (previousSecret). Retorna { graph: { tenantId, clientId }, clientSecret }
+ * com o segredo cifrado.
+ */
+export function graphCredentials(g = {}, { previousSecret = null, box }) {
+  const tenantId = text(g.tenantId, 'o ID do locatário', { required: true, max: 255 });
+  if (!GUID_RE.test(tenantId) && !DOMAIN_RE.test(tenantId)) throw bad('ID do locatário inválido: use o GUID (ID do diretório) ou o domínio, ex.: empresa.onmicrosoft.com.');
+  const clientId = text(g.clientId, 'o ID do cliente (aplicativo)', { required: true, max: 64 });
+  if (!GUID_RE.test(clientId)) throw bad('ID do cliente inválido: use o "ID do aplicativo (cliente)" do registro do aplicativo.');
+  const secret = text(g.clientSecret, 'o segredo do cliente', { max: 2000 });
+  const clientSecret = secret ? box.seal(secret) : previousSecret;
+  if (!clientSecret) throw bad('Informe o segredo do cliente (valor do segredo criado no registro do aplicativo).');
+  return { graph: { tenantId, clientId }, clientSecret };
+}
+
+/**
+ * Endereço de um site do SharePoint (https), sem parâmetros e sem barra final. Links de páginas e
+ * bibliotecas do site também são aceitos (o site é localizado na análise).
+ */
+export function siteUrl(value) {
+  const v = text(value, 'o endereço do site', { max: 2000 });
+  if (!v) return '';
+  let u;
+  try {
+    u = new URL(v);
+  } catch {
+    throw bad(`Endereço de site inválido: "${v.slice(0, 120)}". Use o endereço completo, ex.: https://empresa.sharepoint.com/sites/Financeiro.`);
+  }
+  if (u.protocol !== 'https:' || u.username || u.password) throw bad(`Endereço de site inválido: "${v.slice(0, 120)}". Use um endereço https://.`);
+  return `https://${u.hostname.toLowerCase()}${u.pathname.replace(/\/+$/, '')}`;
 }
 
 /** Caminho absoluto de pasta: C:\..., \\servidor\compartilhamento\... (ou /... fora do Windows). */
@@ -41,7 +101,36 @@ export function normalizeRepoPath(value) {
   return p.length > 1 ? p.replace(/\/+$/, '') : p;
 }
 
-export function parseRepository(body = {}) {
+const CLOUD_REPO_TYPES = new Set(['onedrive', 'sharepoint']);
+const NO_AUDIT = { enabled: false, computer: '', localPath: '', days: 30, maxEvents: 200000, ignoreUsers: [] };
+
+/** Descrição de onde estão os arquivos de um repositório na nuvem (mostrada como "caminho"). */
+export function describeCloud(type, cloud) {
+  if (type === 'onedrive') {
+    if (cloud.scope === 'all') return 'OneDrive: todas as contas';
+    return `OneDrive: ${cloud.accounts.slice(0, 3).join(', ')}${cloud.accounts.length > 3 ? ` e mais ${cloud.accounts.length - 3}` : ''}`;
+  }
+  if (cloud.scope === 'all') return 'SharePoint: todos os sites';
+  return `SharePoint: ${cloud.sites.slice(0, 2).join(', ')}${cloud.sites.length > 2 ? ` e mais ${cloud.sites.length - 2}` : ''}`;
+}
+
+/**
+ * Valida um repositório: pasta do Windows (type 'local', padrão) ou OneDrive/SharePoint.
+ * options: existing (cadastro atual, para manter o segredo salvo), box (cifra os segredos),
+ * mailSource (conexão de e-mail do Microsoft 365 da qual copiar as credenciais), forTest (teste da
+ * conexão: o nome não é obrigatório).
+ */
+export function parseRepository(body = {}, { existing = null, box = null, mailSource = null, forTest = false } = {}) {
+  const type = CLOUD_REPO_TYPES.has(body.type) ? body.type : 'local';
+  const common = {
+    type,
+    name: text(body.name, 'o nome do repositório', { required: !forTest, max: 200 }),
+    description: text(body.description, 'a descrição', { max: 1000 }),
+    exclude: lines(body.exclude),
+    // Permite excluir os arquivos encontrados (automaticamente na análise ou pelo relatório).
+    allowDelete: body.allowDelete === true,
+  };
+  if (type !== 'local') return { ...common, ...parseCloud(body, type, { existing, box, mailSource }) };
   const audit = body.audit || {};
   const computer = text(audit.computer, 'o computador da auditoria', { max: 255 });
   if (computer && !/^[A-Za-z0-9._-]+$/.test(computer)) throw bad('Nome de computador inválido para a auditoria.');
@@ -50,12 +139,13 @@ export function parseRepository(body = {}) {
   const days = Number(audit.days) || 30;
   const maxEvents = Number(audit.maxEvents) || 200000;
   return {
-    name: text(body.name, 'o nome do repositório', { required: true, max: 200 }),
+    ...common,
     path: normalizeRepoPath(body.path),
-    description: text(body.description, 'a descrição', { max: 1000 }),
-    exclude: lines(body.exclude),
-    // Permite excluir os arquivos encontrados (automaticamente na análise ou pelo relatório).
-    allowDelete: body.allowDelete === true,
+    // Campos dos repositórios na nuvem ficam nulos (ao trocar o tipo, os dados antigos são descartados).
+    deleteMode: null,
+    graph: null,
+    secrets: null,
+    cloud: null,
     audit: {
       enabled: Boolean(audit.enabled),
       computer,
@@ -64,6 +154,42 @@ export function parseRepository(body = {}) {
       maxEvents: Math.min(Math.max(Math.round(maxEvents), 100), 5_000_000),
       ignoreUsers: lines(audit.ignoreUsers, 100).map((u) => u.replace(/;/g, '')),
     },
+  };
+}
+
+function parseCloud(body, type, { existing, box, mailSource }) {
+  let graph;
+  let clientSecret;
+  if (body.credentialsFrom) {
+    // Mesmo registro de aplicativo de uma conexão de e-mail do Microsoft 365 (as credenciais são copiadas).
+    if (!mailSource || mailSource.type !== 'graph' || !mailSource.graph) throw bad('Escolha uma conexão de e-mail do Microsoft 365 para usar as mesmas credenciais.');
+    if (!mailSource.secrets?.clientSecret) throw bad(`A conexão "${mailSource.name}" não tem o segredo do cliente salvo.`);
+    graph = { tenantId: mailSource.graph.tenantId, clientId: mailSource.graph.clientId };
+    clientSecret = mailSource.secrets.clientSecret;
+  } else {
+    const previousSecret = CLOUD_REPO_TYPES.has(existing?.type) ? existing.secrets?.clientSecret || null : null;
+    ({ graph, clientSecret } = graphCredentials(body.graph || {}, { previousSecret, box }));
+  }
+  const scope = body.scope === 'all' ? 'all' : 'list';
+  const cloud = { scope, accounts: [], sites: [], exclude: lines(body.excludeTargets, 500) };
+  if (scope === 'list' && type === 'onedrive') {
+    cloud.accounts = emailList(body.accounts, 'o e-mail da conta', { noun: 'contas' });
+    if (cloud.accounts.length === 0) throw bad('Informe ao menos uma conta de OneDrive (e-mail do usuário) ou escolha "Todas as contas".');
+  }
+  if (scope === 'list' && type === 'sharepoint') {
+    const items = Array.isArray(body.sites) ? body.sites : String(body.sites || '').split(/[\r\n]+/);
+    cloud.sites = [...new Set(items.map(siteUrl).filter(Boolean))];
+    if (cloud.sites.length === 0) throw bad('Informe ao menos o endereço de um site do SharePoint ou escolha "Todos os sites".');
+    if (cloud.sites.length > 2000) throw bad('Informe no máximo 2000 sites.');
+  }
+  return {
+    path: describeCloud(type, cloud),
+    // Lixeira do site/OneDrive (recuperável) ou exclusão definitiva.
+    deleteMode: body.deleteMode === 'permanent' ? 'permanent' : 'trash',
+    graph,
+    secrets: { clientSecret },
+    cloud,
+    audit: { ...NO_AUDIT },
   };
 }
 

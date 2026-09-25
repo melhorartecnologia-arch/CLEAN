@@ -148,7 +148,7 @@ export function createApp({ store, manager, config }) {
       mailTypes: MAIL_TYPES,
     });
   });
-  api.use('/repositories', repositoriesRouter({ store, manager }));
+  api.use('/repositories', repositoriesRouter({ store, manager, endpoints: config.mailEndpoints }));
   api.use('/lists', listsRouter({ store }));
   api.use('/mail-sources', mailSourcesRouter({ store, manager, endpoints: config.mailEndpoints }));
   api.use('/scans', scansRouter({ store, manager, endpoints: config.mailEndpoints }));

@@ -15,6 +15,127 @@ function readBody(req) {
   });
 }
 
+// ---------------- OneDrive e SharePoint (Graph: drives, sites, itens) ----------------
+
+/** Item do simulador no formato do Graph (trail: nomes das pastas acima dele). */
+function itemJson(item, drive, trail = []) {
+  const who = (p) => (p ? { user: { displayName: p.name, email: p.email } } : undefined);
+  return {
+    id: item.id,
+    name: item.name,
+    size: item.content ? item.content.length : 0,
+    ...(item.children ? { folder: { childCount: item.children.length } } : { file: { mimeType: 'application/octet-stream' } }),
+    ...(item.remote ? { remoteItem: { id: 'remoto', parentReference: { driveId: 'outra' } } } : {}),
+    createdDateTime: item.created || '2026-09-01T12:00:00Z',
+    lastModifiedDateTime: item.modified || '2026-09-10T12:00:00Z',
+    createdBy: who(item.createdBy),
+    lastModifiedBy: who(item.lastModifiedBy),
+    webUrl: `${drive.webUrl}/${encodeURI([...trail, item.name].join('/'))}`,
+    eTag: `"{${item.id}},${item.version || 1}"`,
+    cTag: `"c:{${item.id}},${item.version || 1}"`,
+    parentReference: { driveId: drive.id },
+  };
+}
+
+function findItem(list, id, trail = []) {
+  for (const item of list) {
+    if (item.id === id) return { item, parent: list, trail };
+    if (item.children) {
+      const found = findItem(item.children, id, [...trail, item.name]);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/** Atende as rotas de arquivos do Graph; retorna false se a rota não for desta parte. */
+function drivesApi({ req, res, path, url, base, graph, find, json }) {
+  const drives = graph.drives || {};
+  const sites = graph.sites || [];
+  const page = (list, nextBase) => {
+    const skip = Number(url.searchParams.get('$skiptoken') || 0);
+    const size = graph.pageSize || 2;
+    const next = skip + size < list.length ? { '@odata.nextLink': `${nextBase}${nextBase.includes('?') ? '&' : '?'}$skiptoken=${skip + size}` } : {};
+    return { value: list.slice(skip, skip + size), ...next };
+  };
+  const siteJson = (s) => ({ id: s.id, name: s.name, displayName: s.displayName, webUrl: s.webUrl, isPersonalSite: Boolean(s.personal) });
+  let m = /^\/users\/([^/]+)\/drive$/.exec(path);
+  if (m) {
+    const user = find(m[1]);
+    if (!user) return json(res, 404, { error: { code: 'Request_ResourceNotFound', message: 'Usuário não encontrado' } }), true;
+    const drive = user.driveId && drives[user.driveId];
+    if (!drive) return json(res, 404, { error: { code: 'ResourceNotFound', message: "User's mysite not found." } }), true;
+    return json(res, 200, { id: drive.id, name: drive.name, driveType: 'business', webUrl: drive.webUrl, owner: { user: { displayName: user.displayName, email: user.mail } } }), true;
+  }
+  if (path === '/sites/getAllSites') {
+    if (graph.noGetAllSites) return json(res, 400, { error: { code: 'invalidRequest', message: 'Unsupported request' } }), true;
+    return json(res, 200, page(sites.filter((s) => !s.parent).map(siteJson), `${base}/graph/v1.0/sites/getAllSites`)), true;
+  }
+  if (path === '/sites') {
+    if (url.searchParams.get('search') !== '*') return json(res, 400, { error: { code: 'invalidRequest', message: 'search obrigatório' } }), true;
+    return json(res, 200, page(sites.filter((s) => !s.parent && !s.personal).map(siteJson), `${base}/graph/v1.0/sites?search=*`)), true;
+  }
+  m = /^\/sites\/([^/:]+)(?::(\/.*))?$/.exec(path);
+  if (m && !m[1].includes(',')) {
+    const wanted = `https://${m[1]}${m[2] || ''}`.toLowerCase();
+    const site = sites.find((s) => s.webUrl.toLowerCase() === wanted);
+    return site ? json(res, 200, siteJson(site)) : json(res, 404, { error: { code: 'itemNotFound', message: 'Requested site could not be found' } }), true;
+  }
+  m = /^\/sites\/([^/]+)\/(sites|drives)$/.exec(path);
+  if (m) {
+    const site = sites.find((s) => s.id === m[1]);
+    if (!site) return json(res, 404, { error: { code: 'itemNotFound', message: 'Site não encontrado' } }), true;
+    if (m[2] === 'sites') return json(res, 200, { value: sites.filter((s) => s.parent === site.id).map(siteJson) }), true;
+    if (site.denied) return json(res, 403, { error: { code: 'accessDenied', message: 'Access denied' } }), true;
+    return json(res, 200, { value: (site.driveIds || []).map((id) => ({ id, name: drives[id].name, driveType: drives[id].driveType || 'documentLibrary', webUrl: drives[id].webUrl })) }), true;
+  }
+  m = /^\/drives\/([^/]+)\/(?:root|items\/([^/]+))(\/children|\/content|\/permanentDelete)?$/.exec(path);
+  if (!m) return false;
+  const drive = drives[m[1]];
+  if (!drive) return json(res, 404, { error: { code: 'itemNotFound', message: 'Biblioteca não encontrada' } }), true;
+  const found = m[2] ? findItem(drive.items, m[2]) : { item: { id: 'root', children: drive.items }, parent: null, trail: [] };
+  if (!found) return json(res, 404, { error: { code: 'itemNotFound', message: 'The resource could not be found.' } }), true;
+  const { item, parent } = found;
+  const action = m[3] || '';
+  if (action === '/children') {
+    if (graph.failFolders?.has(item.id)) return json(res, 403, { error: { code: 'accessDenied', message: 'Access denied' } }), true;
+    const nextBase = `${base}/graph/v1.0/drives/${drive.id}/${m[2] ? `items/${item.id}` : 'root'}/children`;
+    const trail = m[2] ? [...found.trail, item.name] : [];
+    return json(res, 200, page(item.children.map((c) => itemJson(c, drive, trail)), nextBase)), true;
+  }
+  if (action === '/content') {
+    res.writeHead(302, { Location: `${base}/download/${drive.id}/${item.id}` });
+    res.end();
+    return true;
+  }
+  const record = (how) => {
+    graph.driveDeleted = [...(graph.driveDeleted || []), { drive: drive.id, id: item.id, how, ifMatch: req.headers['if-match'] || '' }];
+    parent.splice(parent.indexOf(item), 1);
+  };
+  if (action === '/permanentDelete' && req.method === 'POST') {
+    if (graph.readOnlyDrives?.has(drive.id)) return json(res, 403, { error: { code: 'accessDenied', message: 'Access denied' } }), true;
+    if (graph.lockedItems?.has(item.id)) return json(res, 423, { error: { code: 'resourceLocked', message: 'The resource you are attempting to access is locked' } }), true;
+    record('permanent');
+    res.writeHead(204);
+    res.end();
+    return true;
+  }
+  if (req.method === 'DELETE') {
+    if (graph.readOnlyDrives?.has(drive.id)) return json(res, 403, { error: { code: 'accessDenied', message: 'Access denied' } }), true;
+    if (graph.lockedItems?.has(item.id)) return json(res, 423, { error: { code: 'resourceLocked', message: 'The resource you are attempting to access is locked' } }), true;
+    const tag = req.headers['if-match'];
+    const current = itemJson(item, drive, found.trail);
+    if (tag && tag !== current.eTag && tag !== current.cTag) return json(res, 412, { error: { code: 'resourceModified', message: 'ETag does not match current item\'s value' } }), true;
+    record('trash');
+    (graph.recycle ||= []).push({ drive: drive.id, item });
+    res.writeHead(204);
+    res.end();
+    return true;
+  }
+  if (req.method === 'GET' && !action) return json(res, 200, itemJson(item, drive, found.trail)), true;
+  return false;
+}
+
 /**
  * graph: { tenant, clientId, secret, users: [{ id, mail, displayName, noMailbox?, folders: [{ id, displayName,
  *          parent?, wellKnown? }], messages: { [folderId]: [{ id, raw, received }] } }], throttleOnce?: Set<messageId>,
@@ -46,11 +167,21 @@ export function startMockApis({ graph = null, google = null } = {}) {
         if (form.get('client_secret') !== graph.secret) return json(res, 401, { error: 'invalid_client', error_description: 'AADSTS7000215: Invalid client secret provided.' });
         return json(res, 200, { access_token: 'graph-token', expires_in: 3600, token_type: 'Bearer' });
       }
+      // Endereço de download pré-autenticado (como o do SharePoint): sem o cabeçalho de autorização.
+      const download = /^\/download\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+      if (download && graph?.drives) {
+        const found = findItem(graph.drives[download[1]]?.items || [], download[2]);
+        if (!found) return json(res, 404, { error: { code: 'itemNotFound', message: 'Não encontrado' } });
+        graph.downloads = [...(graph.downloads || []), { id: download[2], auth: req.headers.authorization || '' }];
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': found.item.content.length });
+        return res.end(found.item.content);
+      }
       if (url.pathname.startsWith('/graph/v1.0/')) {
         if (req.headers.authorization !== 'Bearer graph-token') return json(res, 401, { error: { code: 'InvalidAuthenticationToken', message: 'Token inválido' } });
         const path = decodeURIComponent(url.pathname.slice('/graph/v1.0'.length));
         const users = graph.users;
         const find = (key) => users.find((u) => u.id === key || u.mail.toLowerCase() === String(key).toLowerCase() && u.upnIsMail !== false);
+        if (drivesApi({ req, res, path, url, base, graph, find, json })) return;
         if (path === '/users') {
           const filter = url.searchParams.get('$filter');
           if (filter) {

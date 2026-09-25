@@ -174,10 +174,14 @@ export class AuditIndex {
 
 /**
  * Escolhe o "último usuário" entre as fontes disponíveis, da mais precisa para a menos precisa:
- * log de auditoria > metadados do documento ("salvo por último por") > proprietário do arquivo.
+ * log de auditoria > Microsoft 365 (OneDrive/SharePoint: quem alterou por último) > metadados do
+ * documento ("salvo por último por") > proprietário do arquivo.
  */
-export function pickLastUser({ audit, metadata, owner }) {
+export function pickLastUser({ audit, cloud, metadata, owner }) {
   if (audit?.user) return { user: audit.user, source: 'audit' };
+  // OneDrive/SharePoint: quem alterou o arquivo por último, segundo o Microsoft 365.
+  const cloudUser = cloud?.email || cloud?.name;
+  if (cloudUser) return { user: cloudUser, source: 'cloud' };
   if (metadata?.lastModifiedBy) return { user: metadata.lastModifiedBy, source: 'metadata' };
   if (owner) return { user: owner, source: 'owner' };
   return { user: null, source: null };

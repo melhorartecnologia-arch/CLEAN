@@ -15,7 +15,8 @@ import {
   DELETION_LABELS,
   MAIL_DELETION_LABELS,
 } from '../report/model.js';
-import { deleteFile, deletionEvent, cleanPaths, keptPaths } from '../scan/delete.js';
+import { deleteFile, deletionEvent, cleanPaths, keptPaths, isCloudRepo } from '../scan/delete.js';
+import { DrivesConnector, keptCloud, keptCloudTarget } from '../cloud/drives.js';
 import { createConnector } from '../mail/connectors.js';
 import { normalizeAddress } from '../mail/common.js';
 import { friendlyError } from '../scan/errors.js';
@@ -152,6 +153,13 @@ function mailboxFor(source, record) {
 
 const METHOD_TEXT = { permanent: 'exclusão definitiva', trash: 'mover para a lixeira', file: 'exclusão definitiva' };
 
+/** O repositório mudou de tipo (pasta ↔ OneDrive/SharePoint) ou de locatário depois da análise. */
+function cloudChanged(record, repo) {
+  if (Boolean(record.cloud) !== isCloudRepo(repo)) return true;
+  if (!record.cloud) return false;
+  return record.cloud.kind !== repo.type || String(record.cloud.tenant || '').toLowerCase() !== String(repo.graph?.tenantId || '').toLowerCase();
+}
+
 export function scansRouter({ store, manager, endpoints = {} }) {
   const router = Router();
   const memo = new Memo();
@@ -166,8 +174,11 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   const deletionTarget = (scan, record) => {
     const target = scan.kind === 'mail' ? store.getMailSource(record.sourceId) : store.getRepository(record.repositoryId);
     if (!target) return { blocked: 'removed' };
+    if (scan.kind !== 'mail' && cloudChanged(record, target)) return { blocked: 'changed' };
     if (!target.allowDelete) return { blocked: 'not-allowed' };
-    return { method: scan.kind !== 'mail' ? 'file' : target.deleteMode === 'trash' ? 'trash' : 'permanent' };
+    if (scan.kind === 'mail') return { method: target.deleteMode === 'trash' ? 'trash' : 'permanent' };
+    if (record.cloud) return { method: target.deleteMode === 'permanent' ? 'permanent' : 'trash' };
+    return { method: 'file' };
   };
 
   const getScan = (req) => {
@@ -312,9 +323,27 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       } finally {
         await connector.close?.();
       }
+    } else if (record.cloud) {
+      const repo = store.getRepository(record.repositoryId);
+      if (!repo) throw new HttpError(409, 'O repositório deste arquivo foi excluído do cadastro.');
+      if (cloudChanged(record, repo)) throw new HttpError(409, `O cadastro do repositório "${repo.name}" mudou depois da análise (tipo ou locatário): faça uma nova análise para excluir.`);
+      if (!repo.allowDelete) throw new HttpError(403, `A exclusão não está permitida no repositório "${repo.name}". Ative "Permitir exclusão" em Repositórios.`);
+      method = repo.deleteMode === 'permanent' ? 'permanent' : 'trash';
+      checkMethod(method);
+      label = `do arquivo ${record.path}`;
+      item = record.path;
+      const kept = keptCloudTarget(record.cloud, keptCloud(repo, store.listRepositories()));
+      if (kept) {
+        result = { status: 'failed', error: kept.error };
+      } else {
+        const connector = new DrivesConnector({ ...repo, secrets: store.openRepositorySecrets(repo) }, { signal: AbortSignal.timeout(120000), endpoints });
+        result = await connector.deleteItem(record.cloud, method, { force: req.body?.force === true });
+      }
+      if (result.status === 'changed') return res.status(409).json({ error: `${result.error} Confirme para excluir mesmo assim.`, code: 'changed' });
     } else {
       const repo = store.getRepository(record.repositoryId);
       if (!repo) throw new HttpError(409, 'O repositório deste arquivo foi excluído do cadastro.');
+      if (cloudChanged(record, repo)) throw new HttpError(409, `O cadastro do repositório "${repo.name}" mudou depois da análise (agora é ${repo.type === 'sharepoint' ? 'SharePoint' : 'OneDrive'}): faça uma nova análise para excluir.`);
       if (!repo.allowDelete) throw new HttpError(403, `A exclusão não está permitida no repositório "${repo.name}". Ative "Permitir exclusão" em Repositórios.`);
       method = 'file';
       checkMethod(method);

@@ -3,6 +3,7 @@ import { foldText } from '../scan/matcher.js';
 
 export const SOURCE_LABELS = {
   audit: 'Log de auditoria',
+  cloud: 'Microsoft 365 (última alteração)',
   metadata: 'Metadados do documento',
   owner: 'Proprietário do arquivo',
 };
@@ -112,7 +113,19 @@ export const SCAN_STATUS_LABELS = {
 function haystack(record) {
   if (!record._search) {
     record._search = foldText(
-      [record.path, record.lastUser, record.owner, record.metadata?.lastModifiedBy, record.metadata?.author, ...record.terms].filter(Boolean).join(' | '),
+      [
+        record.path,
+        record.lastUser,
+        record.owner,
+        record.metadata?.lastModifiedBy,
+        record.metadata?.author,
+        record.cloud?.account,
+        record.cloud?.accountName,
+        record.cloud?.lastModifiedBy?.name,
+        ...record.terms,
+      ]
+        .filter(Boolean)
+        .join(' | '),
     );
   }
   return record._search;

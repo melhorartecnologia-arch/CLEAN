@@ -9,6 +9,17 @@ const MISSING = 'O arquivo não existe mais (já excluído ou movido).';
 const OUTSIDE =
   'Uma pasta no caminho do arquivo agora aponta para fora do repositório (atalho, link simbólico ou junção); por segurança, o arquivo não foi excluído.';
 
+/** Repositório no OneDrive ou no SharePoint (os demais são pastas do Windows). */
+export const isCloudRepo = (repo) => repo?.type === 'onedrive' || repo?.type === 'sharepoint';
+
+/** O que a exclusão alcança: caminho da pasta ou tipo, locatário e contas/sites do repositório. */
+export function deletionScope(repo) {
+  if (!isCloudRepo(repo)) return `local|${repo.path}`;
+  const c = repo.cloud || {};
+  const list = [...(c.accounts || []), ...(c.sites || [])].map((v) => String(v).toLowerCase()).sort();
+  return `${repo.type}|${String(repo.graph?.tenantId || '').toLowerCase()}|${c.scope}|${list.join(',')}`;
+}
+
 /** Indica se `target` está dentro da pasta `root` (sem sair dela com "..", nem em outra unidade). */
 export function isInside(root, target) {
   if (!root || !target) return false;

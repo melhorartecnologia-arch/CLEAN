@@ -2,7 +2,8 @@
 import { Worker } from 'node:worker_threads';
 import { newStats, DEFAULT_OPTIONS } from './scanner.js';
 import { newMailStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
-import { cleanPaths, keptPaths } from './delete.js';
+import { cleanPaths, keptPaths, isCloudRepo, deletionScope } from './delete.js';
+import { keptCloud } from '../cloud/drives.js';
 import { PROJECT_ROOT } from '../config.js';
 
 export class ScanError extends Error {
@@ -53,6 +54,14 @@ export function sanitizeMailOptions(input) {
   }
   if (!MAIL_CHECKS.some((k) => o[k])) throw new ScanError('Selecione ao menos uma verificação: assunto, corpo ou anexos.');
   return o;
+}
+
+/** Repositório usado pela análise (sem os segredos). */
+function repoSnapshot(repo) {
+  const { id, name, path, exclude, audit, allowDelete } = repo;
+  if (!isCloudRepo(repo)) return { id, type: 'local', name, path, exclude, audit, allowDelete: Boolean(allowDelete) };
+  const { type, graph, cloud, deleteMode } = repo;
+  return { id, type, name, path, exclude, allowDelete: Boolean(allowDelete), deleteMode: deleteMode === 'permanent' ? 'permanent' : 'trash', graph, cloud };
 }
 
 /** Configuração da conexão usada pela análise (sem os segredos). */
@@ -122,7 +131,7 @@ export class ScanManager {
       options: opts,
       startedBy: by,
       summary: {
-        repositories: repositories.map((r) => ({ id: r.id, name: r.name, path: r.path })),
+        repositories: repositories.map((r) => ({ id: r.id, name: r.name, path: r.path, type: r.type || 'local' })),
         lists: lists.map((l) => ({ id: l.id, name: l.name, termCount: (l.terms || []).length })),
         termCount: terms.length,
       },
@@ -132,11 +141,7 @@ export class ScanManager {
       finishedAt: null,
       error: null,
     });
-    await this.store.writeScanConfig(scan.id, {
-      repositories: repositories.map(({ id, name, path, exclude, audit, allowDelete }) => ({ id, name, path, exclude, audit, allowDelete: Boolean(allowDelete) })),
-      terms,
-      options: opts,
-    });
+    await this.store.writeScanConfig(scan.id, { repositories: repositories.map(repoSnapshot), terms, options: opts });
     this.queue.push(scan.id);
     this.#pump();
     return scan;
@@ -190,22 +195,33 @@ export class ScanManager {
     if (config.kind !== 'mail') {
       const all = this.store.listRepositories();
       const repositories = config.repositories.map((r) => {
-        if (!deleting || !r.allowDelete) return { ...r, allowDelete: false };
         const current = this.store.getRepository(r.id);
+        let repo = { ...r, allowDelete: false };
+        if (isCloudRepo(r)) {
+          // OneDrive/SharePoint: as credenciais (e o que analisar) vêm do cadastro atual.
+          if (!current || !isCloudRepo(current)) throw new ScanError(`O repositório "${r.name}" foi excluído ou alterado antes do início da análise.`);
+          repo = { ...repoSnapshot(current), allowDelete: false, deleteMode: r.deleteMode, secrets: this.store.openRepositorySecrets(current) };
+        }
+        if (!deleting || !r.allowDelete) return repo;
         const reason = !current
           ? 'o repositório foi removido do cadastro'
-          : current.path !== r.path
-            ? 'o caminho do repositório foi alterado'
+          : deletionScope(current) !== deletionScope(r)
+            ? isCloudRepo(r)
+              ? 'as contas, os sites ou as credenciais do repositório foram alterados'
+              : 'o caminho do repositório foi alterado'
             : !current.allowDelete
               ? 'a opção "Permitir exclusão" foi desligada'
               : null;
         if (reason) {
           warn(`Exclusão automática desativada para "${r.name}": ${reason} depois que a análise foi criada.`);
-          return { ...r, allowDelete: false };
+          return repo;
         }
-        return { ...r, allowDelete: true, keep: keptPaths(current, all) };
+        if (!isCloudRepo(r)) return { ...repo, allowDelete: true, keep: keptPaths(current, all) };
+        // Vale a forma confirmada ao criar a análise (ou a lixeira, se o cadastro passou a ser assim).
+        const deleteMode = r.deleteMode === 'trash' || current.deleteMode !== 'permanent' ? 'trash' : 'permanent';
+        return { ...repo, allowDelete: true, deleteMode, keep: keptCloud(current, all) };
       });
-      return { ...config, repositories, ...extra };
+      return { ...config, repositories, endpoints: this.mailEndpoints, ...extra };
     }
     const sources = config.sources.map((s) => {
       const current = this.store.getMailSource(s.id);

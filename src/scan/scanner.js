@@ -5,14 +5,30 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { Matcher } from './matcher.js';
 import { walk, compileExclusions, DEFAULT_EXCLUDES } from './walker.js';
-import { extractFile } from './extractors/index.js';
+import { extractFile, extractBuffer } from './extractors/index.js';
 import { OwnerResolver } from './owner.js';
 import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
 import { friendlyError, withTimeout } from './errors.js';
-import { deleteFile, deletionEvent, isWithin } from './delete.js';
+import { deleteFile, deletionEvent, isWithin, isCloudRepo } from './delete.js';
+import { DrivesConnector, person, keptCloudTarget } from '../cloud/drives.js';
 
 // Tempo máximo para ler um arquivo (o que passar disso é registrado como erro e a análise segue).
 const FILE_TIMEOUT = 5 * 60 * 1000;
+
+// Arquivos de texto maiores que o limite: só o início é baixado e analisado (os demais formatos
+// precisam do arquivo inteiro e ficam só com o nome verificado).
+const TEXT_EXTENSIONS = new Set(['.txt', '.csv', '.tsv', '.log', '.md', '.json', '.xml', '.html', '.htm', '.ini', '.cfg', '.conf', '.sql', '.yaml', '.yml']);
+
+export { isCloudRepo };
+
+/** Endereço web legível (sem os códigos %20 etc.). */
+function readableUrl(url) {
+  try {
+    return decodeURI(url);
+  } catch {
+    return url;
+  }
+}
 
 export { friendlyError };
 
@@ -72,6 +88,8 @@ export function newStats(repositoriesTotal = 0) {
     contentErrors: 0,
     bytesAnalyzed: 0,
     errors: 0,
+    libraries: 0, // bibliotecas do OneDrive/SharePoint analisadas
+    accountsSkipped: 0, // contas sem OneDrive
     deleted: 0, // excluídos na análise ("analisar e excluir")
     deleteMissing: 0, // já não existiam na hora da exclusão
     deleteChanged: 0, // alterados depois de analisados: mantidos
@@ -92,7 +110,7 @@ export class Scanner {
    * config: { repositories: [{ id, name, path, exclude, audit }], terms: [...], options: {...} }
    * emit(message): recebe { type: 'log'|'progress'|'results'|'errors'|'done', ... }
    */
-  constructor(config, emit, { ownerResolver, auditQuery = queryAuditEvents } = {}) {
+  constructor(config, emit, { ownerResolver, auditQuery = queryAuditEvents, cloudConnectorFactory } = {}) {
     this.repositories = config.repositories || [];
     this.repoById = new Map(this.repositories.map((r) => [r.id, r]));
     this.options = { ...DEFAULT_OPTIONS, ...(config.options || {}) };
@@ -117,6 +135,10 @@ export class Scanner {
     if (Number.isNaN(this.modifiedAfter)) this.modifiedAfter = null;
     // Pastas do próprio CLEAN (dados e instalação): nunca têm arquivos excluídos.
     this.protect = config.protect || [];
+    // OneDrive e SharePoint: um conector por repositório (usado também na exclusão automática).
+    this.endpoints = config.endpoints || {};
+    this.cloudConnectorFactory = cloudConnectorFactory || ((repo, options) => new DrivesConnector(repo, options));
+    this.cloudConnectors = new Map();
     this.deletedBy = config.startedBy || null; // quem iniciou a análise com exclusão automática
   }
 
@@ -162,7 +184,8 @@ export class Scanner {
     this.log('info', `Análise iniciada com ${this.matcher.size} termo(s) em ${this.repositories.length} repositório(s).`);
     for (const repo of this.repositories) {
       if (this.cancelled) break;
-      await this.scanRepository(repo);
+      if (isCloudRepo(repo)) await this.scanCloudRepository(repo);
+      else await this.scanRepository(repo);
       // Proprietários (e exclusões) de cada repositório logo ao fim dele, e não só no fim da análise.
       await this.flushOwners();
       this.stats.repositoriesDone++;
@@ -224,6 +247,191 @@ export class Scanner {
     const n = Math.min(Math.max(1, Number(this.options.concurrency) || 4), 16);
     await Promise.all(Array.from({ length: n }, worker));
     await iterator.return?.();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // OneDrive e SharePoint
+
+  cloudConnector(repo) {
+    if (!this.cloudConnectors.has(repo.id)) {
+      const log = (level, message) => this.log(level, `${repo.name}: ${message}`);
+      this.cloudConnectors.set(repo.id, this.cloudConnectorFactory(repo, { signal: this.abort.signal, endpoints: this.endpoints, log }));
+    }
+    return this.cloudConnectors.get(repo.id);
+  }
+
+  async scanCloudRepository(repo) {
+    const kind = repo.type === 'sharepoint' ? 'SharePoint' : 'OneDrive';
+    this.current = { repository: repo.name, path: `${kind}: ${repo.name}` };
+    this.progress(true);
+    this.log('info', `Analisando "${repo.name}" (${kind})`);
+    const connector = this.cloudConnector(repo);
+    const isExcluded = compileExclusions([...DEFAULT_EXCLUDES, ...(repo.exclude || [])]);
+    let skipped = 0;
+    try {
+      for await (const drive of connector.drives()) {
+        if (this.cancelled) break;
+        if (drive.skip) {
+          this.stats.accountsSkipped++;
+          if (++skipped <= 20) this.log('info', `${drive.account}: ignorado, ${drive.reason}.`);
+          continue;
+        }
+        if (drive.error) {
+          this.error(drive.account, drive.error);
+          this.log('warn', `${drive.account} inacessível: ${friendlyError(drive.error)}`);
+          continue;
+        }
+        // Biblioteca ignorada pelo nome (ex.: "Site Assets") ou pelo caminho ("Documentos/Antigo").
+        if (isExcluded(drive.library, drive.library)) continue;
+        await this.scanDrive(repo, connector, drive, isExcluded);
+        this.stats.libraries++;
+        this.progress(true);
+      }
+    } catch (err) {
+      if (this.cancelled) return;
+      this.error(repo.name, err);
+      this.log('error', `Repositório "${repo.name}" inacessível: ${friendlyError(err)}`);
+    }
+    if (skipped > 20) this.log('info', `${skipped} conta(s) sem OneDrive foram ignoradas.`);
+  }
+
+  async scanDrive(repo, connector, drive, isExcluded) {
+    this.current = { repository: repo.name, path: drive.label };
+    // Os padrões valem para o caminho dentro da biblioteca e também com o nome dela na frente.
+    const excluded = (name, rel) => isExcluded(name, rel) || isExcluded(name, `${drive.library}/${rel}`);
+    const iterator = connector.walk(drive, { isExcluded: excluded, shouldStop: () => this.cancelled });
+    const worker = async () => {
+      for (;;) {
+        if (this.cancelled) return;
+        const { value: entry, done } = await iterator.next();
+        if (done) return;
+        if (entry.type === 'error') {
+          this.error(entry.path, entry.error);
+        } else if (entry.type === 'dir') {
+          this.stats.directories++;
+        } else {
+          const key = `${drive.label} › ${entry.relativePath}`;
+          this.inFlight.add(key);
+          try {
+            await this.processCloudFile(repo, connector, drive, entry);
+          } catch (err) {
+            this.error(key, err);
+          } finally {
+            this.inFlight.delete(key);
+          }
+        }
+        this.progress();
+      }
+    };
+    const n = Math.min(Math.max(1, Number(this.options.concurrency) || 4), 16);
+    try {
+      await Promise.all(Array.from({ length: n }, worker));
+    } finally {
+      await iterator.return?.();
+    }
+  }
+
+  /** Conteúdo de um arquivo da nuvem: baixado para a memória (até o limite de tamanho) e lido. */
+  async cloudContent(connector, drive, item) {
+    const size = Number(item.size) || 0;
+    const ext = path.extname(item.name).toLowerCase();
+    const type = ext.slice(1) || 'arquivo';
+    if (size === 0) return { type, status: 'empty', segments: [], metadata: {} };
+    const tooBig = size > this.limits.maxBytes;
+    const mb = Math.round(this.limits.maxBytes / 1048576);
+    if (tooBig && !TEXT_EXTENSIONS.has(ext)) {
+      return { type, status: 'skipped-size', segments: [], metadata: {}, note: `Conteúdo não analisado: arquivo maior que ${mb} MB.` };
+    }
+    const res = await connector.download(drive.id, item.id, { maxBytes: this.limits.maxBytes });
+    const content = await extractBuffer(res.data, { name: item.name, limits: this.limits });
+    if ((tooBig || res.truncated) && content.status === 'ok') {
+      content.status = 'partial';
+      content.note = `Arquivo com mais de ${mb} MB: apenas o início foi analisado.`;
+    }
+    return content;
+  }
+
+  async processCloudFile(repo, connector, drive, entry) {
+    this.stats.filesSeen++;
+    const { item, relativePath } = entry;
+    const label = `${drive.label} › ${relativePath}`;
+    this.current = { repository: repo.name, path: label };
+    const modified = new Date(item.lastModifiedDateTime);
+    if (this.modifiedAfter && modified.getTime() < this.modifiedAfter) {
+      this.stats.filesSkippedByDate++;
+      return;
+    }
+    const size = Number(item.size) || 0;
+    const { options, matcher } = this;
+    let content = null;
+    if (options.checkContent) {
+      content = await withTimeout(this.cloudContent(connector, drive, item), this.fileTimeoutMs, 'Tempo esgotado ao baixar ou ler o conteúdo do arquivo.').catch((err) => ({
+        type: path.extname(item.name).slice(1),
+        status: 'error',
+        segments: [],
+        metadata: {},
+        note: `Falha ao ler o conteúdo: ${friendlyError(err)}`,
+      }));
+      this.countContent(content, size);
+      if (content.status === 'error') this.error(label, content.note);
+    }
+    const groups = [];
+    if (options.checkName) {
+      const nameLabel = options.nameTarget === 'path' ? 'Caminho' : 'Nome do arquivo';
+      groups.push({ segments: [{ text: options.nameTarget === 'path' ? relativePath : item.name, label: nameLabel }], location: 'name' });
+    }
+    if (content) groups.push({ segments: content.segments, location: 'content' });
+    const matches = matcher.matchGroups(groups).flat();
+    if (matcher.timedOut) this.error(label, 'Tempo limite ao procurar as expressões regulares neste arquivo (possível retrocesso excessivo); resultado parcial.');
+    if (content) content.segments = null;
+    if (matches.length === 0) return;
+
+    const occurrences = matches.reduce((sum, m) => sum + m.count, 0);
+    this.stats.filesMatched++;
+    this.stats.occurrences += occurrences;
+    const createdBy = person(item.createdBy);
+    const record = {
+      id: ++this.seq,
+      repositoryId: repo.id,
+      repositoryName: repo.name,
+      path: item.webUrl ? readableUrl(item.webUrl) : label,
+      relativePath,
+      name: item.name,
+      extension: path.extname(item.name).toLowerCase(),
+      size,
+      created: iso(new Date(item.createdDateTime)),
+      modified: iso(modified),
+      accessed: null,
+      contentType: content?.type || null,
+      contentStatus: options.checkContent ? content?.status || null : 'not-requested',
+      contentNote: content?.note || null,
+      metadata: content?.metadata || {},
+      audit: null,
+      // OneDrive: o dono da conta; SharePoint: quem criou o arquivo.
+      owner: drive.owner || createdBy?.email || createdBy?.name || null,
+      ownerError: null,
+      lastUser: null,
+      lastUserSource: null,
+      cloud: {
+        kind: drive.kind,
+        tenant: repo.graph?.tenantId || null,
+        driveId: drive.id,
+        itemId: item.id,
+        cTag: item.cTag || null,
+        eTag: item.eTag || null,
+        webUrl: item.webUrl || null,
+        account: drive.account,
+        accountName: drive.accountName || '',
+        library: drive.library,
+        lastModifiedBy: person(item.lastModifiedBy),
+        createdBy,
+      },
+      occurrences,
+      terms: [...new Set(matches.map((m) => m.term))],
+      matches,
+    };
+    this.finishRecords([record]);
+    await this.deleteRecords([record]);
   }
 
   async loadAudit(repo) {
@@ -391,22 +599,31 @@ export class Scanner {
     for (const record of records) {
       if (this.cancelled) break;
       const repo = this.repoById.get(record.repositoryId);
-      const result = repo?.allowDelete
-        ? await deleteFile(record.path, {
-            root: repo.path,
-            expected: { size: record.size, modified: record.modified },
-            protect: [...this.protect, ...(repo.keep || [])],
-          })
-        : { status: 'failed', error: 'A exclusão não está permitida neste repositório.' };
+      const cloud = Boolean(record.cloud);
+      const method = cloud ? (repo?.deleteMode === 'permanent' ? 'permanent' : 'trash') : 'file';
+      let result;
+      if (!repo?.allowDelete) {
+        result = { status: 'failed', error: 'A exclusão não está permitida neste repositório.' };
+      } else if (cloud) {
+        const kept = keptCloudTarget(record.cloud, repo.keep);
+        // O conector da análise usa o sinal de cancelamento; a exclusão em andamento termina mesmo assim.
+        result = kept ? { status: 'failed', error: kept.error } : await this.cloudConnector(repo).deleteItem(record.cloud, method, { signal: null });
+      } else {
+        result = await deleteFile(record.path, {
+          root: repo.path,
+          expected: { size: record.size, modified: record.modified },
+          protect: [...this.protect, ...(repo.keep || [])],
+        });
+      }
       countDeletion(this.stats, result.status);
       if (result.status === 'failed') this.error(record.path, `Falha ao excluir: ${result.error}`);
-      this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: 'auto', method: 'file', by: this.deletedBy, item: record.path })] });
+      this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: 'auto', method, by: this.deletedBy, item: record.path })] });
     }
   }
 
   finishRecords(records) {
     for (const record of records) {
-      const pick = pickLastUser({ audit: record.audit, metadata: record.metadata, owner: record.owner });
+      const pick = pickLastUser({ audit: record.audit, cloud: record.cloud?.lastModifiedBy, metadata: record.metadata, owner: record.owner });
       record.lastUser = pick.user;
       record.lastUserSource = pick.source;
     }

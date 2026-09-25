@@ -3,38 +3,17 @@
 // voltam para o navegador: a API informa apenas se cada um está salvo.
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import { HttpError, bad, text, lines } from './validate.js';
+import { HttpError, bad, text, lines, email, emailList, graphCredentials } from './validate.js';
 import { createConnector, MAIL_TYPES } from '../mail/connectors.js';
 import { friendlyError } from '../scan/errors.js';
 
-const EMAIL_RE = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+$/;
-const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DOMAIN_RE = /^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
 const HOST_RE = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$|^\[?[0-9a-f:.]+\]?$/i;
 const MAX_MAILBOXES = 5000;
 
 const key = (address) => String(address || '').trim().toLowerCase();
 
-function email(value, field) {
-  const v = text(value, field, { max: 320 });
-  if (v && !EMAIL_RE.test(v)) throw bad(`${field[0].toUpperCase()}${field.slice(1)} inválido: "${v.slice(0, 80)}".`);
-  return v;
-}
-
-/** Lista de endereços (texto com um por linha ou lista), sem repetições. */
-function addressList(value, field) {
-  const items = Array.isArray(value) ? value.map((v) => (typeof v === 'object' && v ? v.address : v)) : String(value || '').split(/[\r\n,;]+/);
-  const seen = new Set();
-  const out = [];
-  for (const raw of items) {
-    const address = email(raw, field);
-    if (!address || seen.has(key(address))) continue;
-    seen.add(key(address));
-    out.push(address);
-  }
-  if (out.length > MAX_MAILBOXES) throw bad(`Informe no máximo ${MAX_MAILBOXES} caixas.`);
-  return out;
-}
+/** Lista de endereços de caixas (texto com um por linha ou lista), sem repetições. */
+const addressList = (value, field) => emailList(value, field, { max: MAX_MAILBOXES, noun: 'caixas' });
 
 /** Mesmo servidor, porta e segurança, sem relaxar a verificação do certificado. */
 export function sameImapEndpoint(before, after) {
@@ -95,15 +74,9 @@ export function parseMailSource(body = {}, existing = null, box, { forTest = fal
   const secrets = {};
 
   if (type === 'graph') {
-    const g = body.graph || {};
-    const tenantId = text(g.tenantId, 'o ID do locatário', { required: true, max: 255 });
-    if (!GUID_RE.test(tenantId) && !DOMAIN_RE.test(tenantId)) throw bad('ID do locatário inválido: use o GUID (ID do diretório) ou o domínio, ex.: empresa.onmicrosoft.com.');
-    const clientId = text(g.clientId, 'o ID do cliente (aplicativo)', { required: true, max: 64 });
-    if (!GUID_RE.test(clientId)) throw bad('ID do cliente inválido: use o "ID do aplicativo (cliente)" do registro do aplicativo.');
-    data.graph = { tenantId, clientId };
-    const secret = text(g.clientSecret, 'o segredo do cliente', { max: 2000 });
-    secrets.clientSecret = secret ? seal(secret) : prev.clientSecret;
-    if (!secrets.clientSecret) throw bad('Informe o segredo do cliente (valor do segredo criado no registro do aplicativo).');
+    const { graph, clientSecret } = graphCredentials(body.graph || {}, { previousSecret: prev.clientSecret, box });
+    data.graph = graph;
+    secrets.clientSecret = clientSecret;
   }
 
   if (type === 'gmail') {
