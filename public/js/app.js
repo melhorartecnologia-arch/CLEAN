@@ -1,6 +1,6 @@
 // Roteador da interface (rotas no fragmento da URL: #/analises/123?termo=...).
 import { get } from './api.js';
-import { html, render, icon } from './ui.js';
+import { html, render, icon, setServerTimeZone } from './ui.js';
 import { setActiveNav } from './nav.js';
 import * as dashboard from './views/dashboard.js';
 import * as scans from './views/scans.js';
@@ -11,6 +11,8 @@ import * as lists from './views/lists.js';
 import * as listEdit from './views/list-edit.js';
 import * as mailSources from './views/mail-sources.js';
 import * as mailScanNew from './views/mail-scan-new.js';
+import * as schedules from './views/schedules.js';
+import * as scheduleEdit from './views/schedule-edit.js';
 
 // [caminho, tela, item do menu, propriedades extras da tela]
 const ROUTES = [
@@ -26,7 +28,19 @@ const ROUTES = [
   [/^\/listas$/, lists, 'listas'],
   [/^\/listas\/nova$/, listEdit, 'listas'],
   [/^\/listas\/([\w-]+)$/, listEdit, 'listas'],
+  [/^\/agendamentos$/, schedules, 'agendamentos'],
+  [/^\/agendamentos\/novo$/, scheduleEdit, 'agendamentos'],
+  [/^\/agendamentos\/([\w-]+)$/, scheduleEdit, 'agendamentos'],
 ];
+
+/** Informações do servidor (versão, fuso, opções padrão), lidas uma vez. */
+async function loadInfo() {
+  if (!ctx.info) {
+    ctx.info = await get('/api/info');
+    setServerTimeZone(ctx.info.timeZone);
+  }
+  return ctx.info;
+}
 
 const view = document.getElementById('view');
 const ctx = { info: null };
@@ -74,7 +88,7 @@ async function route() {
   render(container, html`<p class="loading">Carregando…</p>`);
   const isCurrent = () => token === navigation;
   try {
-    if (!ctx.info) ctx.info = await get('/api/info');
+    await loadInfo();
     const result = await mod.render(container, {
       params: m.slice(1),
       props,
@@ -97,8 +111,7 @@ async function route() {
 
 async function showServerInfo() {
   try {
-    ctx.info ||= await get('/api/info');
-    const i = ctx.info;
+    const i = await loadInfo();
     const platform = i.platform === 'win32' ? 'Windows' : i.platform;
     render(
       document.getElementById('server-info'),

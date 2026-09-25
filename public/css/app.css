@@ -378,6 +378,7 @@ input[type='text'],
 input[type='search'],
 input[type='number'],
 input[type='date'],
+input[type='time'],
 input[type='email'],
 input[type='password'],
 select,
@@ -1155,6 +1156,130 @@ details.help code {
   color: var(--ink-2);
   border: 1px solid var(--line);
   white-space: nowrap;
+}
+
+/* ---------- Agendamentos ---------- */
+
+.schedule-grid {
+  margin-top: 14px;
+}
+.weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.weekdays label {
+  position: relative;
+  cursor: pointer;
+}
+.weekdays input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+.weekdays span[aria-hidden] {
+  display: inline-block;
+  min-width: 46px;
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  text-align: center;
+  font-size: 13px;
+  background: var(--surface);
+}
+.weekdays input:checked + span {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 650;
+}
+.weekdays input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.option-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+}
+.option-row .check {
+  align-items: center;
+}
+.option-row .check input {
+  margin: 0;
+}
+.option-row input[type='number'] {
+  width: 90px;
+}
+.option-row input[type='date'] {
+  width: auto;
+}
+.option-row select {
+  width: auto;
+}
+.option-row.indent {
+  padding-left: 24px;
+}
+.schedule-preview {
+  margin: 14px 0 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.schedule-preview:empty {
+  display: none;
+}
+.preview-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.next-runs {
+  margin: 4px 0 4px 20px;
+  padding: 0;
+  font-variant-numeric: tabular-nums;
+}
+.next-runs li {
+  padding: 1px 0;
+}
+table.data.schedules td:first-child {
+  min-width: 220px;
+}
+table.data.schedules td:nth-child(2) {
+  min-width: 200px;
+}
+.clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-width: 280px;
+}
+.result-link {
+  text-decoration: none;
+}
+.upcoming {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.upcoming li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.upcoming li:last-child {
+  border-bottom: 0;
 }
 
 /* ---------- Diálogos e avisos ---------- */

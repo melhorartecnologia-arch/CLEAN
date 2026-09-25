@@ -30,6 +30,8 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   destinatários e a data de cada mensagem encontrada. Senhas e chaves ficam gravadas cifradas.
 - **Exclusão** opcional dos arquivos e mensagens encontrados: automática durante a análise
   ("analisar e excluir") ou item a item pelo relatório, com registro de cada exclusão.
+- **Agendamentos**: análises executadas sozinhas, uma vez ou com repetição (a cada algumas horas,
+  diária, semanal ou mensal), com análise incremental, histórico e retenção dos relatórios.
 - Sem banco de dados e sem etapa de compilação: basta instalar o Node.js e executar.
 
 ## Sumário
@@ -46,11 +48,12 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
    - [Google Workspace (Gmail)](#google-workspace-gmail)
    - [Servidores IMAP](#servidores-imap)
 9. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
-10. [Executando como serviço](#executando-como-serviço)
-11. [Configuração](#configuração)
-12. [Segurança](#segurança)
-13. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
-14. [Desenvolvimento](#desenvolvimento)
+10. [Agendamentos](#agendamentos)
+11. [Executando como serviço](#executando-como-serviço)
+12. [Configuração](#configuração)
+13. [Segurança](#segurança)
+14. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
+15. [Desenvolvimento](#desenvolvimento)
 
 ## Requisitos
 
@@ -96,7 +99,9 @@ de exemplo. Depois é só iniciar uma análise.
    - *Testar os termos* mostra o que seria encontrado em um texto de exemplo antes de salvar.
 3. **Nova análise** — escolha repositórios e listas e o que verificar:
    - nome do arquivo (ou o caminho completo, incluindo os nomes das pastas) e/ou conteúdo;
-   - somente arquivos modificados a partir de uma data;
+   - somente arquivos alterados a partir de uma data (vale a data mais recente entre a modificação
+     e a chegada ao repositório: um arquivo copiado ou movido para a pasta depois da data entra na
+     análise, mesmo mantendo a data de modificação original);
    - tamanho máximo para ler o conteúdo (arquivos maiores têm apenas o nome verificado; textos
      longos, só o início);
    - quantidade de arquivos processados em paralelo.
@@ -111,7 +116,9 @@ de exemplo. Depois é só iniciar uma análise.
    - **HTML**: relatório para leitura ou impressão; **JSON**: para integração com outros sistemas.
 
 As análises rodam em segundo plano (é possível fechar o navegador) e podem ser canceladas a qualquer
-momento; o que já foi encontrado é mantido.
+momento; o que já foi encontrado é mantido. Para repetir uma análise automaticamente (toda noite,
+toda semana...), use **Quando executar › Agendar** ou o menu **Automação › Agendamentos** — veja
+[Agendamentos](#agendamentos).
 
 Para as caixas de e-mail, use o grupo **E-mail** do menu: *Caixas de e-mail* (conexões) e *Análises
 de e-mail* — veja [Análise de caixas de e-mail](#análise-de-caixas-de-e-mail).
@@ -472,10 +479,78 @@ Importante:
   análise ainda pode ser excluída pelo relatório. Se a resposta de uma exclusão se perder (falha de
   rede) e a nova tentativa não encontrar a mensagem, ela é dada como excluída.
 
+## Agendamentos
+
+Em **Automação › Agendamentos**, cadastre análises de arquivos ou de e-mail que o CLEAN executa
+sozinho nos dias e horários definidos. O formulário é o mesmo da nova análise (locais, listas, o que
+verificar e o que fazer com os itens encontrados), com a regra de recorrência; na tela *Nova análise*,
+a opção **Quando executar › Agendar** faz o mesmo.
+
+| Repetição | Exemplos |
+|---|---|
+| **Uma vez** | em 30/09/2026 às 22:00 |
+| **A cada algumas horas** | a cada 2 horas, das 08:00 às 18:00, de segunda a sexta |
+| **Diariamente** | todos os dias às 02:00; a cada 3 dias; só em dias úteis (de segunda a sexta) |
+| **Semanalmente** | às segundas e quintas às 22:00; a cada 2 semanas, aos sábados |
+| **Mensalmente** | no dia 1; no dia 31 (nos meses mais curtos, no último dia); no último dia do mês; na primeira segunda-feira; no último sábado; a cada 3 meses |
+
+As repetições têm data de início e término (nunca, numa data ou depois de um número de execuções).
+Ao montar a regra, a tela mostra a descrição e as **próximas cinco execuções**.
+
+Como funcionam:
+
+- os horários são os do **servidor** do CLEAN (o fuso aparece na tela) e o CLEAN precisa estar em
+  execução nesses horários: instale-o como serviço (veja [Executando como serviço](#executando-como-serviço));
+- cada execução entra na fila como qualquer análise (`MAX_CONCURRENT_SCANS`) e gera um relatório
+  comum, com o nome do agendamento e a data; a lista de análises marca as *agendadas*;
+- se a execução anterior do mesmo agendamento ainda estiver em andamento (ou na fila), a nova é
+  **pulada** e fica registrada no histórico;
+- **horário perdido** (CLEAN parado ou computador desligado): na volta, o agendamento é executado
+  **uma vez** (opção marcada por padrão) ou o horário fica só registrado como perdido — nunca uma
+  execução para cada horário perdido;
+- **Executar agora** roda o agendamento na hora, sem mudar a próxima execução programada;
+  **Pausar** suspende o agendamento (os horários da pausa não são executados depois);
+- o **Histórico** mostra as últimas 50 execuções: quando, se foi no horário, atrasada ou manual, o
+  resultado (concluída, pulada, não iniciada e o motivo, perdida), quantos itens foram encontrados e
+  excluídos e o link do relatório;
+- **relatórios guardados**: é possível manter só os mais recentes de cada agendamento; os antigos são
+  excluídos a cada nova execução (o registro geral `data\exclusoes.ndjson` é mantido);
+- repositórios, conexões de e-mail e listas usados por um agendamento não podem ser excluídos do
+  cadastro enquanto fizerem parte dele.
+
+**Itens analisados em cada execução:**
+
+- **todos** os arquivos (ou mensagens);
+- os alterados (ou recebidas) nos **últimos N dias**;
+- **incremental**: a partir da segunda execução, só os arquivos alterados — modificados, criados,
+  copiados ou movidos para o repositório — ou as mensagens recebidas desde o início da última execução
+  **concluída**, com 1 hora de margem para diferenças de relógio entre os servidores. A primeira
+  execução é completa, assim como a seguinte a qualquer mudança nos locais, nas listas de referência
+  (um termo novo precisa ser procurado em tudo) ou nas opções. Uma **análise completa periódica** (a
+  cada 7 execuções, por padrão; 0 = nunca) pega o que ficou de fora por erro de leitura (pasta sem
+  permissão, caixa indisponível, arquivo bloqueado). Cada relatório incremental mostra só o que foi
+  encontrado no seu período. Mensagens importadas (de um .pst, por exemplo) mantêm a data de
+  recebimento original e só aparecem na análise completa.
+
+**Exclusão automática agendada:**
+
+- exige, a cada vez que o agendamento é salvo, **Permitir exclusão** em todos os locais e a
+  confirmação digitada (**EXCLUIR**); o CLEAN registra quem confirmou, quando, e o alcance de cada
+  local naquele momento;
+- em cada execução, a confirmação é conferida com o cadastro atual: se um repositório ou conexão
+  deixou de permitir a exclusão, mudou de caminho, de contas ou de sites (OneDrive e SharePoint), de
+  conta, servidor ou caixas (e-mail), ou passou a excluir de forma definitiva (antes, para a
+  lixeira), a execução **não é iniciada** e o motivo aparece no histórico e na lista de agendamentos
+  até o agendamento ser salvo e confirmado de novo;
+- nas exclusões, "quem excluiu" fica registrado como o agendamento e quem confirmou (ex.:
+  `agendamento "Limpeza semanal" (exclusão automática confirmada por acesso local em 25/09/2026 10:00)`);
+- *Executar agora* num agendamento com exclusão pede uma confirmação.
+
 ## Executando como serviço
 
-Para que o CLEAN inicie com o Windows, sem sessão aberta, use o Agendador de Tarefas (nativo). Em
-um PowerShell como administrador:
+Para que o CLEAN inicie com o Windows, sem sessão aberta — necessário para os
+[agendamentos](#agendamentos) —, use o Agendador de Tarefas (nativo). Em um PowerShell como
+administrador:
 
 ```powershell
 $acao = New-ScheduledTaskAction -Execute 'C:\Program Files\nodejs\node.exe' -Argument 'src\server.js' -WorkingDirectory 'C:\CLEAN'
@@ -572,7 +647,10 @@ Estrutura:
 src/
   server.js, app.js, config.js, store.js   servidor, rotas e persistência (JSON/NDJSON)
   secrets.js                               cifragem das credenciais (caixas de e-mail, OneDrive e SharePoint)
-  routes/                                  API REST (/api/repositories, /api/lists, /api/mail-sources, /api/scans)
+  routes/                                  API REST (/api/repositories, /api/lists, /api/mail-sources, /api/scans, /api/schedules)
+  schedule/
+    recurrence.js                          regras de recorrência: validação, próximas execuções e descrição
+    scheduler.js                           agendador: horários, sobreposição, horários perdidos, período e retenção
   cloud/
     graph-client.js                        cliente do Microsoft Graph (token, novas tentativas, paginação)
     drives.js                              OneDrive e SharePoint: contas, sites, bibliotecas, arquivos, exclusão

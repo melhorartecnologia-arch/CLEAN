@@ -605,12 +605,18 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const qs = queryString({ ...filters, page: '' });
     const filtered = P.criteria.some((k) => filters[k]);
     const exportsLabel = filtered ? 'Exportar (com os filtros atuais):' : 'Exportar:';
+    // Agendamento que iniciou a análise e o período analisado (incremental ou "a partir de").
+    const after = scan.options?.modifiedAfter || scan.options?.receivedAfter;
+    const period = after ? `somente ${scan.kind === 'mail' ? 'mensagens recebidas' : 'arquivos alterados'} a partir de ${fmtDateTime(after)}` : '';
     paint(
       $('[data-head]'),
       html`<div class="page-head">
         <div>
           <div class="inline"><h1>${scan.name}</h1>${statusBadge(scan.status)}${scan.options?.deleteMatches ? html`<span class="badge deleting">com exclusão automática</span>` : ''}</div>
           <div class="sub">Início ${started} · duração ${duration} · ${P.subtitle(scan)}</div>
+          ${scan.scheduleId || period
+            ? html`<div class="sub">${scan.scheduleId ? html`${icon('clock')} Agendamento <a href="#/agendamentos/${scan.scheduleId}">${scan.scheduleName}</a>` : ''}${scan.scheduleId && period ? ' · ' : ''}${period}</div>`
+            : ''}
         </div>
         <div class="actions">
           ${isActive(scan) ? html`<button type="button" class="btn danger" data-action="cancel">${icon('stop')} Cancelar análise</button>` : ''}

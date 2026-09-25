@@ -65,7 +65,7 @@ export async function render(root, { props = {} }) {
                       const [seen, matched] = K.values(s);
                       return html`<tr>
                         <td>
-                          <a href="${K.base}/${s.id}"><b>${s.name}</b></a>
+                          <a href="${K.base}/${s.id}"><b>${s.name}</b></a>${s.scheduleId ? html` <span class="chip" title="Iniciada pelo agendamento &quot;${s.scheduleName}&quot;">${icon('clock')} agendada</span>` : ''}
                           <div class="muted small">${K.where(s)} · ${(s.summary?.lists || []).map((l) => l.name).join(', ')}</div>
                           ${active(s) ? html`<div class="progress-line" role="progressbar" aria-label="Análise em andamento"></div>` : ''}
                         </td>

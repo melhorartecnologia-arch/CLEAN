@@ -69,6 +69,9 @@ const ICONS = {
   file: '<path d="M6 3h8l5 5v13H6zM14 3v5h5"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   flask: '<path d="M9 3h6M10 3v6L4 19a1.5 1.5 0 0 0 1.3 2h13.4a1.5 1.5 0 0 0 1.3-2L14 9V3"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
+  history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2"/>',
 };
 
 export function icon(name, label = '') {
@@ -90,6 +93,26 @@ export function fmtDateTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+let serverTimeZone = '';
+
+/** Fuso do servidor: os horários dos agendamentos são mostrados nele (e não no do navegador). */
+export function setServerTimeZone(timeZone) {
+  serverTimeZone = timeZone || '';
+}
+
+/** Data e hora no fuso do servidor, com o dia da semana (ex.: "sex., 25/09/2026, 22:00"). */
+export function fmtServerDateTime(iso, { weekday = true } = {}) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const options = { ...(weekday ? { weekday: 'short' } : {}), day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' };
+  try {
+    return d.toLocaleString('pt-BR', { ...options, timeZone: serverTimeZone || undefined });
+  } catch {
+    return d.toLocaleString('pt-BR', options); // fuso desconhecido pelo navegador
+  }
 }
 
 export function fmtDate(iso) {

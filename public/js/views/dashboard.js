@@ -1,12 +1,20 @@
 // Painel inicial: números gerais, primeiros passos e análises recentes (arquivos e e-mail).
 import { get } from '../api.js';
-import { html, render as paint, icon, fmtNum, fmtCompact, fmtDateTime, statusBadge, plural } from '../ui.js';
+import { html, render as paint, icon, fmtNum, fmtCompact, fmtDateTime, fmtServerDateTime, statusBadge, plural } from '../ui.js';
 
 const isMail = (s) => s.kind === 'mail';
 const running = (s) => s.status === 'running' || s.status === 'queued';
 
 export async function render(root) {
-  const [repos, lists, sources, scans] = await Promise.all([get('/api/repositories'), get('/api/lists'), get('/api/mail-sources'), get('/api/scans')]);
+  const [repos, lists, sources, scans, schedules] = await Promise.all([
+    get('/api/repositories'),
+    get('/api/lists'),
+    get('/api/mail-sources'),
+    get('/api/scans'),
+    get('/api/schedules'),
+  ]);
+  const upcoming = schedules.filter((s) => s.state === 'active').sort((a, b) => String(a.nextRunAt).localeCompare(String(b.nextRunAt)));
+  const attention = schedules.filter((s) => s.problems.length || s.lastRun?.status === 'failed');
   const terms = lists.reduce((sum, l) => sum + l.termCount, 0);
   const lastFiles = scans.find((s) => !isMail(s) && s.status === 'completed');
   const lastMail = scans.find((s) => isMail(s) && s.status === 'completed');
@@ -65,6 +73,30 @@ export async function render(root) {
               </li>
             </ol>
           </section>`}
+
+      ${schedules.length
+        ? html`<section class="card">
+            <div class="card-head">
+              <h2>Próximos agendamentos</h2>
+              <span class="small"><a href="#/agendamentos">Ver todos</a></span>
+            </div>
+            ${attention.length
+              ? html`<div class="alert">${icon('alert')}<div><b>${plural(attention.length, 'agendamento precisa', 'agendamentos precisam')} de atenção:</b> ${attention.map((s) => s.name).join(', ')}. <a href="#/agendamentos">Ver os detalhes</a></div></div>`
+              : ''}
+            ${upcoming.length
+              ? html`<ul class="upcoming">
+                  ${upcoming.slice(0, 5).map(
+                    (s) => html`<li>
+                      <span class="nowrap"><b>${fmtServerDateTime(s.nextRunAt)}</b></span>
+                      <a href="#/agendamentos/${s.id}">${s.name}</a>
+                      <span class="kind-badge">${s.kind === 'mail' ? 'E-mail' : 'Arquivos'}</span>
+                      ${s.action === 'delete' ? html`<span class="chip danger">exclusão automática</span>` : ''}
+                    </li>`,
+                  )}
+                </ul>`
+              : html`<p class="muted">Nenhum agendamento ativo.</p>`}
+          </section>`
+        : ''}
 
       <section class="card">
         <div class="card-head">
