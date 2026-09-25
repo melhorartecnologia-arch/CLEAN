@@ -3,6 +3,8 @@ import { get, post } from '../api.js';
 import { html, render as paint, icon, toast, fmtNum, plural } from '../ui.js';
 import { go } from '../nav.js';
 
+const CLOUD_LABELS = { onedrive: 'OneDrive', sharepoint: 'SharePoint' };
+
 export async function render(root, { ctx }) {
   const [repos, lists] = await Promise.all([get('/api/repositories'), get('/api/lists')]);
   const d = ctx.info.defaults || {};
@@ -44,7 +46,7 @@ export async function render(root, { ctx }) {
               ${repos.map(
                 (r) => html`<label class="check">
                   <input type="checkbox" name="repositoryIds" value="${r.id}" ${repos.length === 1 ? 'checked' : ''} />
-                  <span><b>${r.name}</b>${r.allowDelete ? html` <span class="chip danger">exclusão permitida</span>` : ''}<br /><span class="mono muted">${r.path}</span></span>
+                  <span><b>${r.name}</b>${CLOUD_LABELS[r.type] ? html` <span class="chip">${CLOUD_LABELS[r.type]}</span>` : ''}${r.allowDelete ? html` <span class="chip danger">exclusão permitida</span>` : ''}<br /><span class="${CLOUD_LABELS[r.type] ? 'muted small' : 'mono muted'}">${r.path}</span></span>
                 </label>`,
               )}
             </div>
@@ -99,7 +101,7 @@ export async function render(root, { ctx }) {
               </label>
               <label class="check">
                 <input type="checkbox" name="resolveOwner" ${d.resolveOwner !== false ? 'checked' : ''} />
-                <span><b>Identificar o proprietário do arquivo (NTFS)</b><br /><small class="muted">Usado quando não há log de auditoria nem metadados do documento.</small></span>
+                <span><b>Identificar o proprietário do arquivo (NTFS)</b><br /><small class="muted">Pastas do Windows: usado quando não há log de auditoria nem metadados do documento. No OneDrive e no SharePoint, o último usuário vem do Microsoft 365.</small></span>
               </label>
             </div>
           </fieldset>

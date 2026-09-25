@@ -68,6 +68,7 @@ const DELETION_WORDS = {
     removed: 'A conexão desta mensagem foi removida do cadastro: a exclusão pelo relatório não está disponível.',
   },
 };
+const CHANGED_REPO = 'O cadastro do repositório mudou depois da análise (tipo ou locatário): faça uma nova análise para excluir.';
 
 function deletionLabel(status, o) {
   const labels = {
@@ -114,7 +115,8 @@ function deletionBlock(r, noun, { active, deleting }) {
   } else if (r.canDelete) {
     action = html`<button type="button" class="btn small danger" data-action="delete-item" data-rid="${r.id}">${icon('trash')} ${d && !isGone(d) ? 'Tentar excluir de novo' : `Excluir ${noun}`}</button>`;
   } else if (!isGone(d)) {
-    action = html`<p class="muted small">${active ? 'A exclusão manual fica disponível ao fim da análise.' : r.deleteBlocked === 'removed' ? w.removed : w.notAllowed}</p>`;
+    const why = active ? 'A exclusão manual fica disponível ao fim da análise.' : r.deleteBlocked === 'removed' ? w.removed : r.deleteBlocked === 'changed' ? CHANGED_REPO : w.notAllowed;
+    action = html`<p class="muted small">${why}</p>`;
   }
   return html`<h4 class="spaced">Exclusão</h4>${status}${action}`;
 }
@@ -122,15 +124,28 @@ function deletionBlock(r, noun, { active, deleting }) {
 // ---------------------------------------------------------------------------------------------
 // Análises de arquivos
 
-const SOURCE = { audit: 'Log de auditoria', metadata: 'Metadados do documento', owner: 'Proprietário do arquivo (NTFS)' };
-const SOURCE_SHORT = { audit: 'auditoria', metadata: 'metadados', owner: 'proprietário' };
+const SOURCE = {
+  audit: 'Log de auditoria',
+  cloud: 'Microsoft 365 (quem alterou por último)',
+  metadata: 'Metadados do documento',
+  owner: 'Proprietário do arquivo (NTFS)',
+};
+const SOURCE_SHORT = { audit: 'auditoria', cloud: 'Microsoft 365', metadata: 'metadados', owner: 'proprietário' };
 const FILE_LOCATION = { name: 'nome', content: 'conteúdo' };
+const CLOUD_KIND = { onedrive: 'OneDrive', sharepoint: 'SharePoint' };
 
+/** Pasta do arquivo: repositório e subpastas; no OneDrive/SharePoint, conta ou site e biblioteca. */
 function folderOf(record) {
   const rel = record.relativePath || '';
   const idx = Math.max(rel.lastIndexOf('\\'), rel.lastIndexOf('/'));
-  return idx === -1 ? record.repositoryName : `${record.repositoryName} › ${rel.slice(0, idx)}`;
+  const dir = idx === -1 ? '' : rel.slice(0, idx);
+  const c = record.cloud;
+  const start = c ? `${c.accountName || c.account} › ${c.library}` : record.repositoryName;
+  return dir ? `${start} › ${dir}` : start;
 }
+
+/** Pessoa registrada pelo Microsoft 365: "Nome (e-mail)". */
+const personText = (p) => (p ? (p.name && p.email ? `${p.name} (${p.email})` : p.name || p.email) : '');
 
 const FILES = {
   base: '#/analises',
@@ -183,6 +198,7 @@ const FILES = {
 
   progress: (st) => html`<span><b>${fmtNum(st.filesSeen)}</b> arquivos verificados</span>
     <span><b>${fmtNum(st.directories)}</b> pastas</span>
+    ${st.libraries ? html`<span><b>${fmtNum(st.libraries)}</b> bibliotecas (OneDrive/SharePoint)</span>` : ''}
     <span><b>${fmtNum(st.filesMatched)}</b> com ocorrências</span>
     <span><b>${fmtBytes(st.bytesAnalyzed)}</b> de conteúdo lido</span>
     <span><b>${fmtNum(st.errors)}</b> erros</span>
@@ -191,7 +207,7 @@ const FILES = {
   tiles: (st) => {
     const pct = st.filesSeen ? Math.round((st.filesMatched / st.filesSeen) * 1000) / 10 : 0;
     const notRead = (st.contentEncrypted || 0) + (st.contentSkippedSize || 0) + (st.contentErrors || 0);
-    return html`<div class="tile"><div class="label">Arquivos verificados</div><div class="value">${fmtCompact(st.filesSeen)}</div><div class="detail">em ${plural(st.directories || 0, 'pasta', 'pastas')}${st.filesSkippedByDate ? ` · ${fmtNum(st.filesSkippedByDate)} fora do período` : ''}</div></div>
+    return html`<div class="tile"><div class="label">Arquivos verificados</div><div class="value">${fmtCompact(st.filesSeen)}</div><div class="detail">em ${plural(st.directories || 0, 'pasta', 'pastas')}${st.libraries ? ` de ${plural(st.libraries, 'biblioteca', 'bibliotecas')}` : ''}${st.accountsSkipped ? ` · ${plural(st.accountsSkipped, 'conta sem OneDrive', 'contas sem OneDrive')}` : ''}${st.filesSkippedByDate ? ` · ${fmtNum(st.filesSkippedByDate)} fora do período` : ''}</div></div>
       <div class="tile"><div class="label">Arquivos com ocorrências</div><div class="value">${fmtCompact(st.filesMatched)}</div><div class="detail">${pct.toLocaleString('pt-BR')}% dos verificados</div></div>
       <div class="tile"><div class="label">Ocorrências</div><div class="value">${fmtCompact(st.occurrences)}</div><div class="detail">somando nome e conteúdo</div></div>
       <div class="tile"><div class="label">Conteúdos lidos</div><div class="value">${fmtCompact(st.contentAnalyzed)}</div><div class="detail">${notRead ? `${fmtNum(st.contentEncrypted)} com senha · ${fmtNum(st.contentSkippedSize)} grandes · ${fmtNum(st.contentErrors)} com erro` : fmtBytes(st.bytesAnalyzed)}</div></div>
@@ -249,12 +265,18 @@ const FILES = {
   detail: (r, ctx) => {
     const m = r.metadata || {};
     const a = r.audit;
+    const c = r.cloud;
+    const link = c && /^https:\/\//i.test(c.webUrl || '') ? c.webUrl : null;
     return html`<div class="detail-grid">
       <div>
         <h4>Arquivo</h4>
         <dl class="kv">
-          <dt>Caminho</dt>
-          <dd><span class="mono">${r.path}</span> <button type="button" class="btn small" data-action="copy" data-copy="${r.path}" data-copied="Caminho copiado.">${icon('copy')} Copiar</button></dd>
+          ${c
+            ? html`<dt>${CLOUD_KIND[c.kind]}</dt><dd>${c.accountName && c.accountName !== c.account ? html`${c.accountName} <span class="muted small">${c.account}</span>` : c.account} › ${c.library}</dd>`
+            : ''}
+          <dt>${c ? 'Endereço' : 'Caminho'}</dt>
+          <dd><span class="mono">${r.path}</span> <button type="button" class="btn small" data-action="copy" data-copy="${c?.webUrl || r.path}" data-copied="${c ? 'Endereço copiado.' : 'Caminho copiado.'}">${icon('copy')} Copiar</button></dd>
+          ${link ? html`<dt>Abrir</dt><dd><a href="${link}" target="_blank" rel="noopener noreferrer">Abrir no ${CLOUD_KIND[c.kind]}</a> <span class="muted small">(exige acesso ao arquivo)</span></dd>` : ''}
           <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
           <dt>Criado em</dt><dd>${fmtDateTime(r.created)}</dd>
           <dt>Modificado em</dt><dd>${fmtDateTime(r.modified)}</dd>
@@ -271,8 +293,14 @@ const FILES = {
           ${a ? html`<dt>Último acesso (auditoria)</dt><dd>${a.user} · ${a.action} · ${fmtDateTime(a.time)}</dd>` : ''}
           ${a?.lastWrite ? html`<dt>Última alteração (auditoria)</dt><dd>${a.lastWrite.user} · ${a.lastWrite.action} · ${fmtDateTime(a.lastWrite.time)}</dd>` : ''}
           ${m.lastModifiedBy ? html`<dt>Salvo por último por</dt><dd>${m.lastModifiedBy}${m.modified ? html` <span class="muted small">em ${fmtDateTime(m.modified)}</span>` : ''}</dd>` : ''}
+          ${c?.lastModifiedBy ? html`<dt>Alterado por último por</dt><dd>${personText(c.lastModifiedBy)} <span class="muted small">em ${fmtDateTime(r.modified)}</span></dd>` : ''}
+          ${c?.createdBy ? html`<dt>Criado por</dt><dd>${personText(c.createdBy)} <span class="muted small">em ${fmtDateTime(r.created)}</span></dd>` : ''}
           ${m.author ? html`<dt>Autor</dt><dd>${m.author}${m.created ? html` <span class="muted small">em ${fmtDateTime(m.created)}</span>` : ''}</dd>` : ''}
-          <dt>Proprietário (NTFS)</dt><dd>${r.owner || html`<span class="muted">${r.ownerError ? `não obtido: ${r.ownerError}` : 'não verificado'}</span>`}</dd>
+          ${c
+            ? c.kind === 'onedrive'
+              ? html`<dt>Dono do OneDrive</dt><dd>${r.owner || '—'}</dd>`
+              : ''
+            : html`<dt>Proprietário (NTFS)</dt><dd>${r.owner || html`<span class="muted">${r.ownerError ? `não obtido: ${r.ownerError}` : 'não verificado'}</span>`}</dd>`}
         </dl>
       </div>
       <div>
@@ -960,12 +988,18 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       if (!record || deletingNow.has(rid)) return;
       const mail = scan.kind === 'mail';
       const what = mail ? `a mensagem "${record.subject || '(sem assunto)'}" da caixa ${record.mailbox}` : `o arquivo ${record.path}`;
-      const how =
-        record.deleteMethod === 'trash'
-          ? `Ela será movida para ${record.sourceType === 'graph' ? 'a pasta Itens Excluídos' : 'a Lixeira'} da caixa.`
-          : record.deleteMethod === 'permanent'
-            ? 'A exclusão é definitiva: a mensagem não fica na lixeira do usuário.'
-            : 'A exclusão é definitiva: o arquivo não vai para a Lixeira.';
+      let how;
+      if (mail) {
+        how =
+          record.deleteMethod === 'trash'
+            ? `Ela será movida para ${record.sourceType === 'graph' ? 'a pasta Itens Excluídos' : 'a Lixeira'} da caixa.`
+            : 'A exclusão é definitiva: a mensagem não fica na lixeira do usuário.';
+      } else if (record.cloud) {
+        const where = record.cloud.kind === 'onedrive' ? 'do OneDrive' : 'do site';
+        how = record.deleteMethod === 'trash' ? `Ele será movido para a Lixeira ${where} (pode ser restaurado).` : `A exclusão é definitiva: o arquivo não fica na Lixeira ${where}.`;
+      } else {
+        how = 'A exclusão é definitiva: o arquivo não vai para a Lixeira.';
+      }
       if (!(await confirmDialog(`Excluir ${what}? ${how}`, { title: mail ? 'Excluir mensagem' : 'Excluir arquivo', confirmLabel: 'Excluir' }))) return;
       if (deletingNow.has(rid) || stopped) return;
       // Enquanto o pedido não termina, o botão fica "Excluindo…" (também se a tabela for redesenhada).

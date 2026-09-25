@@ -26,11 +26,19 @@ function locations(record) {
   return [...new Set(record.matches.map((m) => LOCATION_LABELS[m.location]))].join(' e ');
 }
 
+/** Pasta do arquivo (no OneDrive/SharePoint, com a conta ou o site e a biblioteca). */
 function folderOf(record) {
   const rel = record.relativePath || '';
   const idx = Math.max(rel.lastIndexOf('\\'), rel.lastIndexOf('/'));
-  return idx === -1 ? '' : rel.slice(0, idx);
+  const dir = idx === -1 ? '' : rel.slice(0, idx);
+  const c = record.cloud;
+  if (!c) return dir;
+  const start = `${c.accountName || c.account} › ${c.library}`;
+  return dir ? `${start} › ${dir}` : start;
 }
+
+/** Pessoa registrada pelo Microsoft 365: "Nome <e-mail>". */
+const personText = (p) => (p ? (p.name && p.email ? `${p.name} <${p.email}>` : p.name || p.email) : '');
 
 const FILE_COLUMNS = [
   ['Repositório', 18],
@@ -42,9 +50,10 @@ const FILE_COLUMNS = [
   ['Modificado em', 17],
   ['Último usuário', 24],
   ['Fonte do último usuário', 22],
-  ['Proprietário (NTFS)', 24],
+  ['Proprietário (NTFS) / dono do OneDrive', 26],
   ['Salvo por último por (metadados)', 24],
   ['Autor (metadados)', 22],
+  ['Criado por (Microsoft 365)', 26],
   ['Último acesso (auditoria)', 24],
   ['Ação (auditoria)', 16],
   ['Data (auditoria)', 17],
@@ -71,6 +80,7 @@ function fileRow(r) {
     r.owner || '',
     r.metadata?.lastModifiedBy || '',
     r.metadata?.author || '',
+    personText(r.cloud?.createdBy),
     r.audit?.user || '',
     r.audit?.action || '',
     toDate(r.audit?.time),
@@ -260,7 +270,7 @@ export function csvCell(value) {
  * como o Excel em português espera.
  */
 export async function exportCsv(records, out) {
-  const header = [...MATCH_COLUMNS.map(([h]) => h), 'Fonte do último usuário', 'Proprietário (NTFS)', 'Salvo por último por (metadados)', 'Último acesso (auditoria)', 'Exclusão'];
+  const header = [...MATCH_COLUMNS.map(([h]) => h), 'Fonte do último usuário', 'Proprietário (NTFS) / dono do OneDrive', 'Salvo por último por (metadados)', 'Último acesso (auditoria)', 'Exclusão'];
   await writeAll(
     out,
     (function* () {

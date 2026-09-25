@@ -1,9 +1,9 @@
 # CLEAN — Análise de repositórios de arquivos e caixas de e-mail
 
 Aplicação web em Node.js que percorre repositórios de arquivos do Windows (pastas locais e
-compartilhamentos de rede), procura os termos de uma **lista de referência** no **nome** e no
-**conteúdo** dos arquivos e gera relatórios com **a informação encontrada** e **o último usuário que
-interagiu com cada arquivo**. A seção **E-mail** faz a mesma busca em **caixas de e-mail
+compartilhamentos de rede) e do **Microsoft 365 (OneDrive e SharePoint)**, procura os termos de uma
+**lista de referência** no **nome** e no **conteúdo** dos arquivos e gera relatórios com **a
+informação encontrada** e **o último usuário que interagiu com cada arquivo**. A seção **E-mail** faz a mesma busca em **caixas de e-mail
 pré-configuradas** (Microsoft 365, Google Workspace ou servidores IMAP): varre todas as caixas e
 pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada mensagem.
 
@@ -16,7 +16,11 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   identificados.
 - Último usuário a partir de três fontes, da mais precisa para a menos precisa: **log de auditoria
   do Windows** (quem acessou ou alterou por último), **metadados do documento** ("salvo por último
-  por") e **proprietário do arquivo (NTFS)**.
+  por") e **proprietário do arquivo (NTFS)**. No OneDrive e no SharePoint, quem alterou o arquivo
+  por último segundo o Microsoft 365.
+- **OneDrive** (todas as contas do locatário ou as escolhidas) e **SharePoint** (todos os sites ou
+  os escolhidos, com os subsites e todas as bibliotecas de documentos), pela API Microsoft Graph,
+  com a mesma busca no nome e no conteúdo, o mesmo relatório e a mesma exclusão opcional.
 - Relatório na tela com filtros, gráficos e trechos em que cada termo aparece (com página, planilha,
   slide ou linha), e exportação para **Excel**, **CSV**, **HTML** (para imprimir) e **JSON**.
 - Caixas de e-mail do **Microsoft 365** (API Microsoft Graph), do **Google Workspace** (API do
@@ -36,16 +40,17 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
 4. [Como o último usuário é identificado](#como-o-último-usuário-é-identificado)
 5. [Habilitando a auditoria do Windows (opcional)](#habilitando-a-auditoria-do-windows-opcional)
 6. [Conta de serviço e permissões](#conta-de-serviço-e-permissões)
-7. [Análise de caixas de e-mail](#análise-de-caixas-de-e-mail)
+7. [OneDrive e SharePoint](#onedrive-e-sharepoint)
+8. [Análise de caixas de e-mail](#análise-de-caixas-de-e-mail)
    - [Microsoft 365 (Exchange Online)](#microsoft-365-exchange-online)
    - [Google Workspace (Gmail)](#google-workspace-gmail)
    - [Servidores IMAP](#servidores-imap)
-8. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
-9. [Executando como serviço](#executando-como-serviço)
-10. [Configuração](#configuração)
-11. [Segurança](#segurança)
-12. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
-13. [Desenvolvimento](#desenvolvimento)
+9. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
+10. [Executando como serviço](#executando-como-serviço)
+11. [Configuração](#configuração)
+12. [Segurança](#segurança)
+13. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
+14. [Desenvolvimento](#desenvolvimento)
 
 ## Requisitos
 
@@ -120,6 +125,9 @@ relatório qual foi usada:
 | 2 | **Metadados do documento** | "Salvo por último por" do Word, Excel, PowerPoint, LibreOffice, RTF e .msg | É o nome configurado no Office de quem salvou (normalmente o nome completo). Não muda quando o arquivo é alterado por outros programas. |
 | 3 | **Proprietário (NTFS)** | Dono do arquivo | Em geral quem **criou** o arquivo (às vezes o grupo Administradores). Usado quando não há as fontes acima. |
 
+No **OneDrive** e no **SharePoint**, o último usuário é **quem alterou o arquivo por último**
+segundo o Microsoft 365 (o relatório também mostra quem o criou e, no OneDrive, o dono da conta).
+
 O relatório também mostra todas as fontes lado a lado (proprietário, autor, salvo por último por,
 último acesso e última alteração na auditoria) para comparação.
 
@@ -177,6 +185,56 @@ dedicada (por exemplo `EMPRESA\svc-clean`) com:
   *Gerenciamento Remoto do Log de Eventos* deve estar habilitada nele.
 
 Pastas que a conta não consegue abrir aparecem na aba **Erros** do relatório.
+
+## OneDrive e SharePoint
+
+Em *Repositórios › Novo repositório*, escolha o tipo **OneDrive** ou **SharePoint**. A análise, o
+relatório e a exclusão funcionam como nas pastas do Windows; os arquivos são lidos pela API
+Microsoft Graph, com as permissões de um **registro de aplicativo** (sem usuário conectado).
+
+- **OneDrive**: todas as contas do locatário (usuários sem OneDrive — nunca acessado, sem licença,
+  salas, caixas compartilhadas — são ignorados e contados no relatório) ou somente as contas
+  informadas (e-mail do usuário). É possível ignorar contas por padrão (ex.: `teste@*`).
+- **SharePoint**: todos os sites (sem os OneDrive pessoais, que são analisados pelo tipo OneDrive)
+  ou somente os sites informados (endereço, ex.: `https://empresa.sharepoint.com/sites/Financeiro`;
+  pode colar o endereço de uma página ou biblioteca do site). Os **subsites** e **todas as
+  bibliotecas de documentos** de cada site são analisados — inclusive os arquivos das equipes do
+  **Microsoft Teams**, que ficam nos sites delas. É possível ignorar sites por endereço ou nome.
+- Os padrões de *Ignorar* valem para pastas e arquivos e também para o nome das bibliotecas (ex.:
+  `Site Assets`, `Style Library`); atalhos para pastas de outras bibliotecas ("Adicionar atalho a
+  Meus arquivos") não são seguidos, para não analisar o mesmo arquivo duas vezes.
+- O conteúdo é baixado para a memória do servidor do CLEAN até o limite de tamanho da análise
+  (arquivos maiores têm só o nome verificado; textos longos, só o início) e lido pelos mesmos
+  leitores dos arquivos do Windows. Nada é gravado em disco.
+- O relatório mostra a conta ou o site, a biblioteca, a pasta, o endereço do arquivo (com link
+  *Abrir no OneDrive/SharePoint*), quem alterou por último, quem criou e, no OneDrive, o dono.
+
+### Registro do aplicativo no Microsoft Entra ID
+
+Pode ser o mesmo das caixas de e-mail do Microsoft 365 — no formulário do repositório, escolha
+*Usar as credenciais da conexão de e-mail*. Em *Registros de aplicativo › (o aplicativo) ›
+Permissões de API › Adicionar › Microsoft Graph › Permissões de aplicativo*, inclua:
+
+| Permissão | Para quê |
+|---|---|
+| `Files.Read.All` | Ler os arquivos de todos os OneDrive e sites. |
+| `Sites.Read.All` | Listar os sites do SharePoint e as bibliotecas. |
+| `User.Read.All` | Listar os usuários (OneDrive de todas as contas) e localizar as contas pelo e-mail. |
+| `Files.ReadWrite.All` (no lugar de `Files.Read.All`) | Somente se for usar a exclusão. |
+
+e clique em **Conceder consentimento do administrador**. Para limitar o CLEAN a alguns sites, use a
+permissão `Sites.Selected` no lugar de `Sites.Read.All`/`Files.Read.All` e libere cada site para o
+aplicativo (por exemplo, com o PnP PowerShell: `Grant-PnPEntraIDAppSitePermission -AppId <ID do
+aplicativo> -DisplayName CLEAN -Site <endereço do site> -Permissions Read`, ou `Write` para excluir —
+em versões mais antigas do PnP, `Grant-PnPAzureADAppSitePermission`); nesse caso, informe os sites
+na lista (a opção "todos os sites" e o OneDrive precisam de `Sites.Read.All` e `Files.Read.All`).
+
+*Testar conexão*, no formulário, confere as credenciais e o acesso a até três bibliotecas.
+
+Limitações: só a versão atual de cada arquivo é analisada (versões anteriores e a lixeira, não);
+blocos de anotações do OneNote não têm o conteúdo lido (só os nomes); a informação de **quem abriu
+ou visualizou** um arquivo não é fornecida pelo Graph — para isso, use a pesquisa de auditoria do
+Microsoft Purview.
 
 ## Análise de caixas de e-mail
 
@@ -352,7 +410,8 @@ Salvaguardas:
   impede a exclusão;
 - os arquivos da pasta de dados e da pasta de instalação do CLEAN nunca são excluídos (a pasta de
   dados nem é analisada); um repositório cadastrado **dentro** de outro, sem *Permitir exclusão*,
-  protege os seus arquivos também quando a análise é feita pelo repositório maior;
+  protege os seus arquivos também quando a análise é feita pelo repositório maior — no OneDrive e no
+  SharePoint, um repositório sem exclusão que lista contas ou sites protege essas contas e sites;
 - atenção ao verificar o nome com **Caminho completo**: um termo no nome de uma pasta faz todos os
   arquivos dela (e das subpastas) serem encontrados — e, no modo automático, excluídos;
 - **e-mails**: vale a forma de exclusão (definitiva ou para a lixeira) que estava no cadastro ao
@@ -381,6 +440,7 @@ Como cada tipo é excluído e a permissão necessária:
 | Arquivos (pastas e compartilhamentos) | **Definitiva**: arquivos apagados pela rede não vão para a Lixeira do Windows. Arquivos somente leitura também são excluídos. | A conta do CLEAN precisa de permissão de **modificação** (NTFS e compartilhamento), não só de leitura. |
 | Microsoft 365 | *Excluir definitivamente* (a mensagem vai para a área de expurgo e some para o usuário) ou *Mover para a Lixeira* (Itens Excluídos), conforme a conexão. | **`Mail.ReadWrite`** (tipo Aplicativo) no lugar de `Mail.Read`; com o RBAC para aplicativos, a função `Application Mail.ReadWrite`. |
 | Google Workspace | Definitiva ou para a Lixeira, conforme a conexão. | Na delegação em todo o domínio, inclua o escopo `https://mail.google.com/` (definitiva) ou `https://www.googleapis.com/auth/gmail.modify` (lixeira). |
+| OneDrive e SharePoint | *Mover para a Lixeira* do site ou do OneDrive (padrão; o usuário ou o administrador do site pode restaurar por até 93 dias) ou *Excluir definitivamente*, conforme o repositório. Só se o arquivo continuar na versão analisada; arquivos abertos para edição, em check-out ou com rótulo de retenção (registro) não são excluídos. | **`Files.ReadWrite.All`** (ou `Sites.ReadWrite.All`; com `Sites.Selected`, permissão `Write` no site). |
 | IMAP | *Definitiva*: marca e expurga só as mensagens encontradas (UID EXPUNGE); o servidor precisa oferecer a extensão **UIDPLUS** — sem ela, a exclusão definitiva é recusada, porque um expurgo comum apagaria também as outras mensagens marcadas como excluídas na pasta. *Para a Lixeira*: move para a pasta Lixeira do servidor (MOVE; sem MOVE, copia, confere a cópia e só então expurga, o que também exige UIDPLUS); mensagens que já estão na Lixeira ficam lá. No **Gmail via IMAP**, a exclusão definitiva move para a Lixeira e expurga de lá (expurgar de outra pasta só tiraria o marcador). | A conta precisa poder alterar a caixa. |
 
 Importante:
@@ -497,6 +557,9 @@ src/
   server.js, app.js, config.js, store.js   servidor, rotas e persistência (JSON/NDJSON)
   secrets.js                               cifragem das credenciais das caixas de e-mail
   routes/                                  API REST (/api/repositories, /api/lists, /api/mail-sources, /api/scans)
+  cloud/
+    graph-client.js                        cliente do Microsoft Graph (token, novas tentativas, paginação)
+    drives.js                              OneDrive e SharePoint: contas, sites, bibliotecas, arquivos, exclusão
   scan/
     scanner.js, worker.js, manager.js      análise em worker thread, fila e cancelamento
     delete.js                              exclusão dos arquivos encontrados
@@ -516,5 +579,5 @@ scripts/criar-dados-demo.js                dados de demonstração
 
 Os testes dos scripts PowerShell usam versões simuladas de `Get-Acl` e `Get-WinEvent` e rodam no
 Windows ou onde houver PowerShell 7 (`pwsh`); sem PowerShell, são ignorados. Os testes de e-mail usam
-servidores simulados do Microsoft Graph, das APIs do Google e de IMAP (`test/helpers`), sem acesso à
-internet.
+servidores simulados do Microsoft Graph (inclusive OneDrive e SharePoint), das APIs do Google e de
+IMAP (`test/helpers`), sem acesso à internet.

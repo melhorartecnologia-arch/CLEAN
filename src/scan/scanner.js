@@ -407,8 +407,8 @@ export class Scanner {
       contentNote: content?.note || null,
       metadata: content?.metadata || {},
       audit: null,
-      // OneDrive: o dono da conta; SharePoint: quem criou o arquivo.
-      owner: drive.owner || createdBy?.email || createdBy?.name || null,
+      // OneDrive: o dono da conta (no SharePoint, quem criou o arquivo fica em cloud.createdBy).
+      owner: drive.owner || null,
       ownerError: null,
       lastUser: null,
       lastUserSource: null,

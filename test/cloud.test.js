@@ -180,7 +180,8 @@ test('SharePoint: todos os sites (páginas), subsites, sem os pessoais, bibliote
       'Financeiro › Documentos Compartilhados › 2026/salarios.txt',
     ]);
     const salarios = run.records.find((r) => r.name === 'salarios.txt');
-    assert.equal(salarios.owner, 'bruno@contoso.com', 'no SharePoint, quem criou');
+    assert.equal(salarios.owner, null);
+    assert.equal(salarios.cloud.createdBy.email, 'bruno@contoso.com', 'no SharePoint, quem criou');
     assert.equal(salarios.path, 'https://contoso.sharepoint.com/sites/Financeiro/Shared Documents/2026/salarios.txt');
 
     // Sem getAllSites (locatários mais antigos), usa a busca de sites.
