@@ -55,37 +55,66 @@ const option = (value, label, current) => html`<option value="${value}" ${curren
 
 // ---------- Exclusão dos itens encontrados ----------
 
-const DELETION_STATUS = { deleted: 'Excluído', missing: 'Não encontrado (já excluído ou movido)', failed: 'Falha na exclusão' };
+/** Textos da exclusão no gênero do item ("arquivo excluído", "mensagem excluída"). */
+const DELETION_WORDS = {
+  arquivo: {
+    o: 'o',
+    notAllowed: 'Exclusão não permitida neste repositório (ative "Permitir exclusão" em Repositórios).',
+    removed: 'O repositório deste arquivo foi removido do cadastro: a exclusão pelo relatório não está disponível.',
+  },
+  mensagem: {
+    o: 'a',
+    notAllowed: 'Exclusão não permitida nesta conexão (ative "Permitir exclusão" em Caixas de e-mail).',
+    removed: 'A conexão desta mensagem foi removida do cadastro: a exclusão pelo relatório não está disponível.',
+  },
+};
 
-const deletionFilter = (filters) => html`<label class="field"><span>Exclusão</span>
+function deletionLabel(status, o) {
+  const labels = {
+    deleted: `Excluíd${o}`,
+    missing: `Não encontrad${o} (já excluíd${o} ou movid${o})`,
+    changed: `Não excluíd${o}: alterad${o} depois da análise`,
+    failed: 'Falha na exclusão',
+  };
+  return labels[status] || status;
+}
+
+const deletionFilter = (filters, o) => html`<label class="field"><span>Exclusão</span>
     <select name="deletion">
-      <option value="">Todos</option>
-      ${option('kept', 'Não excluídos', filters.deletion)}
-      ${option('deleted', 'Excluídos', filters.deletion)}
-      ${option('failed', 'Com falha na exclusão', filters.deletion)}
+      <option value="">${o === 'a' ? 'Todas' : 'Todos'}</option>
+      ${option('kept', `Não excluíd${o}s`, filters.deletion)}
+      ${option('deleted', `Excluíd${o}s`, filters.deletion)}
+      ${option('missing', `Não encontrad${o}s ao excluir`, filters.deletion)}
+      ${option('failed', `Com falha ou alterad${o}s`, filters.deletion)}
     </select>
   </label>`;
 
-function deletionChip(r) {
+const isGone = (d) => d?.status === 'deleted' || d?.status === 'missing';
+
+function deletionChip(r, o) {
   const d = r.deletion;
   if (!d) return '';
   if (d.status === 'failed') return html` <span class="chip danger">falha ao excluir</span>`;
-  return html` <span class="chip deleted">${d.status === 'missing' ? 'não encontrado' : d.method === 'trash' ? 'na lixeira' : 'excluído'}</span>`;
+  if (d.status === 'changed') return html` <span class="chip">mantid${o}: alterad${o}</span>`;
+  return html` <span class="chip deleted">${d.status === 'missing' ? `não encontrad${o}` : d.method === 'trash' ? 'na lixeira' : `excluíd${o}`}</span>`;
 }
 
 /** Situação da exclusão e botão "Excluir" no detalhe de um item. */
-function deletionBlock(r, noun, { active }) {
+function deletionBlock(r, noun, { active, deleting }) {
+  const w = DELETION_WORDS[noun];
   const d = r.deletion;
-  const how = d ? (d.mode === 'auto' ? 'exclusão automática da análise' : `exclusão manual${d.by ? ` por ${d.by}` : ''}`) : '';
+  const how = d ? (d.mode === 'auto' ? `exclusão automática da análise${d.by ? ` iniciada por ${d.by}` : ''}` : `exclusão manual${d.by ? ` por ${d.by}` : ''}`) : '';
+  const where = d?.status === 'deleted' ? (d.note ? ` (${d.note})` : d.method === 'trash' ? ` (movid${w.o} para a lixeira)` : '') : '';
   const status = d
-    ? html`<p class="small ${d.status === 'failed' ? 'danger-text' : ''}"><b>${DELETION_STATUS[d.status] || d.status}</b> em ${fmtDateTime(d.at)}${d.method === 'trash' && d.status === 'deleted' ? ' (movido para a lixeira)' : ''} — ${how}${d.status === 'failed' && d.error ? html`<br />${d.error}` : ''}</p>`
-    : html`<p class="muted small">Não excluído.</p>`;
-  const done = d && d.status !== 'failed';
+    ? html`<p class="small ${d.status === 'failed' ? 'danger-text' : ''}"><b>${deletionLabel(d.status, w.o)}</b> em ${fmtDateTime(d.at)}${where} — ${how}${d.status === 'failed' && d.error ? html`<br />${d.error}` : ''}</p>`
+    : html`<p class="muted small">Não excluíd${w.o}.</p>`;
   let action = '';
-  if (r.canDelete) {
-    action = html`<button type="button" class="btn small danger" data-action="delete-item" data-rid="${r.id}">${icon('trash')} ${d?.status === 'failed' ? 'Tentar excluir de novo' : `Excluir ${noun}`}</button>`;
-  } else if (!done) {
-    action = html`<p class="muted small">${active ? 'A exclusão manual fica disponível ao fim da análise.' : noun === 'arquivo' ? 'Exclusão não permitida neste repositório (ative em Repositórios).' : 'Exclusão não permitida nesta conexão (ative em Caixas de e-mail).'}</p>`;
+  if (deleting.has(r.id) || r.deleting) {
+    action = html`<button type="button" class="btn small danger" disabled>${icon('trash')} Excluindo…</button>`;
+  } else if (r.canDelete) {
+    action = html`<button type="button" class="btn small danger" data-action="delete-item" data-rid="${r.id}">${icon('trash')} ${d && !isGone(d) ? 'Tentar excluir de novo' : `Excluir ${noun}`}</button>`;
+  } else if (!isGone(d)) {
+    action = html`<p class="muted small">${active ? 'A exclusão manual fica disponível ao fim da análise.' : r.deleteBlocked === 'removed' ? w.removed : w.notAllowed}</p>`;
   }
   return html`<h4 class="spaced">Exclusão</h4>${status}${action}`;
 }
@@ -111,6 +140,7 @@ const FILES = {
   descSorts: new Set(['modified', 'occurrences', 'terms', 'size']),
   defaultSort: 'path',
   noun: ['arquivo', 'arquivos'],
+  o: 'o', // gênero: "arquivos excluídos"
   resultsTitle: 'Arquivos com ocorrências',
   views: { terms: 'chart', users: 'chart' }, // forma inicial de exibição de cada gráfico
 
@@ -130,7 +160,7 @@ const FILES = {
       </select>
     </label>
     <label class="field"><span>Extensão</span><select name="extension"><option value="">Todas</option></select></label>
-    ${deletionFilter(filters)}
+    ${deletionFilter(filters, 'o')}
     <label class="field"><span>Ordenar por</span>
       <select name="sort">
         ${[
@@ -209,7 +239,7 @@ const FILES = {
 
   tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Arquivo</th><th>Último usuário</th><th>Modificado em</th><th>Informação encontrada</th></tr>`,
 
-  row: (r) => html`<td><div class="name">${r.name}</div>${deletionChip(r)}<div class="path">${folderOf(r)}</div></td>
+  row: (r) => html`<td><div class="name">${r.name}</div>${deletionChip(r, 'o')}<div class="path">${folderOf(r)}</div></td>
     <td>${r.lastUser ? html`${r.lastUser}<div><span class="chip source">${SOURCE_SHORT[r.lastUserSource]}</span></div>` : html`<span class="muted">não identificado</span>`}</td>
     <td class="nowrap">${fmtDateTime(r.modified)}</td>
     <td><div class="chips">${r.matches.map((m) => html`<span class="chip"><b>${m.term}</b> ${fmtNum(m.count)}× · ${FILE_LOCATION[m.location]}</span>`)}</div></td>`,
@@ -276,6 +306,7 @@ const MAIL = {
   descSorts: new Set(['date', 'occurrences', 'terms', 'size']),
   defaultSort: 'date',
   noun: ['mensagem', 'mensagens'],
+  o: 'a', // gênero: "mensagens excluídas"
   resultsTitle: 'Mensagens com ocorrências',
   views: { terms: 'chart', mailboxes: 'chart', senders: 'chart', locations: 'chart' },
 
@@ -295,7 +326,7 @@ const MAIL = {
         ${Object.entries(LOCATION_TITLES).map(([value, label]) => option(value, label, filters.location))}
       </select>
     </label>
-    ${deletionFilter(filters)}
+    ${deletionFilter(filters, 'a')}
     <label class="field"><span>Ordenar por</span>
       <select name="sort">
         ${[
@@ -412,7 +443,7 @@ const MAIL = {
 
   row: (r) => {
     const files = (r.attachments || []).filter((a) => !a.inline);
-    return html`<td><div class="name">${r.subject || '(sem assunto)'}</div>${deletionChip(r)}<div class="path">${r.mailbox} › ${r.folder}${files.length ? html` · ${plural(files.length, 'anexo', 'anexos')}` : ''}</div></td>
+    return html`<td><div class="name">${r.subject || '(sem assunto)'}</div>${deletionChip(r, 'a')}<div class="path">${r.mailbox} › ${r.folder}${files.length ? html` · ${plural(files.length, 'anexo', 'anexos')}` : ''}</div></td>
       <td>${r.from || html`<span class="muted">sem remetente</span>`}${r.to?.length ? html`<div class="muted small">para ${r.to[0]}${r.to.length > 1 ? ` e mais ${r.to.length - 1}` : ''}</div>` : ''}</td>
       <td class="nowrap">${fmtDateTime(r.date)}</td>
       <td><div class="chips">${r.matches.map((m) => html`<span class="chip"><b>${m.term}</b> ${fmtNum(m.count)}× · ${MAIL_LOCATION[m.location] || m.location}</span>`)}</div></td>`;
@@ -491,6 +522,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   let summary = null;
   let errors = null;
   const expanded = new Set();
+  const deletingNow = new Set(); // itens com exclusão manual em andamento nesta tela
   const chartView = { ...P.views };
   let stopped = false;
   let timer = null;
@@ -592,7 +624,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           <span class="muted small">Os resultados aparecem abaixo conforme são encontrados.</span>
         </div>
         <div class="progress-line" role="progressbar" aria-label="Análise em andamento"></div>
-        <div class="progress-stats">${P.progress(scan.stats || {})}${scan.options?.deleteMatches ? html`<span><b>${fmtNum(scan.stats?.deleted)}</b> excluídos${scan.stats?.deleteErrors ? ` · ${fmtNum(scan.stats.deleteErrors)} com falha` : ''}</span>` : ''}</div>
+        <div class="progress-stats">${P.progress(scan.stats || {})}${scan.options?.deleteMatches ? html`<span><b>${fmtNum(scan.stats?.deleted)}</b> excluíd${P.o}s${scan.stats?.deleteErrors ? ` · ${fmtNum(scan.stats.deleteErrors)} com falha` : ''}</span>` : ''}</div>
         ${scan.current?.path ? html`<div class="current">${scan.current.path}</div>` : ''}
       </section>`,
     );
@@ -600,13 +632,20 @@ export async function render(root, { params, query, isCurrent = () => true }) {
 
   const drawTiles = () => {
     const st = scan.stats || {};
-    // Excluídos: pelas ocorrências registradas (automáticas e manuais) quando o resumo já chegou.
-    const totals = summary?.deletions;
-    const deleted = totals ? totals.deleted + totals.missing : st.deleted || 0;
-    const failed = totals ? totals.failed : st.deleteErrors || 0;
+    // Excluídos: pelo registro de exclusões (automáticas e manuais) quando o resumo já chegou.
+    const t = summary?.deletions || { deleted: st.deleted || 0, missing: st.deleteMissing || 0, changed: st.deleteChanged || 0, failed: st.deleteErrors || 0 };
+    const o = P.o;
+    const detail =
+      [
+        t.missing ? `${fmtNum(t.missing)} já não existia${t.missing > 1 ? 'm' : ''}` : '',
+        t.changed ? `${fmtNum(t.changed)} mantid${o}${t.changed > 1 ? 's' : ''} (alterad${o}${t.changed > 1 ? 's' : ''} depois da análise)` : '',
+        t.failed ? `${fmtNum(t.failed)} com falha` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ') || (scan.options?.deleteMatches ? 'exclusão automática ligada' : 'pelo relatório');
     const tile =
-      scan.options?.deleteMatches || deleted || failed
-        ? html`<div class="tile"><div class="label">Excluídos</div><div class="value">${fmtCompact(deleted)}</div><div class="detail">${failed ? `${fmtNum(failed)} com falha na exclusão` : scan.options?.deleteMatches ? 'exclusão automática ligada' : 'pelo relatório'}</div></div>`
+      scan.options?.deleteMatches || t.deleted || t.missing || t.changed || t.failed
+        ? html`<div class="tile"><div class="label">Excluíd${o}s</div><div class="value">${fmtCompact(t.deleted)}</div><div class="detail">${detail}</div></div>`
         : '';
     paint($('[data-tiles]'), html`${P.tiles(st)}${tile}`);
     $('[data-error-count]').textContent = st.errors ? `(${fmtNum(st.errors)})` : '';
@@ -686,7 +725,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const [one, many] = P.noun;
     const filtered = results.total !== results.totalAll;
     const heading = html`<div class="card-head">
-      <h2>${plural(results.total, one, many)}${filtered ? html` <span class="muted">de ${fmtNum(results.totalAll)}</span>` : ''}</h2>
+      <h2 tabindex="-1">${plural(results.total, one, many)}${filtered ? html` <span class="muted">de ${fmtNum(results.totalAll)}</span>` : ''}</h2>
       ${isActive(scan) ? html`<span class="muted small">atualizando enquanto a análise roda…</span>` : ''}
     </div>`;
     if (results.total === 0) {
@@ -703,12 +742,11 @@ export async function render(root, { params, query, isCurrent = () => true }) {
               ${results.items.map((r) => {
                 const open = expanded.has(r.id);
                 const expandedText = open ? 'true' : 'false';
-                const gone = r.deletion && r.deletion.status !== 'failed';
-                return html`<tr data-id="${r.id}" aria-expanded="${expandedText}" class="${gone ? 'is-deleted' : ''}">
+                return html`<tr data-id="${r.id}" aria-expanded="${expandedText}" class="${isGone(r.deletion) ? 'is-deleted' : ''}">
                     <td><button type="button" class="icon-btn" data-action="toggle" aria-label="${open ? 'Ocultar' : 'Mostrar'} detalhes de ${P.rowLabel(r)}" aria-expanded="${expandedText}"><span class="row-toggle">${icon('chevron')}</span></button></td>
                     ${P.row(r)}
                   </tr>
-                  ${open ? html`<tr class="detail"><td colspan="5">${P.detail(r, { active: isActive(scan) })}</td></tr>` : ''}`;
+                  ${open ? html`<tr class="detail"><td colspan="5">${P.detail(r, { active: isActive(scan), deleting: deletingNow })}</td></tr>` : ''}`;
               })}
             </tbody>
           </table>
@@ -906,6 +944,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     } else if (action === 'clear-filters') {
       filtersForm.elements.q.value = '';
       filtersForm.elements.location.value = '';
+      filtersForm.elements.deletion.value = '';
       filtersForm.elements.sort.value = P.defaultSort;
       applyFilters({ ...Object.fromEntries(P.criteria.map((k) => [k, ''])), sort: '' });
     } else if (action === 'copy') {
@@ -918,17 +957,22 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     } else if (action === 'delete-item') {
       const rid = Number(el.dataset.rid);
       const record = results?.items.find((r) => r.id === rid);
-      if (!record) return;
-      const what = scan.kind === 'mail' ? `a mensagem "${record.subject || '(sem assunto)'}" da caixa ${record.mailbox}` : `o arquivo ${record.path}`;
+      if (!record || deletingNow.has(rid)) return;
+      const mail = scan.kind === 'mail';
+      const what = mail ? `a mensagem "${record.subject || '(sem assunto)'}" da caixa ${record.mailbox}` : `o arquivo ${record.path}`;
       const how =
         record.deleteMethod === 'trash'
-          ? 'Ela será movida para a Lixeira (Itens Excluídos) da caixa.'
+          ? `Ela será movida para ${record.sourceType === 'graph' ? 'a pasta Itens Excluídos' : 'a Lixeira'} da caixa.`
           : record.deleteMethod === 'permanent'
             ? 'A exclusão é definitiva: a mensagem não fica na lixeira do usuário.'
             : 'A exclusão é definitiva: o arquivo não vai para a Lixeira.';
-      if (!(await confirmDialog(`Excluir ${what}? ${how}`, { title: 'Excluir', confirmLabel: 'Excluir' }))) return;
-      el.disabled = true;
-      const send = (force) => post(`/api/scans/${id}/results/${rid}/delete`, { confirm: true, force });
+      if (!(await confirmDialog(`Excluir ${what}? ${how}`, { title: mail ? 'Excluir mensagem' : 'Excluir arquivo', confirmLabel: 'Excluir' }))) return;
+      if (deletingNow.has(rid) || stopped) return;
+      // Enquanto o pedido não termina, o botão fica "Excluindo…" (também se a tabela for redesenhada).
+      deletingNow.add(rid);
+      redraw(root, drawResults);
+      // A forma mostrada na confirmação vai junto: se o cadastro mudou, o servidor recusa (409).
+      const send = (force) => post(`/api/scans/${id}/results/${rid}/delete`, { confirm: true, force, method: record.deleteMethod });
       try {
         let res;
         try {
@@ -939,15 +983,27 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           res = await send(true);
         }
         const d = res.deletion;
+        const noun = mail ? 'A mensagem' : 'O arquivo';
         if (d.status === 'failed') toast(`Não foi possível excluir: ${d.error}`, 'error');
-        else toast(d.status === 'missing' ? 'O item já não existia (registrado como não encontrado).' : 'Excluído.', 'success');
-        scan = await get(`/api/scans/${id}`);
-        drawScan();
-        await loadResults();
+        else if (d.status === 'missing') toast(`${noun} já não existia (registrad${mail ? 'a' : 'o'} como não encontrad${mail ? 'a' : 'o'}).`, 'success');
+        else toast(mail ? 'Mensagem excluída.' : 'Arquivo excluído.', 'success');
       } catch (err) {
-        toast(err.message, 'error');
+        toast(err.status === 409 && err.code === 'method-changed' ? `${err.message} A tela foi atualizada.` : err.message, 'error');
       } finally {
-        if (el.isConnected) el.disabled = false;
+        deletingNow.delete(rid);
+        // Recarrega sempre: o item pode ter sido excluído em outra aba ou a permissão pode ter mudado.
+        try {
+          scan = await get(`/api/scans/${id}`);
+          if (!stopped) drawScan();
+        } catch {
+          // mantém a tela como está
+        }
+        if (!stopped) {
+          await loadResults();
+          // O foco volta para a linha do item (ou para o título da lista, se ela saiu do filtro).
+          const toggle = root.querySelector(`tr[data-id="${rid}"] [data-action="toggle"]`);
+          (toggle || root.querySelector('[data-results] h2'))?.focus();
+        }
       }
     } else if (action === 'cancel') {
       if (!(await confirmDialog('Cancelar esta análise? Os resultados encontrados até agora serão mantidos.', { confirmLabel: 'Cancelar análise' }))) return;

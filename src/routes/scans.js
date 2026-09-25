@@ -159,13 +159,15 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   const deleting = new Set();
   const deletingIn = (scanId) => [...deleting].some((key) => key.startsWith(`${scanId}:`));
 
-  /** Onde cada item pode ser excluído (repositório/conexão com "Permitir exclusão"). */
+  /**
+   * Como cada item pode ser excluído ({ method }) ou por que não pode ({ blocked: 'removed' quando o
+   * repositório/conexão saiu do cadastro, 'not-allowed' sem "Permitir exclusão" }).
+   */
   const deletionTarget = (scan, record) => {
-    if (scan.kind === 'mail') {
-      const source = store.getMailSource(record.sourceId);
-      return source?.allowDelete ? { method: source.deleteMode === 'trash' ? 'trash' : 'permanent' } : null;
-    }
-    return store.getRepository(record.repositoryId)?.allowDelete ? { method: 'file' } : null;
+    const target = scan.kind === 'mail' ? store.getMailSource(record.sourceId) : store.getRepository(record.repositoryId);
+    if (!target) return { blocked: 'removed' };
+    if (!target.allowDelete) return { blocked: 'not-allowed' };
+    return { method: scan.kind !== 'mail' ? 'file' : target.deleteMode === 'trash' ? 'trash' : 'permanent' };
   };
 
   const getScan = (req) => {
@@ -242,9 +244,10 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         const inProgress = deleting.has(`${scan.id}:${r.id}`);
         return {
           ...publicRecord(r),
-          canDelete: Boolean(target) && !gone && !inProgress && !manager.isActive(scan.id),
+          canDelete: Boolean(target.method) && !gone && !inProgress && !manager.isActive(scan.id),
           deleting: inProgress,
-          deleteMethod: target?.method || null,
+          deleteMethod: target.method || null,
+          deleteBlocked: target.blocked || null,
         };
       }),
     });

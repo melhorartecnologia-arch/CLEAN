@@ -154,14 +154,17 @@ export function toast(message, kind = 'info') {
 export function openDialog({ title, body, submitLabel = 'Salvar', cancelLabel = 'Cancelar', wide = false, danger = false, onOpen, onSubmit }) {
   const dialog = document.getElementById('modal');
   dialog.className = wide ? 'wide' : '';
+  // Leitores de tela anunciam o título e o texto ao abrir (importante nas confirmações de exclusão).
+  dialog.setAttribute('aria-labelledby', 'modal-title');
+  dialog.setAttribute('aria-describedby', 'modal-body');
   render(
     dialog,
     html`<form class="dialog" novalidate>
       <header>
-        <h2>${title}</h2>
+        <h2 id="modal-title">${title}</h2>
         <button type="button" class="icon-btn" data-close aria-label="Fechar">${icon('x')}</button>
       </header>
-      <div class="dialog-body">${body}</div>
+      <div class="dialog-body" id="modal-body">${body}</div>
       <div class="dialog-error" hidden></div>
       <footer>
         ${cancelLabel ? html`<button type="button" class="btn" data-close>${cancelLabel}</button>` : ''}
@@ -202,7 +205,8 @@ export function openDialog({ title, body, submitLabel = 'Salvar', cancelLabel = 
     });
     dialog.showModal();
     if (onOpen) onOpen(form);
-    const first = form.querySelector('input, select, textarea');
+    // Foco no primeiro campo; nas confirmações (sem campos), no botão que não faz nada.
+    const first = form.querySelector('input, select, textarea') || form.querySelector('footer [data-close]');
     if (first) first.focus();
   });
 }

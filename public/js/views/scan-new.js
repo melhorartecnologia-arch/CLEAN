@@ -111,12 +111,13 @@ export async function render(root, { ctx }) {
             </label>
             <label class="check">
               <input type="radio" name="action" value="delete" />
-              <span><b>Analisar e excluir automaticamente</b><br /><small class="muted">Todo arquivo em que algum termo for encontrado é excluído, sem confirmação item a item. Só para repositórios com "Permitir exclusão".</small></span>
+              <span><b>Analisar e excluir automaticamente</b><br /><small class="muted">Todo arquivo em que algum termo for encontrado é excluído, sem confirmação item a item (arquivos alterados depois de lidos são mantidos). Só para repositórios com "Permitir exclusão".</small></span>
             </label>
             <div class="alert error" data-delete-confirm hidden>
               ${icon('alert')}
               <div>
                 <b>Exclusão definitiva e sem volta.</b> Arquivos excluídos pela rede não vão para a Lixeira. Confira as listas de referência antes de continuar: tudo o que for encontrado será apagado.
+                <p data-path-warning hidden><b>Atenção:</b> com "Caminho completo", um termo no nome de uma pasta faz todos os arquivos dela (e das subpastas) serem encontrados — e excluídos.</p>
                 <label class="field"><span>Digite EXCLUIR para confirmar</span><input type="text" name="confirmDelete" autocomplete="off" spellcheck="false" /></label>
               </div>
             </div>
@@ -132,9 +133,10 @@ export async function render(root, { ctx }) {
   const form = root.querySelector('[data-form]');
   const submit = form.querySelector('[data-submit]');
   const onChange = (event) => {
-    if (event.target.name !== 'action') return;
+    if (!['action', 'nameTarget', 'checkName'].includes(event.target.name)) return;
     const deleting = form.elements.action.value === 'delete';
     form.querySelector('[data-delete-confirm]').hidden = !deleting;
+    form.querySelector('[data-path-warning]').hidden = !(form.elements.checkName.checked && form.elements.nameTarget.value === 'path');
     submit.className = `btn ${deleting ? 'danger' : 'primary'}`;
     paint(submit, html`${icon('play')} ${deleting ? 'Iniciar análise e exclusão' : 'Iniciar análise'}`);
   };

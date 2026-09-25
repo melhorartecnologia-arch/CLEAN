@@ -175,14 +175,16 @@ function sourceForm(src) {
         <span>Como excluir</span>
         <select name="deleteMode">
           <option value="permanent" ${src?.deleteMode !== 'trash' ? 'selected' : ''}>Excluir definitivamente</option>
-          <option value="trash" ${src?.deleteMode === 'trash' ? 'selected' : ''}>Mover para a Lixeira (Itens Excluídos)</option>
+          <option value="trash" ${src?.deleteMode === 'trash' ? 'selected' : ''}>Mover para a Lixeira (no Outlook, Itens Excluídos)</option>
         </select>
       </label>
       <p class="hint" data-delete-help ${src?.allowDelete ? '' : 'hidden'}>
         Permissões necessárias — <b>Microsoft 365:</b> Mail.ReadWrite (tipo Aplicativo) no lugar de Mail.Read.
         <b>Google Workspace:</b> autorize também o escopo <code>https://mail.google.com/</code> (definitiva) ou
         <code>https://www.googleapis.com/auth/gmail.modify</code> (lixeira) na delegação em todo o domínio.
-        <b>IMAP:</b> a conta precisa poder alterar a caixa. Retenções e bloqueios legais do provedor continuam valendo.
+        <b>IMAP:</b> a conta precisa poder alterar a caixa, e o servidor precisa oferecer UIDPLUS para excluir
+        definitivamente (ou MOVE para mover para a Lixeira) — sem isso, a exclusão é recusada para não apagar outras
+        mensagens. Retenções e bloqueios legais do provedor continuam valendo.
       </p>
     </fieldset>
 

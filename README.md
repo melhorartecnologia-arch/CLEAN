@@ -170,7 +170,8 @@ Faça no **servidor de arquivos** (via GPO ou localmente, como administrador).
 O CLEAN lê os arquivos com a conta do Windows que o executa. Recomenda-se uma conta de domínio
 dedicada (por exemplo `EMPRESA\svc-clean`) com:
 
-- permissão de **leitura** (NTFS e compartilhamento) nas pastas analisadas;
+- permissão de **leitura** (NTFS e compartilhamento) nas pastas analisadas — e de **modificação**
+  só nas pastas em que a exclusão for usada (veja *Exclusão dos itens encontrados*);
 - participação no grupo **Leitores de Log de Eventos** (*Event Log Readers*) de cada servidor de
   arquivos, se usar a auditoria; para consultar outro computador, a regra de firewall
   *Gerenciamento Remoto do Log de Eventos* deve estar habilitada nele.
@@ -211,8 +212,10 @@ o **dono da caixa** em que a mensagem está guardada.
 
 Todas as pastas de cada caixa são percorridas, com as subpastas. O conteúdo dos anexos é lido pelos
 mesmos leitores dos arquivos (Word, Excel, PowerPoint, PDF, OpenDocument, RTF, textos, HTML e nomes
-dentro de .zip), inclusive **mensagens encaminhadas como anexo** (.eml e .msg) e os anexos delas. O
-acesso é **somente leitura**: nenhuma mensagem é alterada, movida ou marcada como lida.
+dentro de .zip), inclusive **mensagens encaminhadas como anexo** (.eml e .msg) e os anexos delas. A
+análise em si é **somente leitura**: nenhuma mensagem é alterada, movida ou marcada como lida. A
+exclusão das mensagens encontradas é opcional e precisa ser liberada em cada conexão (veja
+*Exclusão dos itens encontrados*).
 
 ### Microsoft 365 (Exchange Online)
 
@@ -268,6 +271,9 @@ demais pastas da caixa continuam sendo analisadas.
    ```
    https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly
    ```
+
+   Para usar a exclusão, acrescente `https://mail.google.com/` (exclusão definitiva) ou
+   `https://www.googleapis.com/auth/gmail.modify` (mover para a Lixeira).
 
 4. No CLEAN, em *Nova conexão › Google Workspace*, envie o arquivo JSON e informe o e-mail de um
    **administrador** (usado só para listar os usuários do domínio quando todas as caixas são
@@ -328,20 +334,45 @@ excluído. Há três formas de trabalhar:
 | Modo | Como usar | O que acontece |
 |---|---|---|
 | **Somente analisar** | *Nova análise › O que fazer com os itens encontrados › Somente analisar* (padrão) | Gera o relatório; nada é alterado. |
-| **Analisar e excluir automaticamente** | *Nova análise › Analisar e excluir automaticamente* e digitar **EXCLUIR** para confirmar | Cada item encontrado é excluído durante a análise, sem confirmação item a item. Arquivos: logo depois de registrados no relatório. E-mails: ao fim de cada caixa (para não atrapalhar a leitura das pastas). |
+| **Analisar e excluir automaticamente** | *Nova análise › Analisar e excluir automaticamente* e digitar **EXCLUIR** para confirmar | Cada item encontrado é excluído durante a análise, sem confirmação item a item. Arquivos: depois de registrados no relatório com o último usuário (ao fim de cada repositório ou a cada 200 arquivos). E-mails: ao fim de cada caixa (para não atrapalhar a leitura das pastas). |
 | **Excluir depois, item a item** | No relatório, abra o item e clique em **Excluir arquivo** / **Excluir mensagem** | Exclui só aquele item, depois de uma confirmação. Se o arquivo mudou depois da análise, o CLEAN avisa e pede uma segunda confirmação. |
 
 Salvaguardas:
 
 - a exclusão só funciona nos repositórios e nas conexões de e-mail com **Permitir exclusão**
-  marcado no cadastro (desmarcado por padrão);
-- o modo automático exige digitar **EXCLUIR** ao iniciar a análise; ao **cancelar** a análise, nada
-  mais é excluído;
-- cada exclusão fica registrada: no relatório (situação de cada item, filtro *Exclusão* e o bloco
-  *Excluídos*), no **Registro** da análise (exclusões manuais, com quem excluiu) e na aba
-  **Exclusões** do Excel (quando, o quê, automática ou manual, por quem e o resultado); os arquivos
-  CSV e HTML têm a coluna *Exclusão*;
-- "quem excluiu" é o usuário da autenticação (`AUTH_USER`) ou o endereço de acesso.
+  marcado no cadastro (desmarcado por padrão). A permissão é conferida de novo quando a análise
+  começa (ela pode ter esperado na fila) e, se for desligada durante a análise, nada mais é excluído
+  daquele repositório ou conexão;
+- o modo automático exige digitar **EXCLUIR** ao iniciar a análise. Ao **cancelar**, as exclusões
+  que já estavam em andamento terminam (e ficam registradas) e nenhuma outra começa;
+- **arquivos**: só são excluídos se continuarem iguais ao que foi analisado (mesmo tamanho e data de
+  modificação) — no modo automático, os alterados ficam e aparecem como *alterados depois da
+  análise*; e só dentro da pasta do repositório, conferida pelo caminho real: uma pasta trocada
+  depois da análise por um atalho (link simbólico ou junção) que aponte para fora do repositório
+  impede a exclusão;
+- os arquivos da pasta de dados e da pasta de instalação do CLEAN nunca são excluídos (a pasta de
+  dados nem é analisada); um repositório cadastrado **dentro** de outro, sem *Permitir exclusão*,
+  protege os seus arquivos também quando a análise é feita pelo repositório maior;
+- atenção ao verificar o nome com **Caminho completo**: um termo no nome de uma pasta faz todos os
+  arquivos dela (e das subpastas) serem encontrados — e, no modo automático, excluídos;
+- **e-mails**: vale a forma de exclusão (definitiva ou para a lixeira) que estava no cadastro ao
+  criar a análise — se ela mudar para *lixeira* antes de a análise começar, a lixeira é usada. No
+  relatório, se a forma mudou depois de a página ser aberta, o CLEAN avisa e pede nova confirmação;
+- cada tentativa de exclusão fica registrada: no relatório (situação de cada item, filtro
+  *Exclusão* e o bloco *Excluídos*), no **Registro** da análise (exclusões manuais e falhas), na aba
+  **Exclusões** do Excel (quando, o quê, automática ou manual, por quem e o resultado), no CSV
+  (coluna *Exclusão*) e no HTML (situação abaixo de cada item). Há também um registro geral,
+  **`data\exclusoes.ndjson`** (uma linha por exclusão, com a análise, o item, quando, como, por quem
+  e o resultado), que continua existindo mesmo que o relatório seja excluído;
+- "quem excluiu" é o usuário da autenticação (`AUTH_USER` — uma conta única, compartilhada por quem
+  usa o CLEAN) com o endereço de acesso; atrás de um proxy na mesma máquina (IIS com ARR, por
+  exemplo), o endereço do navegador informado pelo proxy. Nas exclusões automáticas, fica registrado
+  quem iniciou a análise.
+
+Situações de exclusão de cada item: **Excluído**; **Não encontrado** (o item já não existia na hora
+da exclusão — excluído ou movido por outra pessoa); **Não excluído: alterado depois da análise**
+(arquivos, no modo automático); **Falha na exclusão** (com o motivo). O bloco *Excluídos* conta só
+os excluídos de fato; os demais aparecem ao lado.
 
 Como cada tipo é excluído e a permissão necessária:
 
@@ -350,18 +381,23 @@ Como cada tipo é excluído e a permissão necessária:
 | Arquivos (pastas e compartilhamentos) | **Definitiva**: arquivos apagados pela rede não vão para a Lixeira do Windows. Arquivos somente leitura também são excluídos. | A conta do CLEAN precisa de permissão de **modificação** (NTFS e compartilhamento), não só de leitura. |
 | Microsoft 365 | *Excluir definitivamente* (a mensagem vai para a área de expurgo e some para o usuário) ou *Mover para a Lixeira* (Itens Excluídos), conforme a conexão. | **`Mail.ReadWrite`** (tipo Aplicativo) no lugar de `Mail.Read`; com o RBAC para aplicativos, a função `Application Mail.ReadWrite`. |
 | Google Workspace | Definitiva ou para a Lixeira, conforme a conexão. | Na delegação em todo o domínio, inclua o escopo `https://mail.google.com/` (definitiva) ou `https://www.googleapis.com/auth/gmail.modify` (lixeira). |
-| IMAP | Definitiva (marca e expurga só as mensagens encontradas) ou para a pasta Lixeira do servidor. | A conta precisa poder alterar a caixa. |
+| IMAP | *Definitiva*: marca e expurga só as mensagens encontradas (UID EXPUNGE); o servidor precisa oferecer a extensão **UIDPLUS** — sem ela, a exclusão definitiva é recusada, porque um expurgo comum apagaria também as outras mensagens marcadas como excluídas na pasta. *Para a Lixeira*: move para a pasta Lixeira do servidor (MOVE; sem MOVE, copia, confere a cópia e só então expurga, o que também exige UIDPLUS); mensagens que já estão na Lixeira ficam lá. No **Gmail via IMAP**, a exclusão definitiva move para a Lixeira e expurga de lá (expurgar de outra pasta só tiraria o marcador). | A conta precisa poder alterar a caixa. |
 
 Importante:
 
 - **não há como desfazer** a exclusão definitiva pelo CLEAN. Confira as listas de referência e rode
   primeiro *Somente analisar* para ver o que seria excluído;
 - em e-mails, a mensagem inteira é excluída mesmo quando o termo está só em um anexo;
+- antes de excluir uma mensagem por IMAP, o CLEAN confere se ela ainda é a mesma da análise
+  (Message-ID e UIDVALIDITY da pasta) e, depois, se ela de fato saiu da pasta; se o servidor recusar
+  a marcação ou o expurgo, a mensagem é dada como não excluída (e a marcação feita pelo CLEAN é
+  desfeita);
 - retenções, bloqueios de litígio (Microsoft Purview, Google Vault) e backups do provedor ou do
   servidor de arquivos (cópias de sombra, snapshots) continuam valendo: o item pode continuar
   preservado neles, como exige a política da empresa;
 - o Microsoft 365 é acessado com identificadores imutáveis: uma mensagem movida de pasta depois da
-  análise ainda pode ser excluída pelo relatório.
+  análise ainda pode ser excluída pelo relatório. Se a resposta de uma exclusão se perder (falha de
+  rede) e a nova tentativa não encontrar a mensagem, ela é dada como excluída.
 
 ## Executando como serviço
 
@@ -414,9 +450,11 @@ lista, dados pessoais e senhas encontradas. Por isso:
   preferência limitado às caixas analisadas pelo RBAC para aplicativos) e só conceda permissões de
   escrita e marque *Permitir exclusão* onde a exclusão for realmente usada;
 - com a exclusão permitida, qualquer pessoa com acesso à interface pode excluir itens pelo
-  relatório: defina `AUTH_USER`/`AUTH_PASSWORD` para que fique registrado quem excluiu;
-- a interface tem proteção contra CSRF e política de segurança de conteúdo; o CLEAN nunca altera
-  os arquivos analisados, apenas os lê.
+  relatório: defina `AUTH_USER`/`AUTH_PASSWORD` (o registro mostra essa conta, que é única, e o
+  endereço de acesso de quem excluiu);
+- a interface tem proteção contra CSRF e política de segurança de conteúdo. Sem a exclusão
+  (*Somente analisar* ou *Permitir exclusão* desmarcado), o CLEAN apenas lê os arquivos e as
+  mensagens, sem alterá-los.
 
 ## Formatos suportados e limitações
 
