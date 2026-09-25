@@ -280,7 +280,7 @@ export class Store {
     // Mantém em memória apenas as análises consultadas mais recentemente.
     this.resultCache.delete(key);
     this.resultCache.set(key, cache);
-    while (this.resultCache.size > 6) this.resultCache.delete(this.resultCache.keys().next().value);
+    while (this.resultCache.size > 4) this.resultCache.delete(this.resultCache.keys().next().value);
     return cache.records;
   }
 

@@ -20,5 +20,11 @@ export function loadConfig(env = process.env) {
     authUser: env.AUTH_USER || '',
     authPassword: env.AUTH_PASSWORD || '',
     maxConcurrentScans: int(env.MAX_CONCURRENT_SCANS, 1),
+    // Nomes pelos quais o CLEAN pode ser acessado, além de localhost e do nome/IPs da máquina
+    // (ex.: um apelido DNS ou o endereço publicado por um proxy). "*" desativa a verificação.
+    allowedHosts: String(env.ALLOWED_HOSTS || '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean),
   };
 }

@@ -263,12 +263,37 @@ export async function copyText(value) {
   area.remove();
 }
 
+/** Adia a chamada até `ms` sem novas chamadas. A função devolvida tem .cancel(). */
 export function debounce(fn, ms = 300) {
   let timer;
-  return (...args) => {
+  const debounced = (...args) => {
     clearTimeout(timer);
     timer = setTimeout(() => fn(...args), ms);
   };
+  debounced.cancel = () => clearTimeout(timer);
+  return debounced;
+}
+
+function focusKey(el, root) {
+  if (!el || el === document.body || !root.contains(el)) return null;
+  const attrs = ['data-action', 'data-page', 'data-filter-key', 'data-filter-value', 'data-chart-view', 'data-tab', 'name'];
+  let selector = attrs
+    .filter((a) => el.hasAttribute(a))
+    .map((a) => `[${a}="${CSS.escape(el.getAttribute(a))}"]`)
+    .join('');
+  if (!selector) return null;
+  const row = el.closest('tr[data-id]');
+  if (row) selector = `tr[data-id="${CSS.escape(row.dataset.id)}"] ${selector}`;
+  const chart = el.closest('[data-chart]');
+  if (chart) selector = `[data-chart="${CSS.escape(chart.dataset.chart)}"] ${selector}`;
+  return selector;
+}
+
+/** Redesenha um bloco devolvendo o foco ao mesmo controle (ex.: durante atualizações automáticas). */
+export function redraw(root, draw) {
+  const key = focusKey(document.activeElement, root);
+  draw();
+  if (key) root.querySelector(key)?.focus({ preventScroll: true });
 }
 
 export function formData(form) {

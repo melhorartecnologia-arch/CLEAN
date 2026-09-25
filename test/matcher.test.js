@@ -31,7 +31,7 @@ test('termo com acento encontra texto sem acento e espaços variados', () => {
 
 test('texto em forma decomposta (NFD) é normalizado', () => {
   const m = new Matcher([text('café')]);
-  const [hit] = m.match([{ text: 'café com leite' }], 'content');
+  const [hit] = m.match([{ text: 'cafe\u0301 com leite' }], 'content');
   assert.equal(hit.count, 1);
 });
 

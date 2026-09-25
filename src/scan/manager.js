@@ -10,7 +10,8 @@ export class ScanError extends Error {
 }
 
 /** Normaliza as opções recebidas da interface. */
-export function sanitizeOptions(input = {}) {
+export function sanitizeOptions(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) input = {};
   const o = { ...DEFAULT_OPTIONS };
   if (input.checkName !== undefined) o.checkName = Boolean(input.checkName);
   if (input.checkContent !== undefined) o.checkContent = Boolean(input.checkContent);
@@ -38,9 +39,10 @@ export class ScanManager {
     this.queue = [];
   }
 
-  async start({ name, repositoryIds = [], listIds = [], options = {} }) {
-    const repositories = [...new Set(repositoryIds)].map((id) => this.store.getRepository(id));
-    const lists = [...new Set(listIds)].map((id) => this.store.getList(id));
+  async start({ name, repositoryIds, listIds, options } = {}) {
+    const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
+    const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
+    const lists = ids(listIds).map((id) => this.store.getList(id));
     if (repositories.length === 0 || repositories.some((r) => !r)) throw new ScanError('Selecione repositórios válidos.');
     if (lists.length === 0 || lists.some((l) => !l)) throw new ScanError('Selecione listas de referência válidas.');
     const terms = lists.flatMap((list) =>

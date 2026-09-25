@@ -46,30 +46,71 @@ function securityHeaders(req, res, next) {
   next();
 }
 
+/** Nome do host sem a porta ("servidor:3000" -> "servidor", "[::1]:3000" -> "[::1]"). */
+export function hostName(value) {
+  const host = String(value || '').trim().toLowerCase();
+  if (host.startsWith('[')) return host.slice(0, host.indexOf(']') + 1);
+  const colon = host.indexOf(':');
+  return colon === -1 || host.indexOf(':', colon + 1) !== -1 ? host : host.slice(0, colon);
+}
+
+/** localhost, nome e endereços IP desta máquina e os nomes configurados em ALLOWED_HOSTS. */
+export function allowedHostNames(extra = []) {
+  const names = new Set(['localhost', '127.0.0.1', '[::1]', ...extra]);
+  const machine = os.hostname().toLowerCase();
+  names.add(machine);
+  if (process.env.USERDNSDOMAIN) names.add(`${machine}.${process.env.USERDNSDOMAIN.toLowerCase()}`);
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const item of list || []) names.add(item.family === 'IPv6' || item.family === 6 ? `[${item.address.toLowerCase()}]` : item.address);
+  }
+  return names;
+}
+
+/**
+ * Proteção contra "DNS rebinding": uma página de outro site que faça seu domínio apontar para este
+ * servidor chega com um Host desconhecido e é recusada (inclusive nas leituras).
+ */
+function hostGuard(allowed) {
+  if (allowed.has('*')) return (req, res, next) => next();
+  return (req, res, next) => {
+    const host = hostName(req.get('Host'));
+    if (allowed.has(host)) return next();
+    res
+      .status(403)
+      .type('text/plain; charset=utf-8')
+      .send(`Acesso recusado: o endereço "${host}" não está autorizado. Inclua-o em ALLOWED_HOSTS no arquivo .env do CLEAN.`);
+  };
+}
+
 /**
  * Proteção contra CSRF: requisições que alteram dados precisam do cabeçalho X-CLEAN (que um site
- * de terceiros não consegue enviar sem CORS) e, se houver Origin, ele deve ser o próprio servidor.
+ * de terceiros não consegue enviar sem CORS) e, se houver Origin, ele deve ser um endereço autorizado.
  */
-function csrfGuard(req, res, next) {
-  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-  if (req.get('X-CLEAN') !== '1') return next(new HttpError(403, 'Requisição recusada (cabeçalho X-CLEAN ausente).'));
-  const origin = req.get('Origin');
-  if (origin) {
-    let host = null;
-    try {
-      host = new URL(origin).host;
-    } catch {
-      // Origin inválido
+function csrfGuard(allowed) {
+  return (req, res, next) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    if (req.get('X-CLEAN') !== '1') return next(new HttpError(403, 'Requisição recusada (cabeçalho X-CLEAN ausente).'));
+    const origin = req.get('Origin');
+    if (origin) {
+      let host = null;
+      try {
+        host = hostName(new URL(origin).host);
+      } catch {
+        // Origin inválido
+      }
+      const ok = host && (allowed.has('*') || allowed.has(host) || host === hostName(req.get('Host')));
+      if (!ok) return next(new HttpError(403, 'Requisição de outra origem recusada.'));
     }
-    if (host !== req.get('Host')) return next(new HttpError(403, 'Requisição de outra origem recusada.'));
-  }
-  next();
+    next();
+  };
 }
 
 export function createApp({ store, manager, config }) {
   const app = express();
+  const allowed = allowedHostNames(config.allowedHosts || []);
   app.disable('x-powered-by');
   app.set('trust proxy', false);
+  app.use(hostGuard(allowed));
   app.use(securityHeaders);
   if (config.authUser && config.authPassword) app.use(basicAuth(config.authUser, config.authPassword));
 
@@ -79,7 +120,7 @@ export function createApp({ store, manager, config }) {
     res.setHeader('Cache-Control', 'no-store');
     next();
   });
-  api.use(csrfGuard);
+  api.use(csrfGuard(allowed));
 
   api.get('/info', (req, res) => {
     res.json({

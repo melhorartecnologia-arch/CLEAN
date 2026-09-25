@@ -9,8 +9,9 @@ interagiu com cada arquivo**.
   "SALÁRIO") ou expressões regulares, com modelos prontos e validados: CPF, CNPJ (inclusive o novo
   CNPJ alfanumérico), PIS/PASEP, e-mail, telefone, cartão de crédito e "senha em texto".
 - Lê o conteúdo de Word, Excel e PowerPoint (novos e 97-2003), PDF, OpenDocument (LibreOffice),
-  RTF, e-mails do Outlook (.msg), HTML, textos e CSV (UTF-8, UTF-16 e Windows-1252) e os nomes dos
-  arquivos dentro de .zip. Arquivos protegidos por senha são identificados.
+  RTF, e-mails (.msg e .eml), páginas salvas (.mht), HTML, textos e CSV (UTF-8, UTF-16 e
+  Windows-1252) e os nomes dos arquivos dentro de .zip. Arquivos protegidos por senha são
+  identificados.
 - Último usuário a partir de três fontes, da mais precisa para a menos precisa: **log de auditoria
   do Windows** (quem acessou ou alterou por último), **metadados do documento** ("salvo por último
   por") e **proprietário do arquivo (NTFS)**.
@@ -84,7 +85,8 @@ de exemplo. Depois é só iniciar uma análise.
    os trechos com o termo destacado. As exportações respeitam os filtros aplicados:
    - **Excel**: abas *Resumo*, *Arquivos* (um arquivo por linha), *Ocorrências* (um termo por
      linha, com valores e trechos) e *Erros*;
-   - **CSV**: uma linha por arquivo e termo, no padrão do Excel em português (`;` e UTF-8);
+   - **CSV**: uma linha por arquivo, termo e local (nome ou conteúdo), no padrão do Excel em
+     português (`;` e UTF-8);
    - **HTML**: relatório para leitura ou impressão; **JSON**: para integração com outros sistemas.
 
 As análises rodam em segundo plano (é possível fechar o navegador) e podem ser canceladas a qualquer
@@ -183,6 +185,7 @@ projeto (copie o `.env.example`):
 |---|---|---|
 | `PORT` | `3000` | Porta HTTP. |
 | `HOST` | `127.0.0.1` | Endereço de escuta. Use `0.0.0.0` para permitir acesso por outros computadores. |
+| `ALLOWED_HOSTS` | — | Outros nomes de acesso aceitos, separados por vírgula (apelido DNS, endereço do proxy). `localhost`, o nome e os IPs da máquina já são aceitos. |
 | `AUTH_USER` / `AUTH_PASSWORD` | — | Ativa usuário e senha (autenticação HTTP básica) para a interface e a API. |
 | `DATA_DIR` | `data` | Pasta com a configuração (`db.json`) e os resultados de cada análise (`scans\<id>`). |
 | `MAX_CONCURRENT_SCANS` | `1` | Análises simultâneas; as demais aguardam na fila. |
@@ -194,8 +197,11 @@ Os relatórios mostram nomes de arquivos, usuários e **trechos do conteúdo** �
 lista, dados pessoais e senhas encontradas. Por isso:
 
 - por padrão o servidor só aceita conexões do próprio computador (`HOST=127.0.0.1`);
+- só são atendidos pedidos endereçados a nomes conhecidos (localhost, o nome e os IPs da máquina e
+  os de `ALLOWED_HOSTS`), o que bloqueia ataques de *DNS rebinding* vindos de outros sites;
 - ao liberar o acesso pela rede, defina `AUTH_USER` e `AUTH_PASSWORD` e, de preferência, publique o
-  CLEAN atrás de um proxy HTTPS (IIS com URL Rewrite/ARR, por exemplo);
+  CLEAN atrás de um proxy HTTPS (IIS com URL Rewrite/ARR, por exemplo) e inclua o endereço público
+  em `ALLOWED_HOSTS`;
 - proteja a pasta `data` com permissões NTFS restritas (ela guarda os resultados das análises);
 - a interface tem proteção contra CSRF e política de segurança de conteúdo; o CLEAN nunca altera
   os arquivos analisados, apenas os lê.
@@ -209,14 +215,17 @@ lista, dados pessoais e senhas encontradas. Por isso:
 | PowerPoint | .pptx, .pptm, .ppsx, .ppt | Informa o slide (.pptx); inclui anotações. |
 | PDF | .pdf | Informa a página. |
 | OpenDocument | .odt, .ods, .odp | |
-| Outros | .rtf, .msg, .htm/.html, .txt, .csv, .log, .xml, .json e demais textos | Codificação detectada automaticamente. |
-| Compactados | .zip | Apenas os nomes dos arquivos internos. |
+| E-mails e páginas | .msg, .eml, .mht/.mhtml | Assunto, remetente, destinatários, corpo e nomes dos anexos. |
+| Outros | .rtf, .htm/.html, .txt, .csv, .log, .xml, .json e demais textos | Codificação detectada automaticamente. |
+| Compactados | .zip | Apenas os nomes dos arquivos internos (inclusive os criados pelo Explorer do Windows). |
 
 Limitações conhecidas:
 
 - imagens e PDFs digitalizados não são lidos (não há OCR);
 - o conteúdo de arquivos dentro de .zip, .7z, .rar e de caixas de correio .pst/.ost não é analisado;
 - arquivos protegidos por senha têm apenas o nome verificado (aparecem como "Protegido por senha");
+- arquivos danificados ou que demoram demais para ser lidos aparecem na aba **Erros** e a análise
+  continua; expressões regulares muito lentas são interrompidas por arquivo;
 - Word 6/95 e Excel 5/95 têm extração aproximada;
 - a auditoria só cobre o período mantido no log de Segurança e precisa estar habilitada antes;
 - datas e números exportados usam o fuso horário e o formato do servidor.

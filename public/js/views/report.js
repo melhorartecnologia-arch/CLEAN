@@ -16,6 +16,7 @@ import {
   bindTooltips,
   copyText,
   debounce,
+  redraw,
 } from '../ui.js';
 import { replaceQuery } from '../nav.js';
 
@@ -66,6 +67,8 @@ export async function render(root, { params, query }) {
   let timer = null;
   let lastResults = 0;
   let loading = null;
+  const stale = { results: false, errors: false };
+  let lastAnnounced = '';
 
   // ---------- Estrutura fixa (os blocos abaixo são redesenhados separadamente) ----------
   paint(
@@ -107,8 +110,9 @@ export async function render(root, { params, query }) {
           <button type="button" class="btn" data-action="clear-filters">Limpar filtros</button>
         </form>
         <div class="grid-2" data-charts></div>
-        <section class="card" data-results aria-live="polite"></section>
+        <section class="card" data-results></section>
       </div>
+      <p class="sr-only" aria-live="polite" data-live></p>
       <div data-panel="erros" hidden><section class="card" data-errors></section></div>
       <div data-panel="registro" hidden><section class="card" data-log></section></div>`,
   );
@@ -173,7 +177,7 @@ export async function render(root, { params, query }) {
     const st = scan.stats || {};
     paint(
       $('[data-progress]'),
-      html`<section class="card progress-card" aria-live="polite">
+      html`<section class="card progress-card">
         <div class="card-head">
           <h2>${scan.status === 'queued' ? 'Aguardando na fila…' : 'Análise em andamento'}</h2>
           <span class="muted small">Os resultados aparecem abaixo conforme são encontrados.</span>
@@ -471,9 +475,13 @@ export async function render(root, { params, query }) {
       results = res;
       summary = sum;
       if (results.page !== Number(filters.page || 1)) filters.page = results.page > 1 ? String(results.page) : '';
+      stale.results = false;
       drawFilterOptions();
-      drawCharts();
-      drawResults();
+      redraw(root, () => {
+        drawCharts();
+        drawResults();
+      });
+      announce(`${plural(results.total, 'arquivo encontrado', 'arquivos encontrados')}.`);
     } catch (err) {
       if (!stopped) toast(err.message, 'error');
     } finally {
@@ -483,11 +491,22 @@ export async function render(root, { params, query }) {
 
   const loadErrors = async () => {
     try {
-      errors = await get(`/api/scans/${id}/errors?limit=500`);
-      if (!stopped) drawErrors();
+      const latest = await get(`/api/scans/${id}/errors?limit=500`);
+      if (stopped) return;
+      errors = latest;
+      stale.errors = false;
+      drawErrors();
     } catch (err) {
-      toast(err.message, 'error');
+      if (!stopped) toast(err.message, 'error');
     }
+  };
+
+  /** Mensagem curta para leitores de tela (só quando muda). */
+  const announce = (message) => {
+    if (message === lastAnnounced) return;
+    lastAnnounced = message;
+    const live = root.querySelector('[data-live]');
+    if (live) live.textContent = message;
   };
 
   const drawScan = () => {
@@ -507,6 +526,16 @@ export async function render(root, { params, query }) {
       scan = latest;
       drawScan();
       const finished = wasActive && !isActive(scan);
+      if (finished) {
+        // As abas não visíveis serão recarregadas ao serem abertas.
+        stale.results = true;
+        stale.errors = true;
+        announce(`Análise ${scan.status === 'completed' ? 'concluída' : 'encerrada'}.`);
+        toast(scan.status === 'completed' ? 'Análise concluída.' : 'A análise foi encerrada.', scan.status === 'completed' ? 'success' : 'info');
+      } else if (isActive(scan)) {
+        stale.results = true;
+        stale.errors = true;
+      }
       if (tab === 'arquivos' && (finished || Date.now() - lastResults > 4000)) await loadResults();
       if (tab === 'erros' && (finished || scan.stats?.errors !== errors?.total)) await loadErrors();
     } catch {
@@ -516,6 +545,7 @@ export async function render(root, { params, query }) {
   };
 
   const applyFilters = (changes) => {
+    if (stopped) return;
     Object.assign(filters, changes);
     if (!('page' in changes)) filters.page = '';
     syncUrl();
@@ -531,15 +561,15 @@ export async function render(root, { params, query }) {
       tab = tabButton.dataset.tab;
       drawTabs();
       syncUrl();
-      if (tab === 'erros' && !errors) loadErrors();
+      if (tab === 'erros' && (!errors || stale.errors)) loadErrors();
       if (tab === 'registro') drawLog();
-      if (tab === 'arquivos' && !results) loadResults();
+      if (tab === 'arquivos' && (!results || stale.results)) loadResults();
       return;
     }
     const viewButton = event.target.closest('[data-chart-view]');
     if (viewButton) {
       chartView[viewButton.closest('[data-chart]').dataset.chart] = viewButton.dataset.chartView;
-      drawCharts();
+      redraw(root, drawCharts);
       return;
     }
     const bar = event.target.closest('.bar-row[data-filter-key]');
@@ -557,8 +587,7 @@ export async function render(root, { params, query }) {
       const rid = Number(el.closest('tr').dataset.id);
       if (expanded.has(rid)) expanded.delete(rid);
       else expanded.add(rid);
-      drawResults();
-      root.querySelector(`tr[data-id="${rid}"] [data-action="toggle"]`)?.focus();
+      redraw(root, drawResults);
     } else if (action === 'page') {
       applyFilters({ page: el.dataset.page });
       $('[data-results]').scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -596,7 +625,9 @@ export async function render(root, { params, query }) {
     const { name, value } = event.target;
     if (name && name !== 'q' && FILTER_KEYS.includes(name)) applyFilters({ [name]: value });
   };
-  const onSearch = debounce((value) => applyFilters({ q: value.trim() }), 350);
+  const onSearch = debounce((value) => {
+    if (!stopped) applyFilters({ q: value.trim() });
+  }, 350);
   const onInput = (event) => {
     if (event.target.name === 'q') onSearch(event.target.value);
   };
@@ -617,6 +648,7 @@ export async function render(root, { params, query }) {
 
   return () => {
     stopped = true;
+    onSearch.cancel();
     clearTimeout(timer);
     root.removeEventListener('click', onClick);
   };

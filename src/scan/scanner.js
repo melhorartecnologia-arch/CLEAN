@@ -234,14 +234,6 @@ export class Scanner {
       return;
     }
     const { options, matcher } = this;
-    const matches = [];
-    const slowRegex = () => this.error(entry.path, 'Tempo limite ao procurar as expressões regulares neste arquivo (possível retrocesso excessivo); resultado parcial.');
-    if (options.checkName) {
-      const label = options.nameTarget === 'path' ? 'Caminho' : 'Nome do arquivo';
-      const text = options.nameTarget === 'path' ? entry.relativePath : entry.name;
-      matches.push(...matcher.match([{ text, label }], 'name'));
-      if (matcher.timedOut) slowRegex();
-    }
     let content = null;
     if (options.checkContent) {
       content = await withTimeout(
@@ -251,10 +243,19 @@ export class Scanner {
       ).catch((err) => ({ type: path.extname(entry.name).slice(1), status: 'error', segments: [], metadata: {}, note: friendlyError(err) }));
       this.countContent(content, st.size);
       if (content.status === 'error') this.error(entry.path, content.note);
-      matches.push(...matcher.match(content.segments, 'content'));
-      if (matcher.timedOut) slowRegex();
-      content.segments = null;
     }
+    const groups = [];
+    if (options.checkName) {
+      const label = options.nameTarget === 'path' ? 'Caminho' : 'Nome do arquivo';
+      const text = options.nameTarget === 'path' ? entry.relativePath : entry.name;
+      groups.push({ segments: [{ text, label }], location: 'name' });
+    }
+    if (content) groups.push({ segments: content.segments, location: 'content' });
+    const matches = matcher.matchGroups(groups).flat();
+    if (matcher.timedOut) {
+      this.error(entry.path, 'Tempo limite ao procurar as expressões regulares neste arquivo (possível retrocesso excessivo); resultado parcial.');
+    }
+    if (content) content.segments = null;
     if (matches.length === 0) return;
 
     if (!content || content.status === 'skipped-size') {

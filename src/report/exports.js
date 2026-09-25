@@ -1,5 +1,7 @@
-// Exportação dos relatórios: Excel (.xlsx), CSV (padrão Excel pt-BR) e HTML para impressão.
-import { buildXlsx, columnName } from './xlsx.js';
+// Exportação dos relatórios: Excel (.xlsx), CSV (padrão Excel pt-BR), HTML para impressão e JSON.
+// Tudo é gravado em fluxo contínuo na resposta, para suportar análises com muitos resultados.
+import { once } from 'node:events';
+import { writeXlsx } from './xlsx.js';
 import {
   summarize,
   sampleText,
@@ -135,7 +137,20 @@ function scanInfoRows(scan) {
   ];
 }
 
-export function exportXlsx(scan, records, errors = []) {
+/** Grava textos em `out` respeitando o controle de fluxo (espera o "drain" quando necessário). */
+async function writeAll(out, chunks) {
+  let buffer = '';
+  for (const chunk of chunks) {
+    buffer += chunk;
+    if (buffer.length >= 64 * 1024) {
+      if (!out.write(buffer)) await once(out, 'drain');
+      buffer = '';
+    }
+  }
+  if (buffer) out.write(buffer);
+}
+
+export async function exportXlsx(scan, records, errors, out) {
   const sorted = sortRecords(records);
   const summary = summarize(sorted);
 
@@ -149,37 +164,50 @@ export function exportXlsx(scan, records, errors = []) {
     resumo.push([u.user, sources, u.files, u.occurrences]);
   }
 
-  const fileRows = [FILE_COLUMNS.map(([h]) => ({ v: h, s: 'header' })), ...sorted.map(fileRow)];
-  const matchRowsAll = [MATCH_COLUMNS.map(([h]) => ({ v: h, s: 'header' })), ...sorted.flatMap(matchRows)];
   const sheets = [
     { name: 'Resumo', cols: [30, 50, 12, 12], rows: resumo },
     {
       name: 'Arquivos',
       cols: FILE_COLUMNS.map(([, w]) => w),
-      rows: fileRows,
-      freezeRow: 1,
-      autoFilter: `A1:${columnName(FILE_COLUMNS.length - 1)}${fileRows.length}`,
+      header: FILE_COLUMNS.map(([h]) => h),
+      rows: (function* () {
+        for (const r of sorted) yield fileRow(r);
+      })(),
     },
     {
       name: 'Ocorrências',
       cols: MATCH_COLUMNS.map(([, w]) => w),
-      rows: matchRowsAll,
-      freezeRow: 1,
-      autoFilter: `A1:${columnName(MATCH_COLUMNS.length - 1)}${matchRowsAll.length}`,
+      header: MATCH_COLUMNS.map(([h]) => h),
+      rows: (function* () {
+        for (const r of sorted) yield* matchRows(r);
+      })(),
     },
   ];
   if (errors.length) {
-    const rows = [[{ v: 'Caminho', s: 'header' }, { v: 'Erro', s: 'header' }, { v: 'Quando', s: 'header' }], ...errors.map((e) => [e.path, e.message, toDate(e.time)])];
-    sheets.push({ name: 'Erros', cols: [70, 50, 17], rows, freezeRow: 1, autoFilter: `A1:C${rows.length}` });
+    sheets.push({
+      name: 'Erros',
+      cols: [70, 50, 17],
+      header: ['Caminho', 'Erro', 'Quando'],
+      rows: (function* () {
+        for (const e of errors) yield [e.path, e.message, toDate(e.time)];
+      })(),
+    });
   }
-  return buildXlsx(sheets, { title: `Relatório CLEAN – ${scan.name}` });
+  await writeXlsx(sheets, out, { title: `Relatório CLEAN – ${scan.name}` });
 }
 
 // -- CSV -----------------------------------------------------------------------------------------
 
+/** Data e hora no formato do Excel em português, sem vírgula (reconhecida como data ao abrir). */
+function csvDate(date) {
+  if (Number.isNaN(date.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(date.getDate())}/${p(date.getMonth() + 1)}/${date.getFullYear()} ${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
+}
+
 function csvCell(value) {
   if (value === null || value === undefined) return '';
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : value.toLocaleString('pt-BR');
+  if (value instanceof Date) return csvDate(value);
   if (typeof value === 'number') return String(value).replace('.', ',');
   let text = String(value);
   // Evita que o Excel interprete o conteúdo como fórmula (injeção de CSV).
@@ -188,15 +216,39 @@ function csvCell(value) {
   return text;
 }
 
-/** CSV com uma linha por arquivo e termo (separador ";" e BOM UTF-8, como o Excel em português espera). */
-export function exportCsv(records) {
+/**
+ * CSV com uma linha por arquivo, termo e local (nome ou conteúdo), separador ";" e BOM UTF-8,
+ * como o Excel em português espera.
+ */
+export async function exportCsv(records, out) {
   const header = [...MATCH_COLUMNS.map(([h]) => h), 'Fonte do último usuário', 'Proprietário (NTFS)', 'Salvo por último por (metadados)', 'Último acesso (auditoria)'];
-  const lines = [header.map(csvCell).join(';')];
-  for (const r of sortRecords(records)) {
-    const extra = [SOURCE_LABELS[r.lastUserSource] || '', r.owner || '', r.metadata?.lastModifiedBy || '', auditText(r.audit)];
-    for (const row of matchRows(r)) lines.push([...row, ...extra].map(csvCell).join(';'));
-  }
-  return `\uFEFF${lines.join('\r\n')}\r\n`;
+  await writeAll(
+    out,
+    (function* () {
+      yield `\uFEFF${header.map(csvCell).join(';')}\r\n`;
+      for (const r of sortRecords(records)) {
+        const extra = [SOURCE_LABELS[r.lastUserSource] || '', r.owner || '', r.metadata?.lastModifiedBy || '', auditText(r.audit)];
+        for (const row of matchRows(r)) yield `${[...row, ...extra].map(csvCell).join(';')}\r\n`;
+      }
+    })(),
+  );
+}
+
+/** JSON com os dados da análise e todos os resultados. */
+export async function exportJson(scan, records, out) {
+  await writeAll(
+    out,
+    (function* () {
+      yield `{"scan":${JSON.stringify(scan)},"results":[`;
+      let first = true;
+      for (const r of records) {
+        const { _search, ...rest } = r;
+        yield `${first ? '' : ','}\n${JSON.stringify(rest)}`;
+        first = false;
+      }
+      yield '\n]}\n';
+    })(),
+  );
 }
 
 // -- HTML ----------------------------------------------------------------------------------------
@@ -223,7 +275,7 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .sample{font-size:12px;color:var(--muted);margin:2px 0}.sample mark{background:var(--mark);color:var(--ink)}
 @media print{body{margin:0}h2{break-after:avoid}tr{break-inside:avoid}}`;
 
-export function exportHtml(scan, records) {
+export async function exportHtml(scan, records, out) {
   const sorted = sortRecords(records);
   const summary = summarize(sorted);
   const info = scanInfoRows(scan)
@@ -237,20 +289,24 @@ export function exportHtml(scan, records) {
     .join('');
   const sample = (s) =>
     s ? `<div class="sample">${s.where ? `<b>${escapeHtml(s.where)}:</b> ` : ''}${escapeHtml(s.before)}<mark>${escapeHtml(s.match)}</mark>${escapeHtml(s.after)}</div>` : '';
-  const rows = sorted
-    .map((r) => {
-      const found = r.matches
-        .map((m) => `<div><span class="term">${escapeHtml(m.term)}</span> ${escapeHtml(LOCATION_LABELS[m.location])} · ${m.count}×${m.samples.map(sample).join('')}</div>`)
-        .join('');
-      const user = r.lastUser ? `${escapeHtml(r.lastUser)}<div class="muted">${escapeHtml(SOURCE_LABELS[r.lastUserSource] || '')}</div>` : '<span class="muted">não identificado</span>';
-      return `<tr><td><b>${escapeHtml(r.name)}</b><div class="path">${escapeHtml(r.path)}</div></td><td>${user}</td><td>${escapeHtml(formatDateTime(r.modified))}</td><td>${found}</td></tr>`;
-    })
-    .join('');
-  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(`Relatório CLEAN – ${scan.name}`)}</title><style>${REPORT_CSS}</style></head><body>
+  const row = (r) => {
+    const found = r.matches
+      .map((m) => `<div><span class="term">${escapeHtml(m.term)}</span> ${escapeHtml(LOCATION_LABELS[m.location])} · ${m.count}×${m.samples.map(sample).join('')}</div>`)
+      .join('');
+    const user = r.lastUser ? `${escapeHtml(r.lastUser)}<div class="muted">${escapeHtml(SOURCE_LABELS[r.lastUserSource] || '')}</div>` : '<span class="muted">não identificado</span>';
+    return `<tr><td><b>${escapeHtml(r.name)}</b><div class="path">${escapeHtml(r.path)}</div></td><td>${user}</td><td>${escapeHtml(formatDateTime(r.modified))}</td><td>${found}</td></tr>`;
+  };
+  await writeAll(
+    out,
+    (function* () {
+      yield `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(`Relatório CLEAN – ${scan.name}`)}</title><style>${REPORT_CSS}</style></head><body>
 <h1>Relatório CLEAN</h1><div class="muted">${escapeHtml(scan.name)} · gerado em ${escapeHtml(new Date().toLocaleString('pt-BR'))}</div>
 <h2>Resumo</h2><table class="info">${info}</table>
 <h2>Termos encontrados</h2><table><thead><tr><th>Termo</th><th>Lista</th><th class="num">Arquivos</th><th class="num">Ocorrências</th></tr></thead><tbody>${terms}</tbody></table>
 <h2>Últimos usuários</h2><table><thead><tr><th>Usuário</th><th class="num">Arquivos</th><th class="num">Ocorrências</th></tr></thead><tbody>${users}</tbody></table>
-<h2>Arquivos com ocorrências (${sorted.length})</h2><table><thead><tr><th>Arquivo</th><th>Último usuário</th><th>Modificado em</th><th>Informação encontrada</th></tr></thead><tbody>${rows}</tbody></table>
-</body></html>`;
+<h2>Arquivos com ocorrências (${sorted.length})</h2><table><thead><tr><th>Arquivo</th><th>Último usuário</th><th>Modificado em</th><th>Informação encontrada</th></tr></thead><tbody>`;
+      for (const r of sorted) yield row(r);
+      yield '</tbody></table>\n</body></html>';
+    })(),
+  );
 }

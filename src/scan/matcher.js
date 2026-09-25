@@ -212,14 +212,27 @@ export class Matcher {
    * Retorna [{ termId, term, list, kind, location, count, values, samples, truncated }].
    */
   match(segments, location) {
-    const hits = new Map();
+    return this.matchGroups([{ segments, location }])[0];
+  }
+
+  /**
+   * Procura em vários grupos de trechos (ex.: nome e conteúdo do mesmo arquivo) de uma vez: as
+   * expressões regulares de todos os grupos rodam numa única execução protegida por tempo limite.
+   * Retorna uma lista de ocorrências por grupo.
+   */
+  matchGroups(groups) {
+    const results = [];
     const prepared = [];
-    for (const segment of segments) {
-      if (!segment || !segment.text) continue;
-      const text = segment.text.normalize('NFC');
-      const record = this.#recorder(text, segment, location, hits);
-      prepared.push({ text, record });
-      this.#matchTexts(text, record);
+    for (const { segments, location } of groups) {
+      const hits = new Map();
+      results.push(hits);
+      for (const segment of segments || []) {
+        if (!segment || !segment.text) continue;
+        const text = segment.text.normalize('NFC');
+        const record = this.#recorder(text, segment, location, hits);
+        prepared.push({ text, record });
+        this.#matchTexts(text, record);
+      }
     }
     this.timedOut = false;
     if (this.regexes.length && prepared.length) {
@@ -237,7 +250,7 @@ export class Matcher {
         run();
       }
     }
-    return [...hits.values()].map((hit) => ({ ...hit, values: [...hit.values] }));
+    return results.map((hits) => [...hits.values()].map((hit) => ({ ...hit, values: [...hit.values] })));
   }
 
   /** Função que registra uma ocorrência (contagem, valores distintos e exemplos com contexto). */

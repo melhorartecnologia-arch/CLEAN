@@ -49,6 +49,9 @@ const SORTERS = {
   lastUser: (a, b) => String(a.lastUser || '').localeCompare(String(b.lastUser || ''), 'pt-BR'),
 };
 
+/** Parâmetros de filtro aceitos pela API (os demais são ignorados). */
+export const FILTER_KEYS = ['q', 'term', 'user', 'repository', 'location', 'extension', 'status', 'sort', 'dir', 'page'];
+
 /**
  * Filtra e ordena os registros.
  * filters: { q, term, user, repository, location, extension, status, sort, dir }
@@ -65,7 +68,7 @@ export function filterRecords(records, filters = {}) {
     if (q && !haystack(r).includes(q)) return false;
     return true;
   });
-  const sorter = SORTERS[filters.sort] || SORTERS.path;
+  const sorter = Object.hasOwn(SORTERS, filters.sort || '') ? SORTERS[filters.sort] : SORTERS.path;
   out = out.slice().sort(sorter);
   if (filters.dir === 'desc') out.reverse();
   return out;

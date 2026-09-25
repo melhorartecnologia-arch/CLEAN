@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { unzipSync, strFromU8 } from 'fflate';
@@ -202,4 +203,45 @@ test('autenticação básica quando configurada', async () => {
   } finally {
     srv.close();
   }
+});
+
+test('recusa hosts desconhecidos (DNS rebinding) e aceita os configurados', async () => {
+  const { srv, url } = await startServer({ allowedHosts: ['clean.empresa.local'] });
+  const port = new URL(url).port;
+  const request = (host, extra = {}) =>
+    new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/api/info', headers: { Host: host, ...extra.headers }, method: extra.method || 'GET' }, (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('error', reject);
+      req.end(extra.body);
+    });
+  try {
+    assert.equal(await request(`atacante.example:${port}`), 403);
+    assert.equal(await request(`localhost:${port}`), 200);
+    assert.equal(await request(`clean.empresa.local`), 200);
+    assert.equal(await request(`${os.hostname()}:${port}`), 200);
+    // Proxy que reescreve o Host: vale o Origin autorizado
+    const viaProxy = await fetch(`${url}/api/lists`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CLEAN': '1', Origin: 'https://clean.empresa.local' },
+      body: JSON.stringify({ name: 'via proxy', terms: [] }),
+    });
+    assert.equal(viaProxy.status, 201);
+  } finally {
+    srv.close();
+  }
+});
+
+test('entradas inválidas geram 400, não erro interno', async () => {
+  for (const body of [{ options: null }, { repositoryIds: 5, listIds: 'x' }, { repositoryIds: [{}], listIds: [null] }]) {
+    const r = await api('POST', '/api/scans', body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+  }
+  const scan = store.createScan({ name: 'vazia', status: 'completed' });
+  for (const sort of ['__proto__', 'hasOwnProperty', 'valueOf']) {
+    assert.equal((await api('GET', `/api/scans/${scan.id}/results?sort=${sort}`)).status, 200);
+  }
+  assert.equal((await api('GET', `/api/scans/${scan.id}/results?term=a&term=b`)).status, 200);
 });

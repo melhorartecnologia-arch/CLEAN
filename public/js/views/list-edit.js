@@ -9,7 +9,7 @@ const PAGE_SIZE = 100;
 function fold(value) {
   return String(value || '')
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
@@ -34,25 +34,36 @@ function firstCsvCell(line, sep) {
   return out;
 }
 
-/** Lê um .txt (um termo por linha) ou .csv (primeira coluna), em UTF-8 ou Windows-1252. */
-async function readTermsFile(file) {
-  const buf = await file.arrayBuffer();
-  let text;
+/** Codificação de um arquivo de texto: UTF-16 (com ou sem BOM), UTF-8 ou Windows-1252. */
+function decodeFile(buf) {
+  const bytes = new Uint8Array(buf);
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+  const sample = bytes.subarray(0, Math.min(bytes.length, 4096));
+  let oddZeros = 0;
+  for (let i = 1; i < sample.length; i += 2) if (sample[i] === 0) oddZeros++;
+  if (sample.length >= 8 && oddZeros / (sample.length / 2) > 0.3) return new TextDecoder('utf-16le').decode(bytes);
   try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch {
-    text = new TextDecoder('windows-1252').decode(buf);
+    return new TextDecoder('windows-1252').decode(bytes);
   }
-  let lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
+}
+
+/** Lê um .txt (um termo por linha) ou .csv (primeira coluna) — ex.: "Texto Unicode" do Excel. */
+async function readTermsFile(file) {
+  let text = decodeFile(await file.arrayBuffer());
+  let lines = text.replace(/^\uFEFF/, '').replace(/\0/g, '').split(/\r?\n/);
   if (/\.csv$/i.test(file.name)) {
     const first = lines.find((l) => l.trim()) || '';
-    const sep = (first.match(/;/g) || []).length >= (first.match(/,/g) || []).length ? ';' : ',';
+    const count = (ch) => first.split(ch).length - 1;
+    const sep = count('\t') > count(';') && count('\t') > count(',') ? '\t' : count(';') >= count(',') ? ';' : ',';
     lines = lines.map((l) => firstCsvCell(l, sep));
   }
   return lines.map((l) => l.trim()).filter(Boolean);
 }
 
-export async function render(root, { params, ctx }) {
+export async function render(root, { params, ctx, setLeaveGuard }) {
   const id = params[0];
   const list = id ? await get(`/api/lists/${id}`) : { name: '', description: '', terms: [] };
   const validators = ctx.info.validators || {};
@@ -280,11 +291,7 @@ export async function render(root, { params, ctx }) {
     if (!el) return;
     const action = el.dataset.action;
     if (action === 'save') return save();
-    if (action === 'back') {
-      if (dirty && !(await confirmDialog('Há alterações não salvas. Sair mesmo assim?', { confirmLabel: 'Sair sem salvar' }))) return;
-      dirty = false;
-      return go('/listas');
-    }
+    if (action === 'back') return go('/listas'); // o aviso de alterações não salvas fica no roteador
     if (action === 'add') {
       list.terms.push({ type: 'text', value: '', wholeWord: false, validator: null, label: '' });
       markDirty();
@@ -384,7 +391,10 @@ export async function render(root, { params, ctx }) {
   root.addEventListener('change', onChange);
   root.addEventListener('input', onInput);
   window.addEventListener('beforeunload', beforeUnload);
+  // Menu lateral, botão Voltar do navegador etc.: pergunta antes de descartar alterações.
+  setLeaveGuard?.(async () => !dirty || confirmDialog('Há alterações não salvas nesta lista. Sair mesmo assim?', { title: 'Alterações não salvas', confirmLabel: 'Sair sem salvar' }));
   return () => {
+    filterTerms.cancel();
     root.removeEventListener('click', onClick);
     root.removeEventListener('change', onChange);
     root.removeEventListener('input', onInput);
