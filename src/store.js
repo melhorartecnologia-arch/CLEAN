@@ -14,12 +14,11 @@ function now() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Renomeia com novas tentativas (no Windows, antivírus e indexação bloqueiam arquivos por instantes). */
-async function renameWithRetry(from, to) {
+/** Repete a operação quando o arquivo está bloqueado (no Windows, antivírus e indexação bloqueiam arquivos por instantes). */
+async function withRetry(operation) {
   for (let attempt = 0; ; attempt++) {
     try {
-      await fs.rename(from, to);
-      return;
+      return await operation();
     } catch (err) {
       if (attempt >= 8 || !['EPERM', 'EACCES', 'EBUSY'].includes(err.code)) throw err;
       await sleep(50 * (attempt + 1));
@@ -27,11 +26,15 @@ async function renameWithRetry(from, to) {
   }
 }
 
+const renameWithRetry = (from, to) => withRetry(() => fs.rename(from, to));
+
 export class Store {
   constructor(dataDir) {
     this.dataDir = path.resolve(dataDir);
     this.dbFile = path.join(this.dataDir, 'db.json');
     this.scansDir = path.join(this.dataDir, 'scans');
+    // Registro geral de exclusões: continua existindo mesmo que o relatório da análise seja excluído.
+    this.deletionLog = path.join(this.dataDir, 'exclusoes.ndjson');
     this.db = null;
     this.saveChain = Promise.resolve();
     this.saveTimer = null;
@@ -233,15 +236,23 @@ export class Store {
     return JSON.parse(await fs.readFile(path.join(this.scanDir(id), 'config.json'), 'utf8'));
   }
 
-  #append(id, file, items) {
-    const target = path.join(this.scanDir(id), file);
+  /**
+   * Acrescenta linhas a um arquivo NDJSON, em ordem. Com strict, uma falha de gravação é devolvida a
+   * quem chamou (registro de exclusões); sem, ela só é informada no console.
+   */
+  #appendTo(target, items, { strict = false } = {}) {
     const data = `${items.map((item) => JSON.stringify(item)).join('\n')}\n`;
-    const chain = (this.appendChains.get(target) || Promise.resolve())
-      .then(() => fs.mkdir(this.scanDir(id), { recursive: true }))
-      .then(() => fs.appendFile(target, data, 'utf8'))
-      .catch((err) => console.error(`[CLEAN] Falha ao gravar ${target}:`, err.message));
-    this.appendChains.set(target, chain);
-    return chain;
+    const run = (this.appendChains.get(target) || Promise.resolve()).then(async () => {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await withRetry(() => fs.appendFile(target, data, 'utf8'));
+    });
+    const settled = run.catch((err) => console.error(`[CLEAN] Falha ao gravar ${target}:`, err.message));
+    this.appendChains.set(target, settled);
+    return strict ? run : settled;
+  }
+
+  #append(id, file, items, options) {
+    return this.#appendTo(path.join(this.scanDir(id), file), items, options);
   }
 
   appendResults(id, records) {
@@ -252,9 +263,16 @@ export class Store {
     return this.#append(id, 'errors.ndjson', errors);
   }
 
-  /** Registro das exclusões (automáticas e manuais) dos itens de uma análise. */
-  appendDeletions(id, items) {
-    return this.#append(id, 'deletions.ndjson', items);
+  /**
+   * Registro das exclusões (automáticas e manuais) dos itens de uma análise, copiado também para o
+   * registro geral (data/exclusoes.ndjson). A promessa é rejeitada se a gravação falhar.
+   */
+  async appendDeletions(id, items) {
+    const scanName = this.getScan(id)?.name || '';
+    await Promise.all([
+      this.#append(id, 'deletions.ndjson', items, { strict: true }),
+      this.#appendTo(this.deletionLog, items.map((item) => ({ scanId: id, scanName, ...item })), { strict: true }),
+    ]);
   }
 
   /** Aguarda a gravação pendente dos arquivos de uma análise. */

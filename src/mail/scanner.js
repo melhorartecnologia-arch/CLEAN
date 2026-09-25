@@ -2,7 +2,7 @@
 // procura os termos no assunto, no corpo, nos nomes e no conteúdo dos anexos. O relatório traz
 // apenas as mensagens com ocorrências, com remetente, destinatários, pasta e data.
 import { Matcher } from '../scan/matcher.js';
-import { createGuard } from '../scan/scanner.js';
+import { createGuard, countDeletion } from '../scan/scanner.js';
 import { extractMessage, DEFAULT_LIMITS } from '../scan/extractors/index.js';
 import { formatAddress } from '../scan/extractors/mime.js';
 import { friendlyError, withTimeout } from '../scan/errors.js';
@@ -49,7 +49,9 @@ export function newMailStats(sourcesTotal = 0) {
     attachmentsErrors: 0,
     bytesDownloaded: 0,
     errors: 0,
-    deleted: 0,
+    deleted: 0, // excluídas na análise ("analisar e excluir")
+    deleteMissing: 0, // já não existiam na hora da exclusão
+    deleteChanged: 0,
     deleteErrors: 0,
   };
 }
@@ -82,11 +84,22 @@ export class MailScanner {
     this.limits = { ...DEFAULT_LIMITS, maxBytes: this.maxBytes };
     this.messageTimeoutMs = config.messageTimeoutMs || MESSAGE_TIMEOUT;
     this.since = validDate(this.options.receivedAfter);
+    this.deletedBy = config.startedBy || null; // quem iniciou a análise com exclusão automática
   }
 
   cancel() {
     this.cancelled = true;
     this.abort.abort(new Error('Análise cancelada.'));
+  }
+
+  /** A exclusão foi desligada no cadastro durante a análise: nada mais é excluído daquela conexão. */
+  revokeDeletion({ kind, id, reason }) {
+    if (kind !== 'mail') return;
+    for (const source of this.sources) {
+      if (source.id !== id || !source.allowDelete) continue;
+      source.allowDelete = false;
+      if (this.options.deleteMatches) this.log('warn', `Exclusão automática desativada para "${source.name}": ${reason || 'o cadastro da conexão foi alterado'}.`);
+    }
   }
 
   log(level, message) {
@@ -217,37 +230,50 @@ export class MailScanner {
     }
   }
 
+  /**
+   * Exclusão automática das mensagens encontradas em uma caixa (ao fim dela). Cada resultado é
+   * registrado assim que o servidor responde; ao cancelar, as exclusões em andamento terminam (e são
+   * registradas) e as demais não começam.
+   */
   async deleteMessages(connector, source, mailbox, pending) {
     const method = source.deleteMode === 'trash' ? 'trash' : 'permanent';
+    this.flushResults(); // os registros chegam antes dos eventos de exclusão
     this.current = { source: source.name, mailbox: mailbox.address, folder: null, path: `${mailbox.address} › excluindo ${pending.length} mensagem(ns)` };
     this.progress(true);
     this.log('info', `Caixa ${mailbox.address}: excluindo ${pending.length} mensagem(ns) ${method === 'trash' ? '(movendo para a lixeira)' : '(definitivamente)'}.`);
-    let results = new Map();
-    let failure = null;
-    if (!source.allowDelete) {
-      failure = 'A exclusão não está permitida nesta conexão.';
-    } else {
+    // A mesma mensagem pode aparecer duas vezes (ex.: movida durante a listagem): uma exclusão só.
+    const byId = new Map();
+    for (const p of pending) byId.set(p.messageId, [...(byId.get(p.messageId) || []), p]);
+    const record = (messageId, r) => {
+      const list = byId.get(messageId);
+      if (!list) return;
+      byId.delete(messageId);
+      const status = r.ok ? 'deleted' : r.missing ? 'missing' : 'failed';
+      const items = list.map((p) => {
+        countDeletion(this.stats, status);
+        if (status === 'failed') this.error(`${mailbox.address} › ${p.folder}`, `Falha ao excluir a mensagem "${p.subject || '(sem assunto)'}": ${r.error}`);
+        const item = `${mailbox.address} › ${p.folder} › ${p.subject || '(sem assunto)'}`;
+        return deletionEvent(p.recordId, { status, error: r.ok ? null : r.error, note: r.note }, { mode: 'auto', method, by: this.deletedBy, item });
+      });
+      this.emit({ type: 'deletions', items });
+      this.progress();
+    };
+    let failure = source.allowDelete ? null : 'A exclusão não está permitida nesta conexão.';
+    if (!failure) {
       try {
-        results = await connector.deleteMessages(mailbox, pending.map((p) => p.messageId), method);
+        const items = [...byId].map(([id, list]) => ({ id, messageId: list[0].internetMessageId }));
+        await connector.deleteMessages(mailbox, items, method, { signal: null, onResult: record, shouldStop: () => this.cancelled || !source.allowDelete });
       } catch (err) {
-        if (this.cancelled) return;
         failure = friendlyError(err);
         this.log('error', `Falha ao excluir mensagens da caixa ${mailbox.address}: ${failure}`);
       }
     }
-    const items = pending.map((p) => {
-      const r = results.get(p.messageId) || { ok: false, error: failure || 'O servidor não confirmou a exclusão.' };
-      const status = r.ok ? 'deleted' : r.missing ? 'missing' : 'failed';
-      if (status === 'failed') {
-        this.stats.deleteErrors++;
-        this.error(`${mailbox.address} › ${p.folder}`, `Falha ao excluir a mensagem "${p.subject || '(sem assunto)'}": ${r.error}`);
-      } else {
-        this.stats.deleted++;
-      }
-      return deletionEvent(p.recordId, { status, error: r.ok ? null : r.error }, { mode: 'auto', method, by: 'análise automática' });
-    });
-    this.flushResults(); // os registros chegam antes dos eventos de exclusão
-    this.emit({ type: 'deletions', items });
+    if (this.cancelled) {
+      if (byId.size) this.log('warn', `Cancelado: ${byId.size} mensagem(ns) da caixa ${mailbox.address} não foram excluídas.`);
+      return;
+    }
+    if (!failure && !source.allowDelete) failure = 'A exclusão foi desativada no cadastro da conexão durante a análise.';
+    for (const id of [...byId.keys()]) record(id, { ok: false, error: failure || 'O servidor não confirmou a exclusão.' });
     this.progress(true);
   }
 
@@ -374,7 +400,9 @@ export class MailScanner {
         terms: [...new Set(matches.map((m) => m.term))],
         matches,
       });
-      if (options.deleteMatches) this.pendingDeletes.push({ recordId: this.seq, messageId: item.id, folder: item.folder, subject: message.subject });
+      if (options.deleteMatches) {
+        this.pendingDeletes.push({ recordId: this.seq, messageId: item.id, internetMessageId: message.messageId, folder: item.folder, subject: message.subject });
+      }
       if (this.pendingResults.length >= 50) this.flushResults();
     } finally {
       this.inFlight.delete(key);

@@ -117,7 +117,8 @@ export function createApp({ store, manager, config }) {
   const app = express();
   const allowed = allowedHostNames(config.allowedHosts || []);
   app.disable('x-powered-by');
-  app.set('trust proxy', false);
+  // Endereço do navegador informado por um proxy na mesma máquina (IIS/ARR), registrado nas exclusões.
+  app.set('trust proxy', 'loopback');
   app.use(hostGuard(allowed));
   app.use(securityHeaders);
   if (config.authUser && config.authPassword) app.use(basicAuth(config.authUser, config.authPassword));
@@ -147,9 +148,9 @@ export function createApp({ store, manager, config }) {
       mailTypes: MAIL_TYPES,
     });
   });
-  api.use('/repositories', repositoriesRouter({ store }));
+  api.use('/repositories', repositoriesRouter({ store, manager }));
   api.use('/lists', listsRouter({ store }));
-  api.use('/mail-sources', mailSourcesRouter({ store, endpoints: config.mailEndpoints }));
+  api.use('/mail-sources', mailSourcesRouter({ store, manager, endpoints: config.mailEndpoints }));
   api.use('/scans', scansRouter({ store, manager, endpoints: config.mailEndpoints }));
   api.use((req, res, next) => next(new HttpError(404, 'Rota não encontrada.')));
   // eslint-disable-next-line no-unused-vars
@@ -157,7 +158,7 @@ export function createApp({ store, manager, config }) {
     const status = err.status || err.statusCode || 500;
     if (status >= 500) console.error('[CLEAN]', err);
     const message = err.type === 'entity.parse.failed' ? 'JSON inválido.' : status >= 500 ? 'Erro interno no servidor.' : err.message;
-    res.status(status).json({ error: message });
+    res.status(status).json({ error: message, ...(err instanceof HttpError && err.code ? { code: err.code } : {}) });
   });
   app.use('/api', api);
 

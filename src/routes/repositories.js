@@ -4,7 +4,7 @@ import { Router } from 'express';
 import { HttpError, parseRepository, normalizeRepoPath } from './validate.js';
 import { friendlyError } from '../scan/errors.js';
 
-export function repositoriesRouter({ store }) {
+export function repositoriesRouter({ store, manager = null }) {
   const router = Router();
 
   router.get('/', (req, res) => {
@@ -17,12 +17,22 @@ export function repositoriesRouter({ store }) {
   });
 
   router.put('/:id', (req, res) => {
-    if (!store.getRepository(req.params.id)) throw new HttpError(404, 'Repositório não encontrado.');
-    res.json(store.updateRepository(req.params.id, parseRepository(req.body)));
+    const existing = store.getRepository(req.params.id);
+    if (!existing) throw new HttpError(404, 'Repositório não encontrado.');
+    const before = { allowDelete: existing.allowDelete, path: existing.path };
+    const updated = store.updateRepository(existing.id, parseRepository(req.body));
+    // Análises em andamento deixam de excluir se a exclusão foi desligada ou o caminho mudou.
+    if (before.allowDelete && (!updated.allowDelete || updated.path !== before.path)) {
+      manager?.revokeDeletion('repository', existing.id, updated.allowDelete ? 'o caminho do repositório foi alterado' : 'a opção "Permitir exclusão" foi desligada');
+    }
+    res.json(updated);
   });
 
   router.delete('/:id', (req, res) => {
-    if (!store.deleteRepository(req.params.id)) throw new HttpError(404, 'Repositório não encontrado.');
+    const existing = store.getRepository(req.params.id);
+    if (!existing) throw new HttpError(404, 'Repositório não encontrado.');
+    store.deleteRepository(existing.id);
+    if (existing.allowDelete) manager?.revokeDeletion('repository', existing.id, 'o repositório foi removido do cadastro');
     res.status(204).end();
   });
 

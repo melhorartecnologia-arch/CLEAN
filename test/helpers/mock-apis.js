@@ -17,13 +17,20 @@ function readBody(req) {
 
 /**
  * graph: { tenant, clientId, secret, users: [{ id, mail, displayName, noMailbox?, folders: [{ id, displayName,
- *          parent?, wellKnown? }], messages: { [folderId]: [{ id, raw, received }] } }], throttleOnce?: Set<messageId> }
+ *          parent?, wellKnown? }], messages: { [folderId]: [{ id, raw, received }] } }], throttleOnce?: Set<messageId>,
+ *          deleteError?: { status, code } (resposta das exclusões), flakyDelete? (a 1ª exclusão de cada
+ *          mensagem é feita, mas a resposta é um erro 503, como uma resposta perdida) }
  * google: { publicKey, admin, users: [{ mail, name, disabled?, labels: [{ id, name, type }],
- *          messages: [{ id, raw, labelIds, internalDate }] }] }
+ *          messages: [{ id, raw, labelIds, internalDate }] }], flakyDelete? }
  */
 export function startMockApis({ graph = null, google = null } = {}) {
   const calls = [];
   const throttled = new Set();
+  const flaked = new Set();
+  const lostResponse = (res, id) => {
+    flaked.add(id);
+    return json(res, 503, { error: { code: 'ServiceUnavailable', message: 'Serviço indisponível' } });
+  };
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -103,6 +110,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
         m = /^messages\/([^/]+)\/(permanentDelete|move)$/.exec(rest);
         if (m && req.method === 'POST') {
           if (user.readOnly) return json(res, 403, { error: { code: 'ErrorAccessDenied', message: 'Access is denied. Check credentials and try again.' } });
+          if (graph.deleteError) return json(res, graph.deleteError.status, { error: { code: graph.deleteError.code, message: graph.deleteError.message || 'Erro simulado' } });
           const folderId = Object.keys(user.messages).find((f) => user.messages[f].some((x) => x.id === m[1]));
           if (!folderId) return json(res, 404, { error: { code: 'ErrorItemNotFound', message: 'The specified object was not found in the store.' } });
           const index = user.messages[folderId].findIndex((x) => x.id === m[1]);
@@ -113,6 +121,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
             (user.messages[target] ||= []).push(msg);
             return json(res, 201, { id: msg.id });
           }
+          if (graph.flakyDelete && !flaked.has(m[1])) return lostResponse(res, m[1]);
           res.writeHead(204);
           return res.end();
         }
@@ -188,6 +197,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
             return json(res, 200, { id: act[1], labelIds: ['TRASH'] });
           }
           user.messages.splice(index, 1);
+          if (google.flakyDelete && !flaked.has(act[1])) return lostResponse(res, act[1]);
           res.writeHead(204);
           return res.end();
         }

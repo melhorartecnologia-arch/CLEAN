@@ -85,23 +85,36 @@ function fileRow(r) {
 }
 
 /**
- * Aba "Exclusões": todas as exclusões (automáticas e manuais) da análise, na ordem em que
- * aconteceram. label(record) descreve o item (caminho do arquivo ou caixa e assunto).
+ * Aba "Exclusões": todas as tentativas de exclusão (automáticas e manuais) da análise, na ordem em
+ * que aconteceram. label(record, evento) descreve o item (caminho do arquivo ou caixa e assunto).
  */
-export function deletionsSheet(deletions, records, columns, label) {
+export function deletionsSheet(deletions, records, columns, label, labels = DELETION_LABELS) {
   const byId = new Map(records.map((r) => [r.id, r]));
   return {
     name: 'Exclusões',
-    cols: [17, ...columns.map(([, w]) => w), 22, 26, 22, 50],
+    cols: [17, ...columns.map(([, w]) => w), 26, 26, 26, 50],
     header: ['Quando', ...columns.map(([h]) => h), 'Resultado', 'Como', 'Por', 'Detalhe'],
     rows: (function* () {
       for (const d of deletions) {
         const record = byId.get(d.recordId);
         const how = `${d.mode === 'auto' ? 'Automática (na análise)' : 'Manual (relatório)'}${d.method === 'trash' ? ' – para a lixeira' : d.method === 'permanent' ? ' – definitiva' : ''}`;
-        yield [toDate(d.at), ...label(record), DELETION_LABELS[d.status] || d.status, how, d.by || '', d.error || ''];
+        const by = d.by ? (d.mode === 'auto' ? `iniciada por ${d.by}` : d.by) : d.mode === 'auto' ? 'análise automática' : '';
+        yield [toDate(d.at), ...label(record, d), labels[d.status] || d.status, how, by, d.error || d.note || ''];
       }
     })(),
   };
+}
+
+/** Linhas do resumo da análise sobre a exclusão automática. */
+export function deletionInfoRows(opts, s, { noun = 'Excluídos', gone = 'Já não existiam', changed = 'Alterados depois da análise (mantidos)' } = {}) {
+  if (!opts.deleteMatches) return [['Ação', 'Somente analisar']];
+  return [
+    ['Ação', 'Analisar e excluir automaticamente'],
+    [`${noun} na análise`, s.deleted ?? 0],
+    [gone, s.deleteMissing ?? 0],
+    [changed, s.deleteChanged ?? 0],
+    ['Falhas na exclusão', s.deleteErrors ?? 0],
+  ];
 }
 
 const MATCH_COLUMNS = [
@@ -158,8 +171,7 @@ function scanInfoRows(scan) {
     ['Protegidos por senha', s.contentEncrypted ?? 0],
     ['Grandes demais (só nome)', s.contentSkippedSize ?? 0],
     ['Erros de acesso/leitura', s.errors ?? 0],
-    ['Ação', opts.deleteMatches ? 'Analisar e excluir automaticamente' : 'Somente analisar'],
-    ...(opts.deleteMatches ? [['Excluídos na análise', s.deleted ?? 0], ['Falhas na exclusão', s.deleteErrors ?? 0]] : []),
+    ...deletionInfoRows(opts, s),
   ];
 }
 
@@ -209,7 +221,7 @@ export async function exportXlsx(scan, records, errors, out, { deletions = [], r
       })(),
     },
   ];
-  if (deletions.length) sheets.push(deletionsSheet(deletions, all, [['Arquivo', 70]], (r) => [r?.path || '']));
+  if (deletions.length) sheets.push(deletionsSheet(deletions, all, [['Arquivo', 70]], (r, d) => [r?.path || d.item || '']));
   if (errors.length) {
     sheets.push({
       name: 'Erros',

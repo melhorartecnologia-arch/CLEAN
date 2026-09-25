@@ -167,9 +167,9 @@ test('arquivos pela API: exigências, exclusão manual item a item, filtros e ex
   const kept = (await api('GET', `/api/scans/${scan1.id}/results?deletion=kept`)).data;
   assert.deepEqual(kept.items.map((r) => r.name), ['c.txt']);
   const summary = (await api('GET', `/api/scans/${scan1.id}/summary`)).data;
-  assert.deepEqual(summary.deletions, { deleted: 2, missing: 0, failed: 0 });
+  assert.deepEqual(summary.deletions, { deleted: 2, missing: 0, changed: 0, failed: 0 });
   const scanLog = (await api('GET', `/api/scans/${scan1.id}`)).data.log.map((l) => l.message).join('\n');
-  assert.match(scanLog, /Exclusão manual \(acesso local\) do arquivo .*a\.txt: excluído/);
+  assert.match(scanLog, /Exclusão manual do arquivo .*a\.txt por acesso local: excluído/);
 
   const xlsx = unzipSync(new Uint8Array((await api('GET', `/api/scans/${scan1.id}/export.xlsx`)).data));
   const sheets = [...strFromU8(xlsx['xl/workbook.xml']).matchAll(/<sheet name="([^"]*)"/g)].map((m) => m[1]);
@@ -385,5 +385,5 @@ test('e-mail pela API: exclusão manual de uma mensagem e conexão sem permissã
   assert.equal(missing.data.deletion.status, 'deleted');
   data.users[0].messages.inbox = []; // a mensagem some por fora do CLEAN
   const summary = (await api('GET', `/api/scans/${scan.id}/summary`)).data;
-  assert.deepEqual(summary.deletions, { deleted: 2, missing: 0, failed: 0 });
+  assert.deepEqual(summary.deletions, { deleted: 2, missing: 0, changed: 0, failed: 0 });
 });

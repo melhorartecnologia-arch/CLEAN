@@ -5,9 +5,11 @@ import { validateTerm, foldText } from '../scan/matcher.js';
 import { VALIDATORS } from '../scan/presets.js';
 
 export class HttpError extends Error {
-  constructor(status, message) {
+  /** code: identificador opcional devolvido à interface junto com a mensagem (ex.: 'method-changed'). */
+  constructor(status, message, code = '') {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 

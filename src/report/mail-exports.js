@@ -1,8 +1,19 @@
 // Exportação dos relatórios de análises de e-mail: Excel, CSV (padrão Excel pt-BR) e HTML.
 // (O JSON é o mesmo das análises de arquivos.)
 import { writeXlsx } from './xlsx.js';
-import { writeAll, csvCell, escapeHtml, REPORT_CSS, toDate, kb, deletionsSheet } from './exports.js';
-import { summarizeMail, sampleText, formatDateTime, realAttachments, deletionText, STATUS_LABELS, LOCATION_LABELS, SCAN_STATUS_LABELS, MAIL_TYPE_LABELS } from './model.js';
+import { writeAll, csvCell, escapeHtml, REPORT_CSS, toDate, kb, deletionsSheet, deletionInfoRows } from './exports.js';
+import {
+  summarizeMail,
+  sampleText,
+  formatDateTime,
+  realAttachments,
+  deletionText,
+  STATUS_LABELS,
+  LOCATION_LABELS,
+  SCAN_STATUS_LABELS,
+  MAIL_TYPE_LABELS,
+  MAIL_DELETION_LABELS,
+} from './model.js';
 
 function sortMessages(records) {
   return records.slice().sort((a, b) => a.mailbox.localeCompare(b.mailbox, 'pt-BR') || String(b.date || '').localeCompare(String(a.date || '')));
@@ -54,7 +65,7 @@ function messageRow(r) {
     r.occurrences,
     locations(r),
     STATUS_LABELS[r.contentStatus] || r.contentStatus || '',
-    deletionText(r.deletion),
+    deletionText(r.deletion, 'mail'),
     r.internetMessageId || '',
     r.webLink || '',
   ];
@@ -126,8 +137,7 @@ function scanInfoRows(scan) {
     ['Anexos protegidos por senha', s.attachmentsEncrypted ?? 0],
     ['Mensagens criptografadas', s.messagesEncrypted ?? 0],
     ['Erros', s.errors ?? 0],
-    ['Ação', o.deleteMatches ? 'Analisar e excluir automaticamente' : 'Somente analisar'],
-    ...(o.deleteMatches ? [['Excluídas na análise', s.deleted ?? 0], ['Falhas na exclusão', s.deleteErrors ?? 0]] : []),
+    ...deletionInfoRows(o, s, { noun: 'Excluídas', gone: 'Já não existiam', changed: 'Alteradas depois da análise (mantidas)' }),
   ];
 }
 
@@ -164,7 +174,15 @@ export async function exportMailXlsx(scan, records, errors, out, { deletions = [
     },
   ];
   if (deletions.length) {
-    sheets.push(deletionsSheet(deletions, all, [['Caixa', 28], ['Pasta', 20], ['Assunto', 40]], (r) => [r?.mailbox || '', r?.folder || '', r?.subject || '']));
+    sheets.push(
+      deletionsSheet(
+        deletions,
+        all,
+        [['Caixa', 28], ['Pasta', 20], ['Assunto', 40]],
+        (r, d) => (r ? [r.mailbox || '', r.folder || '', r.subject || ''] : [d.item || '', '', '']),
+        MAIL_DELETION_LABELS,
+      ),
+    );
   }
   if (errors.length) {
     sheets.push({
@@ -187,7 +205,7 @@ export async function exportMailCsv(records, out) {
     (function* () {
       yield `\uFEFF${header.map(csvCell).join(';')}\r\n`;
       for (const r of sortMessages(records)) {
-        const extra = [(r.to || []).join('; '), attachmentNames(r), r.sourceName, deletionText(r.deletion)];
+        const extra = [(r.to || []).join('; '), attachmentNames(r), r.sourceName, deletionText(r.deletion, 'mail')];
         for (const row of matchRows(r)) yield `${[...row, ...extra].map(csvCell).join(';')}\r\n`;
       }
     })(),
@@ -213,7 +231,7 @@ export async function exportMailHtml(scan, records, out) {
       .map((m) => `<div><span class="term">${escapeHtml(m.term)}</span> ${escapeHtml(LOCATION_LABELS[m.location])} · ${m.count}×${m.samples.map(sample).join('')}</div>`)
       .join('');
     const files = attachmentNames(r);
-    const deleted = r.deletion ? `<div class="muted">${escapeHtml(deletionText(r.deletion))}</div>` : '';
+    const deleted = r.deletion ? `<div class="muted">${escapeHtml(deletionText(r.deletion, 'mail'))}</div>` : '';
     return `<tr><td><b>${escapeHtml(r.subject || '(sem assunto)')}</b><div class="muted">${escapeHtml(r.mailbox)} › ${escapeHtml(r.folder)}</div>${files ? `<div class="path">Anexos: ${escapeHtml(files)}</div>` : ''}${deleted}</td><td>${escapeHtml(r.from)}<div class="muted">para ${escapeHtml((r.to || []).join(', '))}</div></td><td>${escapeHtml(formatDateTime(r.date))}</td><td>${found}</td></tr>`;
   };
   await writeAll(

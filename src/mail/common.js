@@ -53,3 +53,21 @@ export function validDate(value) {
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? null : d;
 }
+
+/** Itens a excluir: aceita ids ou { id, messageId } (Message-ID registrado na análise). */
+export function deletionItems(items) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items || []) {
+    const entry = typeof item === 'object' && item !== null ? { id: item.id, messageId: item.messageId || null } : { id: item, messageId: null };
+    if (entry.id === undefined || entry.id === null || seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    out.push(entry);
+  }
+  return out;
+}
+
+/** Message-ID comparável ("<abc@x>" e "abc@x" são o mesmo). */
+export function normalizeMessageId(value) {
+  return String(value || '').trim().replace(/^<+|>+$/g, '').trim().toLowerCase();
+}

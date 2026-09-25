@@ -3,7 +3,7 @@
 // Admin SDK (Directory API), consultada em nome de um administrador.
 import crypto from 'node:crypto';
 import { request, pool, ApiError } from './http.js';
-import { SkipMailboxError, folderMatcher, addressMatcher } from './common.js';
+import { SkipMailboxError, folderMatcher, addressMatcher, deletionItems } from './common.js';
 
 export const GOOGLE_ENDPOINTS = {
   token: 'https://oauth2.googleapis.com/token',
@@ -106,7 +106,7 @@ export class GmailConnector {
   }
 
   /** Token de acesso em nome de `subject` (usuário da caixa ou administrador). */
-  async token(subject, scope, force = false) {
+  async token(subject, scope, force = false, signal = this.signal) {
     const key = `${subject}|${scope}`;
     const cached = this.tokens.get(key);
     if (!force && cached && !cached.promise && Date.now() < cached.expires - 120000) return cached.value;
@@ -124,7 +124,7 @@ export class GmailConnector {
     const promise = request(this.endpoints.token, {
       method: 'POST',
       form: { grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion },
-      signal: this.signal,
+      signal,
       retries: 3,
     })
       .then((res) => {
@@ -141,14 +141,18 @@ export class GmailConnector {
   }
 
   async api(subject, scope, url, options = {}) {
+    const signal = options.signal !== undefined ? options.signal : this.signal;
     for (let attempt = 0; ; attempt++) {
-      const token = await this.token(subject, scope, attempt > 0);
+      const token = await this.token(subject, scope, attempt > 0, signal);
       try {
         return await request(url, {
           ...options,
-          signal: this.signal,
+          signal,
           headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
-          onRetry: ({ wait, error }) => this.throttled(wait, error),
+          onRetry: (info) => {
+            this.throttled(info.wait, info.error);
+            options.onRetry?.(info);
+          },
         });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401 && attempt === 0) continue;
@@ -298,28 +302,46 @@ export class GmailConnector {
 
   /**
    * Exclui mensagens: 'permanent' = exclusão definitiva (escopo https://mail.google.com/),
-   * 'trash' = move para a Lixeira (escopo gmail.modify). Retorna Map(id → { ok, missing?, error? }).
+   * 'trash' = move para a Lixeira (escopo gmail.modify). items: ids ou { id }. options: signal
+   * (padrão: o da conexão; a análise usa null para que as exclusões em andamento terminem mesmo ao
+   * cancelar), onResult(id, resultado) a cada mensagem e shouldStop() (não começa outras).
+   * Retorna Map(id → { ok, missing?, error? }).
    */
-  async deleteMessages(mailbox, ids, mode = 'permanent') {
+  async deleteMessages(mailbox, items, mode = 'permanent', { signal = this.signal, onResult, shouldStop } = {}) {
     const scope = mode === 'trash' ? GMAIL_TRASH_SCOPE : GMAIL_DELETE_SCOPE;
     const base = `${this.endpoints.gmail}/users/${enc(mailbox.address)}`;
     const results = new Map();
-    const run = pool(ids, MAX_CONCURRENCY, async (id) => {
-      try {
-        if (mode === 'trash') await this.api(mailbox.address, scope, `${base}/messages/${enc(id)}/trash`, { method: 'POST', retries: 4 });
-        else await this.api(mailbox.address, scope, `${base}/messages/${enc(id)}`, { method: 'DELETE', retries: 4 });
-        return [id, { ok: true }];
-      } catch (err) {
-        if (this.signal?.aborted) throw err;
-        if (err.status === 404) return [id, { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída).' }];
-        if (err.status === 403 || /não está autorizada/.test(err.message)) {
-          return [id, { ok: false, error: `Sem permissão para excluir: autorize o escopo ${scope} na delegação em todo o domínio da conta de serviço.` }];
-        }
-        return [id, { ok: false, error: err.message }];
-      }
+    const run = pool(deletionItems(items), MAX_CONCURRENCY, async ({ id }) => {
+      if (shouldStop?.()) return undefined;
+      const result = await this.deleteOne(mailbox.address, scope, base, id, mode, signal);
+      results.set(id, result);
+      onResult?.(id, result);
+      return undefined;
     });
-    for await (const [id, result] of run) results.set(id, result);
+    for await (const _ of run); // eslint-disable-line no-unused-vars
     return results;
+  }
+
+  async deleteOne(subject, scope, base, id, mode, signal) {
+    // Uma tentativa interrompida (falha de rede, tempo esgotado, erro 5xx) pode ter sido feita pelo
+    // servidor: nesse caso, "não encontrada" na repetição quer dizer que a exclusão funcionou.
+    let uncertain = false;
+    const onRetry = ({ error }) => {
+      if (error.status !== 429 && error.status !== 403) uncertain = true;
+    };
+    try {
+      if (mode === 'trash') await this.api(subject, scope, `${base}/messages/${enc(id)}/trash`, { method: 'POST', retries: 4, signal, onRetry });
+      else await this.api(subject, scope, `${base}/messages/${enc(id)}`, { method: 'DELETE', retries: 4, signal, onRetry });
+      return { ok: true };
+    } catch (err) {
+      if (err.status === 404) return uncertain ? { ok: true } : { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída).' };
+      // Escopo não autorizado: recusado na emissão do token (unauthorized_client) ou pela API (403
+      // "insufficient authentication scopes"); os 403 de limite de uso não entram aqui.
+      if (/não está autorizada/.test(err.message) || (err.status === 403 && /insufficient|scope|permission/i.test(err.message) && !/rate|quota|limit/i.test(err.message))) {
+        return { ok: false, error: `Sem permissão para excluir: autorize o escopo ${scope} na delegação em todo o domínio da conta de serviço.` };
+      }
+      return { ok: false, error: err.message };
+    }
   }
 
   async close() {}

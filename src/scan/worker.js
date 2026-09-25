@@ -23,6 +23,7 @@ process.on('uncaughtException', (err) => report('exceção', err));
 
 parentPort.on('message', (message) => {
   if (message?.type === 'cancel') scanner.cancel();
+  if (message?.type === 'revoke-delete') scanner.revokeDeletion(message);
 });
 
 scanner

@@ -2,7 +2,7 @@
 // etc. Cada caixa tem o seu login; a senha pode ser individual ou uma senha padrão da conexão (útil
 // com contas de serviço, ex.: "DOMINIO\servico\caixa" no Exchange ou "caixa*mestre" no Dovecot).
 import { ApiError } from './http.js';
-import { folderMatcher, addressMatcher, normalizeAddress } from './common.js';
+import { folderMatcher, addressMatcher, normalizeAddress, deletionItems, normalizeMessageId } from './common.js';
 
 // Marcadores do Gmail exibidos como pasta (quando o servidor é o Gmail).
 const GMAIL_LABELS = { '\\Inbox': 'Caixa de entrada', '\\Sent': 'Enviados', '\\Draft': 'Rascunhos', '\\Spam': 'Spam', '\\Trash': 'Lixeira' };
@@ -10,6 +10,9 @@ const HIDDEN_GMAIL_LABELS = new Set(['\\Important', '\\Starred', '\\Muted', '\\C
 
 const BATCH_MESSAGES = 50;
 const BATCH_BYTES = 32 * 1024 * 1024;
+// Mensagens por comando na exclusão: conjuntos de UIDs muito longos passam do tamanho máximo de
+// comando de alguns servidores (10 KB no Exchange).
+const DELETE_CHUNK = 200;
 
 /** A biblioteca IMAP é carregada só quando usada: sem ela (npm install não executado após uma atualização) o resto do CLEAN funciona. */
 let imapFlowClass = null;
@@ -125,7 +128,8 @@ export class ImapConnector {
     return value;
   }
 
-  async connect(mailbox) {
+  /** Abre uma sessão na caixa. signal: interrompe a conexão (padrão: o da análise). */
+  async connect(mailbox, { signal = this.signal } = {}) {
     const { host, port, security, allowSelfSigned } = this.imap;
     const ImapFlow = await loadImapFlow();
     const client = new ImapFlow({
@@ -144,9 +148,9 @@ export class ImapConnector {
     });
     client.on('error', () => {}); // erros de conexão também chegam pelas promessas
     const onAbort = () => client.close();
-    this.signal?.addEventListener('abort', onAbort, { once: true });
+    signal?.addEventListener('abort', onAbort, { once: true });
     const dispose = async () => {
-      this.signal?.removeEventListener('abort', onAbort);
+      signal?.removeEventListener('abort', onAbort);
       try {
         if (client.usable) await client.logout();
       } catch {
@@ -158,7 +162,7 @@ export class ImapConnector {
       await client.connect();
     } catch (err) {
       await dispose();
-      if (this.signal?.aborted) throw this.signal.reason;
+      if (signal?.aborted) throw signal.reason;
       throw imapError(err, host);
     }
     return { client, dispose };
@@ -268,65 +272,181 @@ export class ImapConnector {
   }
 
   /**
-   * Exclui mensagens (ids no formato "pasta:uidvalidity:uid" gerado na análise): 'permanent' =
-   * marca como excluída e expurga (UID EXPUNGE quando o servidor permite, sem afetar outras
-   * mensagens); 'trash' = move para a pasta Lixeira do servidor. Retorna Map(id → { ok, missing?, error? }).
+   * Exclui mensagens (ids no formato "pasta:uidvalidity:uid" gerado na análise).
+   * - 'permanent': marca como excluída e expurga só essas mensagens (UID EXPUNGE, extensão UIDPLUS;
+   *   sem ela a exclusão é recusada, porque um EXPUNGE comum apagaria também as outras mensagens
+   *   marcadas como excluídas na pasta);
+   * - 'trash': move para a pasta Lixeira do servidor (MOVE; sem ele, cópia conferida + UID EXPUNGE).
+   *   Mensagens que já estão na Lixeira ficam lá.
+   * No Gmail, a exclusão definitiva move para a Lixeira e expurga de lá (expurgar de outra pasta só
+   * tiraria o marcador, conforme as configurações de IMAP da conta).
+   * Antes, confere se a mensagem ainda é a mesma da análise (Message-ID); depois, confere se ela
+   * saiu da pasta. items: ids ou { id, messageId }. options: signal (padrão: o da análise; a
+   * análise usa null para que as exclusões em andamento terminem mesmo ao cancelar),
+   * onResult(id, resultado) e shouldStop() (não começa outros lotes).
+   * Retorna Map(id → { ok, missing?, error?, note? }).
    */
-  async deleteMessages(mailbox, ids, mode = 'permanent') {
+  async deleteMessages(mailbox, items, mode = 'permanent', { signal = this.signal, onResult, shouldStop } = {}) {
     const results = new Map();
+    const done = (id, result) => {
+      if (results.has(id)) return;
+      results.set(id, result);
+      onResult?.(id, result);
+    };
     const groups = new Map();
-    for (const id of ids) {
-      const m = /^(.*):([^:]*):(\d+)$/.exec(String(id));
+    for (const item of deletionItems(items)) {
+      const m = /^(.*):([^:]*):(\d+)$/.exec(String(item.id));
       if (!m) {
-        results.set(id, { ok: false, error: 'Identificador de mensagem inválido.' });
+        done(item.id, { ok: false, error: 'Identificador de mensagem inválido.' });
         continue;
       }
       const group = groups.get(m[1]) || { validity: m[2], items: [] };
-      group.items.push({ id, uid: Number(m[3]) });
+      group.items.push({ ...item, uid: Number(m[3]) });
       groups.set(m[1], group);
     }
     if (groups.size === 0) return results;
-    const { client, dispose } = await this.connect(mailbox);
+    const failRest = (error) => {
+      for (const group of groups.values()) for (const item of group.items) done(item.id, { ok: false, error });
+    };
+    const { client, dispose } = await this.connect(mailbox, { signal });
     try {
-      let trash = null;
-      if (mode === 'trash') {
-        trash = (await client.list()).find((f) => f.specialUse === '\\Trash')?.path || null;
-        if (!trash) {
-          for (const group of groups.values()) for (const item of group.items) results.set(item.id, { ok: false, error: 'O servidor não tem uma pasta Lixeira identificada.' });
+      const has = (cap) => Boolean(client.capabilities?.has?.(cap));
+      const ctx = { mode, gmail: has('X-GM-EXT-1'), canMove: has('MOVE'), uidplus: has('UIDPLUS'), trash: null, done, shouldStop, toPurge: [] };
+      if (!ctx.uidplus && (mode === 'permanent' || !ctx.canMove)) {
+        failRest(
+          'O servidor IMAP não oferece a exclusão seletiva (extensão UIDPLUS): a exclusão foi recusada para não apagar outras mensagens marcadas como excluídas na pasta. Exclua pelo programa de e-mail ou use a opção "Mover para a Lixeira", se o servidor oferecer MOVE.',
+        );
+        return results;
+      }
+      if (mode === 'trash' || ctx.gmail) {
+        ctx.trash = (await client.list()).find((f) => f.specialUse === '\\Trash')?.path || null;
+        if (!ctx.trash) {
+          failRest('O servidor não tem uma pasta Lixeira identificada.');
           return results;
         }
       }
       for (const [folder, group] of groups) {
-        let lock = null;
-        try {
-          lock = await client.getMailboxLock(folder);
-          if (String(client.mailbox?.uidValidity ?? '') !== group.validity) {
-            for (const item of group.items) results.set(item.id, { ok: false, missing: true, error: 'A pasta foi recriada no servidor depois da análise: mensagem não localizada.' });
-            continue;
-          }
-          const present = new Set();
-          for await (const msg of client.fetch(packUids(group.items.map((i) => i.uid)), { uid: true }, { uid: true })) present.add(msg.uid);
-          const uids = group.items.filter((i) => present.has(i.uid)).map((i) => i.uid);
-          let ok = true;
-          if (uids.length) {
-            ok = trash && folder !== trash ? Boolean(await client.messageMove(packUids(uids), trash, { uid: true })) : Boolean(await client.messageDelete(packUids(uids), { uid: true }));
-          }
-          for (const item of group.items) {
-            if (!present.has(item.uid)) results.set(item.id, { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída ou movida).' });
-            else results.set(item.id, ok ? { ok: true } : { ok: false, error: 'O servidor recusou a exclusão.' });
-          }
-        } catch (err) {
-          if (this.signal?.aborted) throw this.signal.reason;
-          const message = imapError(err, this.imap.host).message;
-          for (const item of group.items) results.set(item.id, { ok: false, error: message });
-        } finally {
-          lock?.release();
-        }
+        if (shouldStop?.()) break;
+        await this.deleteInFolder(client, folder, group, ctx);
       }
+      // Gmail, exclusão definitiva: expurga da Lixeira as mensagens movidas para lá.
+      if (ctx.toPurge.length) await this.purgeTrash(client, ctx);
     } finally {
       await dispose();
     }
     return results;
+  }
+
+  async deleteInFolder(client, folder, group, ctx) {
+    let lock = null;
+    try {
+      lock = await client.getMailboxLock(folder);
+      if (String(client.mailbox?.uidValidity ?? '') !== group.validity) {
+        for (const item of group.items) {
+          ctx.done(item.id, { ok: false, error: 'A pasta foi recriada no servidor depois da análise (UIDVALIDITY diferente): a mensagem não pode ser localizada com segurança e não foi excluída.' });
+        }
+        return;
+      }
+      for (let i = 0; i < group.items.length; i += DELETE_CHUNK) {
+        if (ctx.shouldStop?.()) return;
+        await this.deleteChunk(client, folder, group.items.slice(i, i + DELETE_CHUNK), ctx);
+      }
+    } catch (err) {
+      const message = imapError(err, this.imap.host).message;
+      for (const item of group.items) ctx.done(item.id, { ok: false, error: message });
+    } finally {
+      lock?.release();
+    }
+  }
+
+  /** Um lote de mensagens de uma pasta (já aberta para escrita). */
+  async deleteChunk(client, folder, items, ctx) {
+    // 1. Quais ainda existem e se são as mesmas da análise.
+    const found = new Map();
+    for await (const msg of client.fetch(packUids(items.map((i) => i.uid)), { uid: true, flags: true, envelope: true }, { uid: true })) {
+      found.set(msg.uid, { messageId: normalizeMessageId(msg.envelope?.messageId), deleted: Boolean(msg.flags?.has('\\Deleted')) });
+    }
+    const targets = [];
+    for (const item of items) {
+      const info = found.get(item.uid);
+      const expected = normalizeMessageId(item.messageId);
+      if (!info) ctx.done(item.id, { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída ou movida).' });
+      else if (expected && info.messageId && expected !== info.messageId) {
+        ctx.done(item.id, { ok: false, error: 'A mensagem nesta posição da pasta não é a mesma da análise (Message-ID diferente): nada foi excluído.' });
+      } else targets.push({ ...item, wasDeleted: info.deleted });
+    }
+    if (targets.length === 0) return;
+    const range = packUids(targets.map((t) => t.uid));
+    const inTrash = ctx.trash && folder === ctx.trash;
+    if (ctx.mode === 'trash' && inTrash) {
+      for (const t of targets) ctx.done(t.id, { ok: true, note: 'já estava na lixeira' });
+      return;
+    }
+
+    // 2. A exclusão.
+    let error = null;
+    let moved = null;
+    if ((ctx.mode === 'trash' || ctx.gmail) && !inTrash) {
+      if (ctx.canMove) {
+        moved = await client.messageMove(range, ctx.trash, { uid: true });
+        if (!moved) error = 'O servidor recusou mover a mensagem para a Lixeira.';
+      } else {
+        // Sem MOVE: copia, confere a cópia e só então expurga da pasta original.
+        moved = await client.messageCopy(range, ctx.trash, { uid: true });
+        if (!moved) error = 'O servidor recusou copiar a mensagem para a Lixeira: nada foi excluído.';
+        else error = await this.expunge(client, range);
+      }
+    } else {
+      error = await this.expunge(client, range);
+    }
+
+    // 3. Confere o que saiu da pasta.
+    const still = new Set();
+    for await (const msg of client.fetch(range, { uid: true }, { uid: true })) still.add(msg.uid);
+    const restore = targets.filter((t) => still.has(t.uid) && !t.wasDeleted).map((t) => t.uid);
+    if (restore.length) await client.messageFlagsRemove(packUids(restore), ['\\Deleted'], { uid: true }).catch(() => false);
+    for (const t of targets) {
+      if (still.has(t.uid)) {
+        ctx.done(t.id, { ok: false, error: error || 'O servidor não excluiu a mensagem (ela continua na pasta).' });
+      } else if (ctx.gmail && ctx.mode === 'permanent' && !inTrash) {
+        const trashUid = moved?.uidMap?.get?.(t.uid);
+        if (trashUid) ctx.toPurge.push({ ...t, trashUid });
+        else ctx.done(t.id, { ok: true, note: 'movida para a lixeira; o Gmail não informou a posição dela lá para a exclusão definitiva' });
+      } else {
+        ctx.done(t.id, { ok: true });
+      }
+    }
+  }
+
+  /** Marca como excluídas e expurga só estas mensagens (UID EXPUNGE). Retorna o erro, se houver. */
+  async expunge(client, range) {
+    if (!(await client.messageFlagsAdd(range, ['\\Deleted'], { uid: true }))) {
+      return 'O servidor recusou marcar a mensagem como excluída (sem permissão de escrita na pasta?).';
+    }
+    if (!(await client.messageDelete(range, { uid: true }))) return 'O servidor recusou expurgar a mensagem.';
+    return null;
+  }
+
+  /** Gmail: expurga da Lixeira as mensagens que a exclusão definitiva moveu para lá. */
+  async purgeTrash(client, ctx) {
+    const note = (reason) => `movida para a lixeira; a exclusão definitiva falhou (${reason}) e ela será apagada pelo Gmail em 30 dias`;
+    let lock = null;
+    try {
+      lock = await client.getMailboxLock(ctx.trash);
+      for (let i = 0; i < ctx.toPurge.length; i += DELETE_CHUNK) {
+        const chunk = ctx.toPurge.slice(i, i + DELETE_CHUNK);
+        const range = packUids(chunk.map((t) => t.trashUid));
+        const error = await this.expunge(client, range);
+        const still = new Set();
+        for await (const msg of client.fetch(range, { uid: true }, { uid: true })) still.add(msg.uid);
+        for (const t of chunk) ctx.done(t.id, still.has(t.trashUid) ? { ok: true, note: note(error || 'a mensagem continua na lixeira') } : { ok: true });
+      }
+    } catch (err) {
+      const reason = imapError(err, this.imap.host).message;
+      for (const t of ctx.toPurge) ctx.done(t.id, { ok: true, note: note(reason) });
+    } finally {
+      lock?.release();
+    }
   }
 
   async close() {}

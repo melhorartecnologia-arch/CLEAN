@@ -2,10 +2,24 @@
 import { Router } from 'express';
 import { HttpError } from './validate.js';
 import { ScanError } from '../scan/manager.js';
-import { filterRecords, publicRecord, summarize, FILTER_KEYS, filterMailRecords, summarizeMail, MAIL_FILTER_KEYS, applyDeletions, deletionTotals, DELETION_LABELS } from '../report/model.js';
-import { deleteFile, deletionEvent } from '../scan/delete.js';
+import {
+  filterRecords,
+  publicRecord,
+  summarize,
+  FILTER_KEYS,
+  filterMailRecords,
+  summarizeMail,
+  MAIL_FILTER_KEYS,
+  applyDeletions,
+  deletionTotals,
+  DELETION_LABELS,
+  MAIL_DELETION_LABELS,
+} from '../report/model.js';
+import { deleteFile, deletionEvent, cleanPaths, keptPaths } from '../scan/delete.js';
 import { createConnector } from '../mail/connectors.js';
+import { normalizeAddress } from '../mail/common.js';
 import { friendlyError } from '../scan/errors.js';
+import { PROJECT_ROOT } from '../config.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
 import { exportMailXlsx, exportMailCsv, exportMailHtml } from '../report/mail-exports.js';
 
@@ -118,16 +132,32 @@ async function stream(res, filename, type, write) {
   }
 }
 
-/** Quem fez a exclusão manual: o usuário da autenticação ou o endereço de acesso. */
-function actor(req) {
-  if (req.cleanUser) return req.cleanUser;
-  const ip = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
-  return ip === '127.0.0.1' || ip === '::1' ? 'acesso local' : `acesso de ${ip}`;
+/**
+ * Quem fez a ação (exclusão manual ou início de uma análise com exclusão): o usuário da
+ * autenticação, se houver, e o endereço de acesso (atrás de um proxy na mesma máquina, o do
+ * navegador, informado pelo proxy).
+ */
+export function actor(req) {
+  const ip = String(req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  const where = ip === '127.0.0.1' || ip === '::1' ? 'acesso local' : `acesso de ${ip}`;
+  return req.cleanUser ? `${req.cleanUser} (${where})` : where;
 }
+
+/** A caixa da mensagem como está no cadastro (no IMAP, com o login configurado para ela). */
+function mailboxFor(source, record) {
+  const address = normalizeAddress(record.mailbox);
+  const box = (source.mailboxes || []).find((m) => normalizeAddress(m.address) === address);
+  return { address: record.mailbox, name: record.mailboxName || '', ...(box?.login ? { login: box.login } : {}) };
+}
+
+const METHOD_TEXT = { permanent: 'exclusão definitiva', trash: 'mover para a lixeira', file: 'exclusão definitiva' };
 
 export function scansRouter({ store, manager, endpoints = {} }) {
   const router = Router();
   const memo = new Memo();
+  // Itens com exclusão manual em andamento ("análise:item"): um segundo pedido é recusado.
+  const deleting = new Set();
+  const deletingIn = (scanId) => [...deleting].some((key) => key.startsWith(`${scanId}:`));
 
   /** Onde cada item pode ser excluído (repositório/conexão com "Permitir exclusão"). */
   const deletionTarget = (scan, record) => {
@@ -166,7 +196,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
 
   router.post('/', async (req, res) => {
     try {
-      const scan = await manager.start(req.body || {});
+      const scan = await manager.start(req.body || {}, { by: actor(req) });
       res.status(201).json(scan);
     } catch (err) {
       if (err instanceof ScanError) throw new HttpError(err.status, err.message);
@@ -187,6 +217,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   router.delete('/:id', async (req, res) => {
     const scan = getScan(req);
     if (manager.isActive(scan.id)) throw new HttpError(409, 'Cancele a análise antes de excluí-la.');
+    if (deletingIn(scan.id)) throw new HttpError(409, 'Há uma exclusão de item em andamento neste relatório. Tente de novo em instantes.');
     await store.deleteScan(scan.id);
     memo.forget(scan.id);
     res.status(204).end();
@@ -207,8 +238,14 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       pageSize,
       items: list.slice((page - 1) * pageSize, page * pageSize).map((r) => {
         const target = deletionTarget(scan, r);
-        const deleted = r.deletion?.status === 'deleted' || r.deletion?.status === 'missing';
-        return { ...publicRecord(r), canDelete: Boolean(target) && !deleted && !manager.isActive(scan.id), deleteMethod: target?.method || null };
+        const gone = r.deletion?.status === 'deleted' || r.deletion?.status === 'missing';
+        const inProgress = deleting.has(`${scan.id}:${r.id}`);
+        return {
+          ...publicRecord(r),
+          canDelete: Boolean(target) && !gone && !inProgress && !manager.isActive(scan.id),
+          deleting: inProgress,
+          deleteMethod: target?.method || null,
+        };
       }),
     });
   });
@@ -219,21 +256,43 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     if (manager.isActive(scan.id)) throw new HttpError(409, 'Aguarde o fim da análise para excluir itens pelo relatório.');
     if (req.body?.confirm !== true) throw new HttpError(400, 'Confirme a exclusão.');
     const rid = Number(req.params.rid);
+    const key = `${scan.id}:${rid}`;
+    if (deleting.has(key)) throw new HttpError(409, 'A exclusão deste item já está em andamento.');
+    deleting.add(key);
+    try {
+      await deleteItem(req, res, scan, rid);
+    } finally {
+      deleting.delete(key);
+    }
+  });
+
+  async function deleteItem(req, res, scan, rid) {
     const [records, deletions] = await Promise.all([store.readResults(scan.id), store.readDeletions(scan.id)]);
     applyDeletions(records, deletions);
     const record = records.find((r) => r.id === rid);
     if (!record) throw new HttpError(404, 'Item não encontrado nesta análise.');
     if (record.deletion?.status === 'deleted') throw new HttpError(409, 'Este item já foi excluído.');
+    const mail = scan.kind === 'mail';
+    // O modo mostrado na confirmação precisa ser o que vai ser usado (o cadastro pode ter mudado).
+    const checkMethod = (method) => {
+      const shown = req.body?.method;
+      if (shown !== undefined && shown !== method) {
+        throw new HttpError(409, `A forma de exclusão mudou no cadastro (agora: ${METHOD_TEXT[method]}). Confira e confirme de novo.`, 'method-changed');
+      }
+    };
     const by = actor(req);
     let method;
     let result;
     let label;
-    if (scan.kind === 'mail') {
+    let item;
+    if (mail) {
       const source = store.getMailSource(record.sourceId);
       if (!source) throw new HttpError(409, 'A conexão de e-mail desta mensagem foi excluída do cadastro.');
       if (!source.allowDelete) throw new HttpError(403, `A exclusão não está permitida na conexão "${source.name}". Ative "Permitir exclusão" em Caixas de e-mail.`);
       method = source.deleteMode === 'trash' ? 'trash' : 'permanent';
-      label = `mensagem "${record.subject || '(sem assunto)'}" da caixa ${record.mailbox}`;
+      checkMethod(method);
+      label = `da mensagem "${record.subject || '(sem assunto)'}" da caixa ${record.mailbox}`;
+      item = `${record.mailbox} › ${record.folder} › ${record.subject || '(sem assunto)'}`;
       let secrets;
       try {
         secrets = store.openMailSecrets(source);
@@ -242,9 +301,9 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       }
       const connector = createConnector({ ...source, secrets }, { signal: AbortSignal.timeout(120000), endpoints });
       try {
-        const map = await connector.deleteMessages({ address: record.mailbox, name: record.mailboxName }, [record.messageId], method);
+        const map = await connector.deleteMessages(mailboxFor(source, record), [{ id: record.messageId, messageId: record.internetMessageId }], method);
         const r = map.get(record.messageId) || { ok: false, error: 'O servidor não confirmou a exclusão.' };
-        result = { status: r.ok ? 'deleted' : r.missing ? 'missing' : 'failed', error: r.ok ? null : r.error };
+        result = { status: r.ok ? 'deleted' : r.missing ? 'missing' : 'failed', error: r.ok ? null : r.error, note: r.note };
       } catch (err) {
         result = { status: 'failed', error: friendlyError(err) };
       } finally {
@@ -255,17 +314,31 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       if (!repo) throw new HttpError(409, 'O repositório deste arquivo foi excluído do cadastro.');
       if (!repo.allowDelete) throw new HttpError(403, `A exclusão não está permitida no repositório "${repo.name}". Ative "Permitir exclusão" em Repositórios.`);
       method = 'file';
-      label = `arquivo ${record.path}`;
-      result = await deleteFile(record.path, { root: repo.path, expected: { size: record.size, modified: record.modified }, force: req.body?.force === true });
+      checkMethod(method);
+      label = `do arquivo ${record.path}`;
+      item = record.path;
+      result = await deleteFile(record.path, {
+        root: repo.path,
+        expected: { size: record.size, modified: record.modified },
+        force: req.body?.force === true,
+        protect: [...cleanPaths({ dataDir: store.dataDir, appDir: PROJECT_ROOT }), ...keptPaths(repo, store.listRepositories())],
+      });
       if (result.status === 'changed') return res.status(409).json({ error: `${result.error} Confirme para excluir mesmo assim.`, code: 'changed' });
     }
-    const event = deletionEvent(record.id, result, { mode: 'manual', method, by });
-    await store.appendDeletions(scan.id, [event]);
-    const outcome = result.status === 'failed' ? `falhou: ${result.error}` : DELETION_LABELS[result.status].toLowerCase();
-    store.appendLog(scan.id, { level: result.status === 'failed' ? 'warn' : 'info', message: `Exclusão manual (${by}) do ${label}: ${outcome}.` });
+    const event = deletionEvent(record.id, result, { mode: 'manual', method, by, item });
+    const labels = mail ? MAIL_DELETION_LABELS : DELETION_LABELS;
+    const outcome = result.status === 'failed' ? `falhou: ${result.error}` : `${labels[result.status].toLowerCase()}${result.note ? ` (${result.note})` : ''}`;
     memo.forget(scan.id);
+    try {
+      await store.appendDeletions(scan.id, [event]);
+    } catch (err) {
+      console.error('[CLEAN] Falha ao gravar o registro de exclusões:', err.message);
+      store.appendLog(scan.id, { level: 'error', message: `Exclusão manual ${label} por ${by}: ${outcome}. Falha ao gravar o registro da exclusão: ${err.message}` });
+      return res.status(500).json({ error: `Resultado: ${outcome}. Mas houve uma falha ao gravar o registro da exclusão (${err.message}); a ação ficou anotada no Registro da análise.`, deletion: event });
+    }
+    store.appendLog(scan.id, { level: result.status === 'failed' ? 'warn' : 'info', message: `Exclusão manual ${label} por ${by}: ${outcome}.` });
     res.json({ deletion: event });
-  });
+  }
 
   // Resumo do recorte filtrado (gráficos) e opções de filtro calculadas sobre todos os resultados.
   router.get('/:id/summary', async (req, res) => {

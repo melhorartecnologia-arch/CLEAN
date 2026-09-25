@@ -31,38 +31,70 @@ export const LOCATION_LABELS = {
 
 export const MAIL_TYPE_LABELS = { graph: 'Microsoft 365', gmail: 'Google Workspace', imap: 'IMAP' };
 
-export const DELETION_LABELS = { deleted: 'Excluído', missing: 'Não encontrado (já excluído ou movido)', failed: 'Falha na exclusão' };
+export const DELETION_LABELS = {
+  deleted: 'Excluído',
+  missing: 'Não encontrado (já excluído ou movido)',
+  changed: 'Não excluído (alterado depois da análise)',
+  failed: 'Falha na exclusão',
+};
 
-/** Situação da exclusão de um item, em uma linha (relatórios e exportações). */
-export function deletionText(d) {
+export const MAIL_DELETION_LABELS = {
+  deleted: 'Excluída',
+  missing: 'Não encontrada (já excluída ou movida)',
+  changed: 'Não excluída (alterada depois da análise)',
+  failed: 'Falha na exclusão',
+};
+
+/** Como a exclusão foi feita (automática, com quem iniciou a análise, ou manual, com quem excluiu). */
+export function deletionHow(d) {
+  return d.mode === 'auto' ? `exclusão automática da análise${d.by ? ` iniciada por ${d.by}` : ''}` : `exclusão manual${d.by ? ` por ${d.by}` : ''}`;
+}
+
+/** Situação da exclusão de um item, em uma linha (relatórios e exportações). kind: 'files' ou 'mail'. */
+export function deletionText(d, kind = 'files') {
   if (!d) return '';
+  const o = kind === 'mail' ? 'a' : 'o'; // "arquivo excluído", "mensagem excluída"
   const when = formatDateTime(d.at);
-  const how = d.mode === 'auto' ? 'exclusão automática da análise' : `exclusão manual${d.by ? ` por ${d.by}` : ''}`;
-  const where = d.method === 'trash' ? ' (movido para a lixeira)' : '';
-  if (d.status === 'deleted') return `Excluído em ${when}${where} — ${how}`;
-  if (d.status === 'missing') return `Não encontrado em ${when} (já excluído ou movido) — ${how}`;
+  const how = deletionHow(d);
+  if (d.status === 'deleted') {
+    const where = d.note ? ` (${d.note})` : d.method === 'trash' ? ` (movid${o} para a lixeira)` : '';
+    return `Excluíd${o} em ${when}${where} — ${how}`;
+  }
+  if (d.status === 'missing') return `Não encontrad${o} em ${when} (já excluíd${o} ou movid${o}) — ${how}`;
+  if (d.status === 'changed') return `Não excluíd${o} em ${when}: ${d.error || `alterad${o} depois da análise`} — ${how}`;
   return `Falha ao excluir em ${when}: ${d.error || 'erro desconhecido'} — ${how}`;
 }
 
-/** Aplica aos registros a última ocorrência de exclusão de cada um (registro deletions.ndjson). */
+/**
+ * Aplica aos registros a situação de exclusão de cada um (registro deletions.ndjson): vale a última
+ * tentativa, mas um item excluído continua excluído (uma tentativa posterior que não o encontre
+ * mais, como dois pedidos ao mesmo tempo, não apaga essa informação).
+ */
 export function applyDeletions(records, deletions) {
   const latest = new Map();
-  for (const d of deletions) latest.set(d.recordId, d);
+  for (const d of deletions) {
+    if (latest.get(d.recordId)?.status === 'deleted') continue;
+    latest.set(d.recordId, d);
+  }
   for (const r of records) r.deletion = latest.get(r.id) || null;
   return records;
 }
 
-/** Filtro "Exclusão": deleted = excluídos (ou que já não existiam), failed = com falha, kept = mantidos. */
+/**
+ * Filtro "Exclusão": deleted = excluídos; missing = não encontrados na hora da exclusão; failed = não
+ * excluídos por falha ou alteração; kept = continuam no lugar (sem exclusão, com falha ou alterados).
+ */
 function matchesDeletion(record, value) {
   const status = record.deletion?.status;
-  if (value === 'deleted') return status === 'deleted' || status === 'missing';
-  if (value === 'failed') return status === 'failed';
+  if (value === 'deleted') return status === 'deleted';
+  if (value === 'missing') return status === 'missing';
+  if (value === 'failed') return status === 'failed' || status === 'changed';
   if (value === 'kept') return status !== 'deleted' && status !== 'missing';
   return true;
 }
 
 export function deletionTotals(records) {
-  const totals = { deleted: 0, missing: 0, failed: 0 };
+  const totals = { deleted: 0, missing: 0, changed: 0, failed: 0 };
   for (const r of records) if (r.deletion && totals[r.deletion.status] !== undefined) totals[r.deletion.status]++;
   return totals;
 }

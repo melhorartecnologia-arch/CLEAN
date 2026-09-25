@@ -1,5 +1,7 @@
 // Servidor IMAP mínimo para os testes: LOGIN, LIST, EXAMINE/SELECT, UID SEARCH, UID FETCH (com
-// busca parcial BODY.PEEK[]<0.N>), STATUS e LOGOUT. Suficiente para o conector do CLEAN.
+// busca parcial BODY.PEEK[]<0.N>, FLAGS e ENVELOPE), STORE, EXPUNGE, COPY, MOVE, STATUS e LOGOUT.
+// Suficiente para o conector do CLEAN, inclusive para simular servidores sem UIDPLUS/MOVE, que
+// recusam comandos ou que se comportam como o Gmail.
 import net from 'node:net';
 
 function imapDate(date) {
@@ -49,11 +51,22 @@ function tokenize(text) {
   return out;
 }
 
+function messageIdOf(raw) {
+  const head = raw.subarray(0, Math.max(0, raw.indexOf('\r\n\r\n'))).toString('utf8');
+  return /^Message-ID:\s*(.+)$/im.exec(head)?.[1].trim() || '';
+}
+
 /**
- * accounts: { login: { password, folders: { 'INBOX': [{ raw: Buffer, date: Date }], ... },
- *             flags?: { folder: '\\Trash' } } }
+ * accounts: { login: { password, folders: { 'INBOX': [{ raw: Buffer, date: Date, deleted?, flags? }], ... },
+ *             special?: { folder: '\\Trash' }, validity?: { folder: número } } }
+ * options: capabilities (padrão "IMAP4rev1 UIDPLUS MOVE"), permanentFlags (texto enviado em
+ * PERMANENTFLAGS), refuse ({ store, copy, move, expunge }: responde NO), gmail (EXPUNGE fora da
+ * Lixeira só arquiva, como o Gmail com as configurações padrão).
  */
-export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffset = 0 } = {}) {
+export function startFakeImap(
+  accounts,
+  { log = [], maxLine = Infinity, sizeOffset = 0, capabilities = 'IMAP4rev1 UIDPLUS MOVE', permanentFlags = null, refuse = {}, gmail = false } = {},
+) {
   for (const account of Object.values(accounts)) {
     for (const list of Object.values(account.folders)) list.forEach((m, i) => (m.uid ??= i + 1));
   }
@@ -64,7 +77,7 @@ export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffs
     let selected = null;
     let pendingLiteral = null; // { size, line }
     const send = (text) => socket.write(text);
-    send('* OK [CAPABILITY IMAP4rev1 UIDPLUS MOVE] Fake IMAP pronto\r\n');
+    send(`* OK [CAPABILITY ${capabilities}] Fake IMAP pronto\r\n`);
 
     const handle = (line, literals) => {
       const space = line.indexOf(' ');
@@ -83,15 +96,18 @@ export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffs
       const ok = (text = 'OK') => send(`${tag} OK ${text}\r\n`);
       const folders = user ? accounts[user].folders : {};
       const messages = selected ? folders[selected] : [];
+      const validity = (name) => accounts[user]?.validity?.[name] ?? 7;
+      const specialFolder = (flag) => Object.entries(accounts[user]?.special || {}).find(([, f]) => f === flag)?.[0];
+      if (refuse[command.toLowerCase()]) return send(`${tag} NO Comando recusado pelo servidor\r\n`);
       switch (command) {
         case 'CAPABILITY':
-          send('* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n');
+          send(`* CAPABILITY ${capabilities}\r\n`);
           return ok();
         case 'LOGIN': {
           const [login, password] = literals.length ? literals : args;
           if (!accounts[login] || accounts[login].password !== password) return send(`${tag} NO [AUTHENTICATIONFAILED] Credenciais inválidas\r\n`);
           user = login;
-          return ok('[CAPABILITY IMAP4rev1 UIDPLUS MOVE] Logado');
+          return ok(`[CAPABILITY ${capabilities}] Logado`);
         }
         case 'LIST':
         case 'LSUB': {
@@ -112,7 +128,8 @@ export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffs
           if (!folders[name]) return send(`${tag} NO Pasta inexistente\r\n`);
           selected = name;
           const list = folders[name];
-          send(`* FLAGS (\\Seen \\Answered \\Deleted)\r\n* ${list.length} EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 7] ok\r\n* OK [UIDNEXT ${nextUid(list)}] ok\r\n`);
+          send(`* FLAGS (\\Seen \\Answered \\Deleted)\r\n* ${list.length} EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY ${validity(name)}] ok\r\n* OK [UIDNEXT ${nextUid(list)}] ok\r\n`);
+          if (permanentFlags !== null) send(`* OK [PERMANENTFLAGS (${permanentFlags})] ok\r\n`);
           return ok(command === 'EXAMINE' ? '[READ-ONLY] ok' : '[READ-WRITE] ok');
         }
         case 'STATUS': {
@@ -138,6 +155,11 @@ export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffs
             // sizeOffset simula o tamanho estimado do Exchange (EnableExactRFC822Size = false).
             if (items.includes('RFC822.SIZE')) parts.push(`RFC822.SIZE ${m.raw.length + sizeOffset}`);
             if (items.includes('INTERNALDATE')) parts.push(`INTERNALDATE "${imapDate(m.date)}"`);
+            if (/\bFLAGS\b/.test(items)) parts.push(`FLAGS (${[...(m.flags || []), ...(m.deleted ? ['\\Deleted'] : [])].join(' ')})`);
+            if (items.includes('ENVELOPE')) {
+              const mid = messageIdOf(m.raw);
+              parts.push(`ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL ${mid ? `"${mid.replace(/["\\]/g, '')}"` : 'NIL'})`);
+            }
             const partial = /BODY\.PEEK\[\]<(\d+)\.(\d+)>/.exec(items);
             const head = `* ${i + 1} FETCH (${parts.join(' ')}`;
             if (partial) {
@@ -156,37 +178,53 @@ export function startFakeImap(accounts, { log = [], maxLine = Infinity, sizeOffs
           return ok();
         }
         case 'STORE': {
-          // UID STORE <conjunto> +FLAGS[.SILENT] (\Deleted)
+          // UID STORE <conjunto> +FLAGS[.SILENT] (\Deleted) ou -FLAGS (\Deleted)
           const set = parseSet(args[0], uidMode ? nextUid(messages) - 1 : messages.length);
-          const deleting = /\\Deleted/i.test(args.slice(1).join(' '));
+          const operation = String(args[1] || '').toUpperCase();
+          if (!/\\Deleted/i.test(args.slice(2).join(' '))) return ok();
           messages.forEach((m, i) => {
-            if (set.has(uidMode ? m.uid : i + 1) && deleting) m.deleted = true;
+            if (set.has(uidMode ? m.uid : i + 1)) m.deleted = !operation.startsWith('-');
           });
           return ok();
         }
         case 'EXPUNGE': {
           // EXPUNGE (todas as marcadas) ou UID EXPUNGE <conjunto> (só as do conjunto)
           const set = uidMode ? parseSet(args[0], nextUid(messages) - 1) : null;
+          const trash = specialFolder('\\Trash');
           for (let i = messages.length - 1; i >= 0; i--) {
             if (messages[i].deleted && (!set || set.has(messages[i].uid))) {
-              messages.splice(i, 1);
+              const [gone] = messages.splice(i, 1);
+              // Gmail: expurgar fora da Lixeira só tira o marcador; a mensagem vai para a Lixeira.
+              if (gmail && selected !== trash && folders[trash]) folders[trash].push({ ...gone, uid: nextUid(folders[trash]), deleted: false });
               send(`* ${i + 1} EXPUNGE\r\n`);
             }
           }
           return ok();
         }
+        case 'COPY':
         case 'MOVE': {
-          // UID MOVE <conjunto> <pasta>
+          // UID COPY|MOVE <conjunto> <pasta>, com COPYUID (UIDPLUS)
           const set = parseSet(args[0], nextUid(messages) - 1);
           const target = folders[args[1]];
           if (!target) return send(`${tag} NO [TRYCREATE] Pasta de destino inexistente\r\n`);
-          for (let i = messages.length - 1; i >= 0; i--) {
+          const from = [];
+          const to = [];
+          for (let i = 0; i < messages.length; i++) {
             if (!set.has(messages[i].uid)) continue;
-            const [moved] = messages.splice(i, 1);
-            target.push({ ...moved, uid: nextUid(target), deleted: false });
-            send(`* ${i + 1} EXPUNGE\r\n`);
+            const uid = nextUid(target);
+            target.push({ ...messages[i], uid, deleted: false });
+            from.push(messages[i].uid);
+            to.push(uid);
           }
-          return ok();
+          if (command === 'MOVE') {
+            for (let i = messages.length - 1; i >= 0; i--) {
+              if (!set.has(messages[i].uid)) continue;
+              messages.splice(i, 1);
+              send(`* ${i + 1} EXPUNGE\r\n`);
+            }
+          }
+          const copyuid = from.length ? `[COPYUID ${validity(args[1])} ${from.join(',')} ${to.join(',')}] ` : '';
+          return ok(`${copyuid}${command === 'MOVE' ? 'Movidas' : 'Copiadas'}`);
         }
         case 'LOGOUT':
           send('* BYE Até logo\r\n');

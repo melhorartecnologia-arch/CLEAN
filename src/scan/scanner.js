@@ -9,7 +9,7 @@ import { extractFile } from './extractors/index.js';
 import { OwnerResolver } from './owner.js';
 import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
 import { friendlyError, withTimeout } from './errors.js';
-import { deleteFile, deletionEvent } from './delete.js';
+import { deleteFile, deletionEvent, isWithin } from './delete.js';
 
 // Tempo máximo para ler um arquivo (o que passar disso é registrado como erro e a análise segue).
 const FILE_TIMEOUT = 5 * 60 * 1000;
@@ -72,9 +72,19 @@ export function newStats(repositoriesTotal = 0) {
     contentErrors: 0,
     bytesAnalyzed: 0,
     errors: 0,
-    deleted: 0,
+    deleted: 0, // excluídos na análise ("analisar e excluir")
+    deleteMissing: 0, // já não existiam na hora da exclusão
+    deleteChanged: 0, // alterados depois de analisados: mantidos
     deleteErrors: 0,
   };
+}
+
+/** Conta o resultado de uma exclusão nas estatísticas da análise. */
+export function countDeletion(stats, status) {
+  if (status === 'deleted') stats.deleted++;
+  else if (status === 'missing') stats.deleteMissing++;
+  else if (status === 'changed') stats.deleteChanged++;
+  else stats.deleteErrors++;
 }
 
 export class Scanner {
@@ -105,11 +115,22 @@ export class Scanner {
     this.fileTimeoutMs = config.fileTimeoutMs || FILE_TIMEOUT;
     this.modifiedAfter = this.options.modifiedAfter ? new Date(this.options.modifiedAfter).getTime() : null;
     if (Number.isNaN(this.modifiedAfter)) this.modifiedAfter = null;
+    // Pastas do próprio CLEAN (dados e instalação): nunca têm arquivos excluídos.
+    this.protect = config.protect || [];
+    this.deletedBy = config.startedBy || null; // quem iniciou a análise com exclusão automática
   }
 
   cancel() {
     this.cancelled = true;
     this.abort.abort();
+  }
+
+  /** A exclusão foi desligada no cadastro durante a análise: nada mais é excluído daquele repositório. */
+  revokeDeletion({ kind, id, reason }) {
+    const repo = kind === 'repository' ? this.repoById.get(id) : null;
+    if (!repo?.allowDelete) return;
+    repo.allowDelete = false;
+    if (this.options.deleteMatches) this.log('warn', `Exclusão automática desativada para "${repo.name}": ${reason || 'o cadastro do repositório foi alterado'}.`);
   }
 
   log(level, message) {
@@ -142,6 +163,8 @@ export class Scanner {
     for (const repo of this.repositories) {
       if (this.cancelled) break;
       await this.scanRepository(repo);
+      // Proprietários (e exclusões) de cada repositório logo ao fim dele, e não só no fim da análise.
+      await this.flushOwners();
       this.stats.repositoriesDone++;
       this.progress(true);
     }
@@ -168,7 +191,14 @@ export class Scanner {
     this.log('info', `Analisando "${repo.name}" (${repo.path})`);
     const auditIndex = await this.loadAudit(repo);
     const isExcluded = compileExclusions([...DEFAULT_EXCLUDES, ...(repo.exclude || [])]);
-    const iterator = walk(repo.path, { isExcluded, shouldStop: () => this.cancelled });
+    // A pasta de dados do CLEAN (com os relatórios, que contêm os próprios termos) não é analisada.
+    const dataDir = this.protect.find((p) => p.data)?.path;
+    const skipDir = (dir) => {
+      if (!dataDir || !isWithin(dataDir, dir)) return false;
+      this.log('info', `Pasta de dados do CLEAN ignorada: ${dir}`);
+      return true;
+    };
+    const iterator = walk(repo.path, { isExcluded, skipDir, shouldStop: () => this.cancelled });
     const worker = async () => {
       for (;;) {
         if (this.cancelled) return;
@@ -352,24 +382,26 @@ export class Scanner {
 
   /**
    * Exclusão automática ("analisar e excluir"): os arquivos são excluídos depois de registrados no
-   * relatório, com o proprietário e o último usuário já identificados. Ao cancelar, nada mais é
-   * excluído.
+   * relatório, com o proprietário e o último usuário já identificados, e só se continuarem iguais ao
+   * que foi analisado (mesmo tamanho e data de modificação). Cada exclusão é registrada logo em
+   * seguida; ao cancelar, nada mais é excluído.
    */
   async deleteRecords(records) {
     if (!this.options.deleteMatches || this.cancelled || records.length === 0) return;
-    const items = [];
     for (const record of records) {
       if (this.cancelled) break;
       const repo = this.repoById.get(record.repositoryId);
       const result = repo?.allowDelete
-        ? await deleteFile(record.path, { root: repo.path })
+        ? await deleteFile(record.path, {
+            root: repo.path,
+            expected: { size: record.size, modified: record.modified },
+            protect: [...this.protect, ...(repo.keep || [])],
+          })
         : { status: 'failed', error: 'A exclusão não está permitida neste repositório.' };
-      if (result.status === 'deleted' || result.status === 'missing') this.stats.deleted++;
-      else this.stats.deleteErrors++;
+      countDeletion(this.stats, result.status);
       if (result.status === 'failed') this.error(record.path, `Falha ao excluir: ${result.error}`);
-      items.push(deletionEvent(record.id, result, { mode: 'auto', method: 'file', by: 'análise automática' }));
+      this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: 'auto', method: 'file', by: this.deletedBy, item: record.path })] });
     }
-    if (items.length) this.emit({ type: 'deletions', items });
   }
 
   finishRecords(records) {

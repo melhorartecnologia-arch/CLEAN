@@ -2,6 +2,8 @@
 import { Worker } from 'node:worker_threads';
 import { newStats, DEFAULT_OPTIONS } from './scanner.js';
 import { newMailStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
+import { cleanPaths, keptPaths } from './delete.js';
+import { PROJECT_ROOT } from '../config.js';
 
 export class ScanError extends Error {
   constructor(message, status = 400) {
@@ -18,7 +20,7 @@ export function sanitizeOptions(input) {
   if (input.checkContent !== undefined) o.checkContent = Boolean(input.checkContent);
   if (input.nameTarget === 'path' || input.nameTarget === 'file') o.nameTarget = input.nameTarget;
   if (input.resolveOwner !== undefined) o.resolveOwner = Boolean(input.resolveOwner);
-  if (input.deleteMatches !== undefined) o.deleteMatches = Boolean(input.deleteMatches);
+  o.deleteMatches = input.deleteMatches === true; // só com o valor exato: nunca por engano
   const size = Number(input.maxFileSizeMB);
   if (Number.isFinite(size) && size > 0) o.maxFileSizeMB = Math.min(size, 2048);
   const concurrency = Number(input.concurrency);
@@ -38,7 +40,8 @@ const MAIL_CHECKS = ['checkSubject', 'checkBody', 'checkAttachmentNames', 'check
 export function sanitizeMailOptions(input) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) input = {};
   const o = { ...MAIL_DEFAULT_OPTIONS };
-  for (const k of [...MAIL_CHECKS, 'includeTrash', 'includeJunk', 'deleteMatches']) if (input[k] !== undefined) o[k] = Boolean(input[k]);
+  for (const k of [...MAIL_CHECKS, 'includeTrash', 'includeJunk']) if (input[k] !== undefined) o[k] = Boolean(input[k]);
+  o.deleteMatches = input.deleteMatches === true; // só com o valor exato: nunca por engano
   const size = Number(input.maxMessageSizeMB);
   if (Number.isFinite(size) && size > 0) o.maxMessageSizeMB = Math.min(size, 500);
   const concurrency = Number(input.concurrency);
@@ -98,9 +101,12 @@ export class ScanManager {
     return String(name || '').trim().slice(0, 200) || `${prefix} de ${stamp}`;
   }
 
-  /** Inicia uma análise. body.kind = 'mail' para caixas de e-mail; senão, repositórios de arquivos. */
-  async start(body = {}) {
-    if (body?.kind === 'mail') return this.#startMail(body);
+  /**
+   * Inicia uma análise. body.kind = 'mail' para caixas de e-mail; senão, repositórios de arquivos.
+   * by: quem iniciou (registrado nas exclusões automáticas).
+   */
+  async start(body = {}, { by = null } = {}) {
+    if (body?.kind === 'mail') return this.#startMail(body, by);
     const { name, repositoryIds, listIds, options } = body || {};
     const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
     if (repositories.length === 0 || repositories.some((r) => !r)) throw new ScanError('Selecione repositórios válidos.');
@@ -114,6 +120,7 @@ export class ScanManager {
       repositoryIds: repositories.map((r) => r.id),
       listIds: lists.map((l) => l.id),
       options: opts,
+      startedBy: by,
       summary: {
         repositories: repositories.map((r) => ({ id: r.id, name: r.name, path: r.path })),
         lists: lists.map((l) => ({ id: l.id, name: l.name, termCount: (l.terms || []).length })),
@@ -135,7 +142,7 @@ export class ScanManager {
     return scan;
   }
 
-  async #startMail(body) {
+  async #startMail(body, by) {
     const { name, sourceIds, listIds, options } = body;
     const sources = ids(sourceIds).map((id) => this.store.getMailSource(id));
     if (sources.length === 0 || sources.some((s) => !s)) throw new ScanError('Selecione conexões de e-mail válidas.');
@@ -149,6 +156,7 @@ export class ScanManager {
       sourceIds: sources.map((s) => s.id),
       listIds: lists.map((l) => l.id),
       options: opts,
+      startedBy: by,
       summary: {
         sources: sources.map((s) => ({ id: s.id, name: s.name, type: s.type, scope: s.scope, mailboxCount: s.scope === 'all' ? null : (s.mailboxes || []).length })),
         lists: lists.map((l) => ({ id: l.id, name: l.name, termCount: (l.terms || []).length })),
@@ -169,23 +177,61 @@ export class ScanManager {
   /**
    * Configuração entregue à thread. Nas análises de e-mail, os segredos são decifrados só agora e
    * vão apenas para a memória da thread (o config.json da análise não os contém).
+   * A exclusão automática é conferida de novo com o cadastro atual: só continua se ainda for
+   * permitida (no mesmo caminho) e, no e-mail, do modo confirmado ao criar a análise (ou para a
+   * lixeira, se o cadastro passou a ser assim). Público para os testes.
    */
-  async #workerConfig(id) {
+  async workerConfig(id) {
     const config = await this.store.readScanConfig(id);
-    if (config.kind !== 'mail') return config;
+    const scan = this.store.getScan(id);
+    const deleting = Boolean(config.options?.deleteMatches);
+    const warn = (message) => this.store.appendLog(id, { level: 'warn', message });
+    const extra = { startedBy: scan?.startedBy || null, protect: cleanPaths({ dataDir: this.store.dataDir, appDir: PROJECT_ROOT }) };
+    if (config.kind !== 'mail') {
+      const all = this.store.listRepositories();
+      const repositories = config.repositories.map((r) => {
+        if (!deleting || !r.allowDelete) return { ...r, allowDelete: false };
+        const current = this.store.getRepository(r.id);
+        const reason = !current
+          ? 'o repositório foi removido do cadastro'
+          : current.path !== r.path
+            ? 'o caminho do repositório foi alterado'
+            : !current.allowDelete
+              ? 'a opção "Permitir exclusão" foi desligada'
+              : null;
+        if (reason) {
+          warn(`Exclusão automática desativada para "${r.name}": ${reason} depois que a análise foi criada.`);
+          return { ...r, allowDelete: false };
+        }
+        return { ...r, allowDelete: true, keep: keptPaths(current, all) };
+      });
+      return { ...config, repositories, ...extra };
+    }
     const sources = config.sources.map((s) => {
       const current = this.store.getMailSource(s.id);
       if (!current) throw new ScanError(`A conexão de e-mail "${s.name}" foi excluída antes do início da análise.`);
-      return { ...mailSnapshot(current), secrets: this.store.openMailSecrets(current) };
+      const live = mailSnapshot(current);
+      const allowDelete = deleting && s.allowDelete && live.allowDelete;
+      if (deleting && s.allowDelete && !live.allowDelete) warn(`Exclusão automática desativada para "${s.name}": a opção "Permitir exclusão" foi desligada depois que a análise foi criada.`);
+      const deleteMode = s.deleteMode === 'trash' || live.deleteMode === 'trash' ? 'trash' : 'permanent';
+      return { ...live, allowDelete, deleteMode, secrets: this.store.openMailSecrets(current) };
     });
-    return { ...config, sources, endpoints: this.mailEndpoints };
+    return { ...config, sources, endpoints: this.mailEndpoints, ...extra };
+  }
+
+  /**
+   * A exclusão foi desligada (ou o cadastro mudou) durante uma análise: as threads em andamento
+   * deixam de excluir itens daquele repositório (kind 'repository') ou conexão (kind 'mail').
+   */
+  revokeDeletion(kind, id, reason) {
+    for (const entry of this.running.values()) entry.worker?.postMessage({ type: 'revoke-delete', kind, id, reason });
   }
 
   #pump() {
     while (this.running.size < this.maxConcurrent && this.queue.length > 0) {
       const id = this.queue.shift();
       // A vaga é reservada antes de qualquer await, para respeitar o limite de análises simultâneas.
-      const entry = { worker: null, done: false, cancelRequested: false, fatal: null };
+      const entry = { worker: null, done: false, cancelRequested: false, shuttingDown: false, fatal: null };
       this.running.set(id, entry);
       this.#run(id, entry).catch((err) => {
         this.running.delete(id);
@@ -201,7 +247,7 @@ export class ScanManager {
   }
 
   async #run(id, entry) {
-    const config = await this.#workerConfig(id);
+    const config = await this.workerConfig(id);
     if (entry.cancelRequested) {
       this.running.delete(id);
       this.store.updateScan(id, { status: 'cancelled', finishedAt: new Date().toISOString(), current: null });
@@ -222,7 +268,7 @@ export class ScanManager {
         const scan = this.store.getScan(id);
         if (scan) {
           if (entry.cancelRequested) {
-            this.store.updateScan(id, { status: 'cancelled', finishedAt: new Date().toISOString(), current: null });
+            this.store.updateScan(id, { status: entry.shuttingDown ? 'interrupted' : 'cancelled', finishedAt: new Date().toISOString(), current: null });
           } else {
             const label = scan.kind === 'mail' ? 'Última mensagem em leitura' : 'Último arquivo em leitura';
             const where = scan.current?.path ? ` ${label}: ${scan.current.path}` : '';
@@ -248,7 +294,11 @@ export class ScanManager {
         store.appendErrors(id, message.items);
         break;
       case 'deletions':
-        store.appendDeletions(id, message.items);
+        store.appendDeletions(id, message.items).catch((err) => {
+          console.error('[CLEAN] Falha ao gravar o registro de exclusões:', err.message);
+          const items = message.items.map((d) => d.item).join(' | ');
+          store.appendLog(id, { level: 'error', message: `Falha ao gravar o registro de ${message.items.length} exclusão(ões): ${err.message}. Itens: ${items.slice(0, 2000)}` });
+        });
         break;
       case 'log':
         store.appendLog(id, message);
@@ -258,9 +308,10 @@ export class ScanManager {
         break;
       case 'done':
         entry.done = true;
-        store.flushScan(id).then(() => {
+        entry.finishing = store.flushScan(id).then(() => {
+          entry.finished = true; // resultados gravados: o relatório já pode ser usado (e excluir itens)
           store.updateScan(id, {
-            status: message.cancelled ? 'cancelled' : 'completed',
+            status: entry.shuttingDown ? 'interrupted' : message.cancelled ? 'cancelled' : 'completed',
             finishedAt: new Date().toISOString(),
             stats: message.stats,
             current: null,
@@ -275,8 +326,10 @@ export class ScanManager {
     }
   }
 
+  /** Na fila ou em andamento (até os resultados estarem gravados; a thread pode demorar a sair). */
   isActive(id) {
-    return this.running.has(id) || this.queue.includes(id);
+    const entry = this.running.get(id);
+    return Boolean(entry && !entry.finished) || this.queue.includes(id);
   }
 
   cancel(id) {
@@ -298,19 +351,28 @@ export class ScanManager {
     return true;
   }
 
-  async shutdown() {
+  /**
+   * Encerramento do servidor: as análises são canceladas e têm alguns segundos para registrar o que
+   * já fizeram (inclusive exclusões) antes de a thread ser encerrada.
+   */
+  async shutdown({ graceMs = 5000 } = {}) {
     this.queue.length = 0;
     const exits = [];
+    const entries = [...this.running.values()];
     for (const [id, entry] of this.running) {
       entry.cancelRequested = true;
+      entry.shuttingDown = true;
       this.store.updateScan(id, { status: 'interrupted', finishedAt: new Date().toISOString(), current: null });
-      entry.done = true;
       if (entry.worker) {
         exits.push(new Promise((resolve) => entry.worker.once('exit', resolve)));
-        entry.worker.terminate();
+        entry.worker.postMessage({ type: 'cancel' });
+        setTimeout(() => entry.worker.terminate(), graceMs).unref();
+      } else {
+        entry.done = true;
       }
     }
     await Promise.all(exits);
+    await Promise.all(entries.map((entry) => entry.finishing));
     await this.store.close();
   }
 }

@@ -2,7 +2,7 @@
 // conectado): um registro de aplicativo no Microsoft Entra ID com Mail.Read e User.Read.All e um
 // segredo do cliente. Cada mensagem é baixada no formato MIME original (com os anexos).
 import { request, pool, ApiError } from './http.js';
-import { SkipMailboxError, folderMatcher, addressMatcher } from './common.js';
+import { SkipMailboxError, folderMatcher, addressMatcher, deletionItems } from './common.js';
 
 export const GRAPH_ENDPOINTS = {
   login: 'https://login.microsoftonline.com',
@@ -97,9 +97,12 @@ export class GraphConnector {
       try {
         return await request(url, {
           ...options,
-          signal: this.signal,
+          signal: options.signal !== undefined ? options.signal : this.signal,
           headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
-          onRetry: ({ wait, error }) => this.throttled(wait, error),
+          onRetry: (info) => {
+            this.throttled(info.wait, info.error);
+            options.onRetry?.(info);
+          },
         });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401 && attempt === 0) continue;
@@ -140,20 +143,20 @@ export class GraphConnector {
   }
 
   /** Identificador do usuário dono da caixa (o endereço pode ser diferente do nome de logon). */
-  async resolveUser(mailbox) {
+  async resolveUser(mailbox, { signal } = {}) {
     if (mailbox.id) return { id: mailbox.id, name: mailbox.name };
     const select = '$select=id,displayName,mail';
     try {
-      const u = await this.api(`/users/${enc(mailbox.address)}?${select}`);
+      const u = await this.api(`/users/${enc(mailbox.address)}?${select}`, { signal });
       return { id: u.id, name: u.displayName || '' };
     } catch (err) {
       if (err.status !== 404) throw err;
     }
     const quoted = mailbox.address.replace(/'/g, "''");
-    const byMail = await this.api(`/users?$filter=${enc(`mail eq '${quoted}'`)}&${select}`);
+    const byMail = await this.api(`/users?$filter=${enc(`mail eq '${quoted}'`)}&${select}`, { signal });
     let u = byMail?.value?.[0];
     if (!u) {
-      const byAlias = await this.api(`/users?$filter=${enc(`proxyAddresses/any(x:x eq 'smtp:${quoted}')`)}&$count=true&${select}`, { headers: { ConsistencyLevel: 'eventual' } });
+      const byAlias = await this.api(`/users?$filter=${enc(`proxyAddresses/any(x:x eq 'smtp:${quoted}')`)}&$count=true&${select}`, { headers: { ConsistencyLevel: 'eventual' }, signal });
       u = byAlias?.value?.[0];
     }
     if (!u) throw new ApiError(`A caixa ${mailbox.address} não foi encontrada no Microsoft 365.`, { status: 404 });
@@ -300,31 +303,48 @@ export class GraphConnector {
    * Exclui mensagens da caixa: 'permanent' = exclusão definitiva (permanentDelete: a mensagem vai
    * para a área de expurgo e some para o usuário; retenções e bloqueios de litígio continuam
    * valendo), 'trash' = move para Itens Excluídos. Exige a permissão Mail.ReadWrite.
-   * Retorna Map(id → { ok, missing?, error? }).
+   * items: ids ou { id }. options: signal (padrão: o da conexão; a análise usa null para que as
+   * exclusões em andamento terminem mesmo ao cancelar), onResult(id, resultado) a cada mensagem e
+   * shouldStop() (não começa outras). Retorna Map(id → { ok, missing?, error? }).
    */
-  async deleteMessages(mailbox, ids, mode = 'permanent') {
-    const user = await this.resolveUser(mailbox);
-    const userPath = `/users/${enc(user.id)}`;
+  async deleteMessages(mailbox, items, mode = 'permanent', { signal = this.signal, onResult, shouldStop } = {}) {
     const results = new Map();
-    const run = pool(ids, MAX_CONCURRENCY, async (id) => {
-      try {
-        if (mode === 'trash') {
-          await this.api(`${userPath}/messages/${enc(id)}/move`, { method: 'POST', json: { destinationId: 'deleteditems' }, headers: IMMUTABLE_IDS, retries: 4 });
-        } else {
-          await this.api(`${userPath}/messages/${enc(id)}/permanentDelete`, { method: 'POST', headers: IMMUTABLE_IDS, retries: 4 });
-        }
-        return [id, { ok: true }];
-      } catch (err) {
-        if (this.signal?.aborted) throw err;
-        if (err.status === 404) return [id, { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída ou movida).' }];
-        if (err.status === 403) {
-          return [id, { ok: false, error: 'Sem permissão para excluir: conceda ao aplicativo a permissão Mail.ReadWrite (tipo Aplicativo) ou a função "Application Mail.ReadWrite" do RBAC para aplicativos.' }];
-        }
-        return [id, { ok: false, error: err.message }];
-      }
+    const list = deletionItems(items);
+    if (list.length === 0) return results;
+    const user = await this.resolveUser(mailbox, { signal });
+    const userPath = `/users/${enc(user.id)}`;
+    const run = pool(list, MAX_CONCURRENCY, async ({ id }) => {
+      if (shouldStop?.()) return undefined;
+      const result = await this.deleteOne(userPath, id, mode, signal);
+      results.set(id, result);
+      onResult?.(id, result);
+      return undefined;
     });
-    for await (const [id, result] of run) results.set(id, result);
+    for await (const _ of run); // eslint-disable-line no-unused-vars
     return results;
+  }
+
+  async deleteOne(userPath, id, mode, signal) {
+    // Uma tentativa interrompida (falha de rede, tempo esgotado, erro 5xx) pode ter sido feita pelo
+    // servidor: nesse caso, "não encontrada" na repetição quer dizer que a exclusão funcionou.
+    let uncertain = false;
+    const onRetry = ({ error }) => {
+      if (error.status !== 429) uncertain = true;
+    };
+    const options = { method: 'POST', headers: IMMUTABLE_IDS, retries: 4, signal, onRetry };
+    try {
+      if (mode === 'trash') await this.api(`${userPath}/messages/${enc(id)}/move`, { ...options, json: { destinationId: 'deleteditems' } });
+      else await this.api(`${userPath}/messages/${enc(id)}/permanentDelete`, options);
+      return { ok: true };
+    } catch (err) {
+      if (err.status === 404 && /ErrorItemNotFound/i.test(err.code)) {
+        return uncertain ? { ok: true } : { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída ou movida).' };
+      }
+      if (err.status === 403) {
+        return { ok: false, error: 'Sem permissão para excluir: conceda ao aplicativo a permissão Mail.ReadWrite (tipo Aplicativo) ou a função "Application Mail.ReadWrite" do RBAC para aplicativos.' };
+      }
+      return { ok: false, error: err.message };
+    }
   }
 
   async close() {}

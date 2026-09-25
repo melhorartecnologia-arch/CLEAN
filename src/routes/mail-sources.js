@@ -173,7 +173,7 @@ export function publicMailSource(source) {
   return out;
 }
 
-export function mailSourcesRouter({ store, endpoints = {} }) {
+export function mailSourcesRouter({ store, manager = null, endpoints = {} }) {
   const router = Router();
 
   const find = (id) => {
@@ -225,11 +225,19 @@ export function mailSourcesRouter({ store, endpoints = {} }) {
 
   router.put('/:id', (req, res) => {
     const existing = find(req.params.id);
-    res.json(publicMailSource(store.updateMailSource(existing.id, parseMailSource(req.body, existing, store.secrets))));
+    const before = { allowDelete: existing.allowDelete, deleteMode: existing.deleteMode };
+    const updated = store.updateMailSource(existing.id, parseMailSource(req.body, existing, store.secrets));
+    // Análises em andamento deixam de excluir se a exclusão foi desligada ou mudou de forma.
+    if (before.allowDelete && (!updated.allowDelete || updated.deleteMode !== before.deleteMode)) {
+      manager?.revokeDeletion('mail', existing.id, updated.allowDelete ? 'a forma de exclusão da conexão foi alterada' : 'a opção "Permitir exclusão" foi desligada');
+    }
+    res.json(publicMailSource(updated));
   });
 
   router.delete('/:id', (req, res) => {
-    if (!store.deleteMailSource(req.params.id)) throw new HttpError(404, 'Conexão de e-mail não encontrada.');
+    const existing = find(req.params.id);
+    store.deleteMailSource(existing.id);
+    if (existing.allowDelete) manager?.revokeDeletion('mail', existing.id, 'a conexão foi removida do cadastro');
     res.status(204).end();
   });
 
