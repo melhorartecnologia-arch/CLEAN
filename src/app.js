@@ -1,5 +1,6 @@
 // Aplicação Express: API REST em /api e interface web (arquivos estáticos de /public).
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
@@ -12,7 +13,8 @@ import { PRESETS, VALIDATORS } from './scan/presets.js';
 import { DEFAULT_OPTIONS } from './scan/scanner.js';
 import { DEFAULT_EXCLUDES } from './scan/walker.js';
 
-const VERSION = '1.0.0';
+// Versão exibida na interface (lida do package.json).
+const VERSION = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')).version;
 
 function sameSecret(a, b) {
   const ha = crypto.createHash('sha256').update(String(a)).digest();

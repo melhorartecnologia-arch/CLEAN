@@ -1,6 +1,6 @@
 {
   "name": "clean",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "CLEAN - Aplicação web para análise de repositórios de arquivos Windows: procura termos de uma lista de referência no nome e no conteúdo dos arquivos e gera relatórios com o último usuário que interagiu com cada arquivo.",
   "type": "module",
