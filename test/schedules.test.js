@@ -630,7 +630,7 @@ test('API dos agendamentos', async () => {
     assert.equal(created.data.nextRunAt, at(2026, 9, 26, 2).toISOString());
     assert.equal(created.data.description, 'Todos os dias, às 02:00');
     assert.equal(created.data.createdBy, 'acesso local');
-    assert.deepEqual(created.data.targets, [{ id: repo.id, name: 'Arquivos', missing: false }]);
+    assert.deepEqual(created.data.targets, [{ id: repo.id, name: 'Arquivos', missing: false, type: 'local' }]);
     assert.equal(created.data.names, undefined);
 
     // O repositório e a lista em uso não podem ser excluídos.

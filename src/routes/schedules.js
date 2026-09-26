@@ -140,7 +140,8 @@ export function schedulesRouter({ store, manager, scheduler }) {
   /** Dados enviados à interface (sem o alcance registrado na confirmação da exclusão). */
   const view = (schedule, { history = false } = {}) => {
     const { deleteConfirmation, names, history: all = [], ...rest } = schedule;
-    const named = (id, item) => ({ id, name: item?.name || names?.[id] || id, missing: !item });
+    // type: tipo do repositório (pasta, OneDrive, SharePoint) ou da conexão de e-mail.
+    const named = (id, item) => ({ id, name: item?.name || names?.[id] || id, missing: !item, ...(item?.type ? { type: item.type } : {}) });
     const remaining = remainingOf(schedule);
     let description = schedule.rule ? '' : 'Somente quando executada manualmente';
     let end = null;

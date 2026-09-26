@@ -76,6 +76,25 @@ export function cutoffPreview(r, now = new Date()) {
   return d;
 }
 
+const CLOUD_TYPES = new Set(['onedrive', 'sharepoint']);
+
+/**
+ * Forma da exclusão por extenso ("exclusão definitiva", "exclusão para a lixeira"...). Nas pastas
+ * do Windows ela é sempre definitiva: "para a lixeira" vale só para o e-mail, o OneDrive e o
+ * SharePoint. types: tipos dos repositórios da política (arquivos).
+ */
+export function deletionModeText(kind, retention, types = []) {
+  if (retention?.deleteMode !== 'trash') return 'exclusão definitiva';
+  if (kind === 'mail') return 'exclusão para a lixeira';
+  const cloud = types.some((t) => CLOUD_TYPES.has(t));
+  const local = types.some((t) => !CLOUD_TYPES.has(t));
+  if (cloud && local) return 'exclusão para a lixeira no OneDrive e no SharePoint e definitiva nas pastas do Windows';
+  return cloud ? 'exclusão para a lixeira' : 'exclusão definitiva (pastas do Windows)';
+}
+
+/** "1 exclusão", "1.000 exclusões". */
+export const deletionsText = (n) => `${Number(n).toLocaleString('pt-BR')} ${Number(n) === 1 ? 'exclusão' : 'exclusões'}`;
+
 /** Idade em texto: "12 anos", "8 meses", "20 dias". */
 export function ageText(days) {
   const n = Math.max(0, Math.floor(Number(days) || 0));

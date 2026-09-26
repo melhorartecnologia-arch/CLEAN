@@ -1290,6 +1290,18 @@ table.data.schedules th:last-child {
 table.data.schedules td.actions {
   background: var(--surface);
 }
+/* Telas estreitas: as ações (até 6 botões) quebram a linha e não ficam fixas sobre o nome. */
+@media (max-width: 700px) {
+  table.data.schedules td.actions,
+  table.data.schedules th:last-child {
+    position: static;
+    box-shadow: none;
+  }
+  table.data.schedules td.actions {
+    white-space: normal;
+    min-width: 7.5rem;
+  }
+}
 .clamp {
   display: -webkit-box;
   -webkit-line-clamp: 2;

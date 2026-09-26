@@ -69,15 +69,15 @@ export function zoneNote(info) {
   return server === local ? `Horários do servidor do CLEAN (${server}).` : `Horários do servidor do CLEAN (${server}), diferente do fuso deste computador (${local}).`;
 }
 
-/** Opção "Relatórios guardados" (owner: "deste agendamento", "desta política"). */
-export function keepField(schedule, owner = 'deste agendamento') {
+/** Opção "Relatórios guardados" (owner: "deste agendamento", "desta política"; note: texto extra). */
+export function keepField(schedule, owner = 'deste agendamento', note = '') {
   const sel = (a, b) => (String(a) === String(b) ? 'selected' : '');
   return html`<label class="field">
     <span>Relatórios guardados</span>
     <select name="keepLast">
       ${keepOptions(schedule?.keepLast ?? 0).map(([v, label]) => html`<option value="${v}" ${sel(schedule?.keepLast ?? 0, v)}>${label}</option>`)}
     </select>
-    <small>Os mais antigos ${owner} são excluídos a cada nova execução (o registro geral de exclusões é mantido).</small>
+    <small>Os mais antigos ${owner} são excluídos a cada nova execução (o registro geral de exclusões é mantido).${note ? ` ${note}` : ''}</small>
   </label>`;
 }
 

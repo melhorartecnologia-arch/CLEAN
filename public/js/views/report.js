@@ -21,7 +21,7 @@ import {
   redraw,
 } from '../ui.js';
 import { replaceQuery, setActiveNav } from '../nav.js';
-import { FILE_CRITERIA, MAIL_CRITERIA, describeRetention, ageText } from '../retention.js';
+import { FILE_CRITERIA, MAIL_CRITERIA, describeRetention, ageText, deletionModeText, deletionsText } from '../retention.js';
 
 const CONTENT_STATUS = {
   ok: 'Analisado',
@@ -109,7 +109,9 @@ function deletionBlock(r, noun, { active, deleting }) {
   const d = r.deletion;
   const how = d
     ? d.mode === 'retention'
-      ? `exclusão pela política de retenção${d.by ? ` (${d.by})` : ''}`
+      ? d.by?.startsWith('política de retenção')
+        ? d.by // já diz a política e quem a executou ou confirmou
+        : `exclusão pela política de retenção${d.by ? `, iniciada por ${d.by}` : ''}`
       : d.mode === 'auto'
         ? `exclusão automática da análise${d.by ? ` iniciada por ${d.by}` : ''}`
         : `exclusão manual${d.by ? ` por ${d.by}` : ''}`
@@ -784,7 +786,7 @@ const RETENTION_MAIL = {
     <span>${st.mailboxesTotal ? html`caixa <b>${Math.min((st.mailboxesDone || 0) + 1, st.mailboxesTotal)}</b> de <b>${fmtNum(st.mailboxesTotal)}</b>` : 'listando as caixas…'}</span>`,
 
   tiles: (st) => html`<div class="tile"><div class="label">Caixas analisadas</div><div class="value">${fmtCompact(Math.max(0, (st.mailboxesDone || 0) - (st.mailboxesSkipped || 0)))}</div><div class="detail">${st.mailboxesSkipped ? `${fmtNum(st.mailboxesSkipped)} sem e-mail` : 'só os cabeçalhos das mensagens antigas'}</div></div>
-    <div class="tile"><div class="label">Mensagens expiradas</div><div class="value">${fmtCompact(st.messagesMatched)}</div><div class="detail">recebidas antes da data de corte</div></div>
+    <div class="tile"><div class="label">Mensagens expiradas</div><div class="value">${fmtCompact(st.messagesMatched)}</div><div class="detail">recebidas antes da data de corte${st.retentionUnknown ? ` · ${fmtNum(st.retentionUnknown)} sem data válida (mantidas)` : ''}</div></div>
     <div class="tile"><div class="label">Espaço das expiradas</div><div class="value">${fmtBytes(st.bytesExpired || 0)}</div><div class="detail">somando as mensagens expiradas</div></div>
     <div class="tile"><div class="label">Erros</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`,
 
@@ -824,7 +826,7 @@ const RETENTION_MAIL = {
 
   tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Mensagem</th><th>Remetente</th><th>Recebida em</th><th class="num">Tamanho</th></tr>`,
 
-  row: (r) => html`<td><div class="name">${r.subject || '(sem assunto)'}</div>${deletionChip(r, 'a')}<div class="path">${r.mailbox} › ${r.folder}</div></td>
+  row: (r) => html`<td><div class="name">${r.subject || '(sem assunto)'}</div>${deletionChip(r, 'a')}${r.inTrash && !r.deletion ? html` <span class="chip" title="A mensagem já está na Lixeira da caixa">na lixeira</span>` : ''}<div class="path">${r.mailbox} › ${r.folder}</div></td>
     <td>${r.from || html`<span class="muted">sem remetente</span>`}</td>
     ${ageCell(r)}
     <td class="num nowrap">${fmtBytes(r.size)}</td>`,
@@ -952,15 +954,19 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       ? html`${icon('clock')} ${scheduleNoun} <a href="${scheduleBase}/${scan.scheduleId}">${scan.scheduleName}</a>`
       : html`${icon('clock')} ${scheduleNoun} "${scan.scheduleName}" (excluíd${P.retention ? 'a' : 'o'})`;
     // Retenção: a data de corte (no fuso do servidor, onde ela foi calculada) e a forma de exclusão.
+    // Retenção: a forma real da exclusão (nas pastas do Windows, sempre definitiva) e o limite.
+    const mode = P.retention ? deletionModeText(scan.kind, scan.retention, (scan.summary?.repositories || []).map((r) => r.type || 'local')) : '';
+    const limit = scan.retention?.maxDeletions ? `, até ${deletionsText(scan.retention.maxDeletions)} por execução` : '';
+    const blocked = scan.deletionBlocked ? ` · exclusão desativada nesta execução: ${scan.deletionBlocked}` : '';
     const cutoff = P.retention
       ? html`<div class="sub">Expiram ${P.o === 'a' ? 'as mensagens' : 'os arquivos'} com a data do critério anterior a <b>${fmtServerDateTime(scan.retention.cutoff, { weekday: false })}</b>${scan.options?.deleteMatches
-          ? html` · exclusão ${scan.retention.deleteMode === 'trash' ? 'para a lixeira' : 'definitiva'}${scan.retention.maxDeletions ? ` (até ${fmtNum(scan.retention.maxDeletions)} por execução)` : ''}`
-          : ' · simulação: nada é excluído'}</div>`
+          ? ` · ${mode}${limit}`
+          : blocked || ' · simulação: nada é excluído'}</div>`
       : '';
     const badge = scan.options?.deleteMatches
-      ? html`<span class="badge deleting">${P.retention ? 'exclui os expirados' : 'com exclusão automática'}</span>`
+      ? html`<span class="badge deleting">${P.retention ? `exclui ${P.o === 'a' ? 'as expiradas' : 'os expirados'}` : 'com exclusão automática'}</span>`
       : P.retention
-        ? html`<span class="badge">simulação</span>`
+        ? html`<span class="badge">${scan.deletionBlocked ? 'exclusão desativada' : 'simulação'}</span>`
         : '';
     paint(
       $('[data-head]'),
@@ -1033,6 +1039,8 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         t.failed ? `${fmtNum(t.failed)} com falha` : '',
         // Retenção: expirados além do limite de exclusões da execução (só listados).
         st.deleteSkipped ? `${fmtNum(st.deleteSkipped)} não excluíd${o}${st.deleteSkipped > 1 ? 's' : ''} (limite da execução)` : '',
+        st.deleteProtected ? `${fmtNum(st.deleteProtected)} em locais protegidos` : '',
+        st.alreadyInTrash ? `${fmtNum(st.alreadyInTrash)} já estava${st.alreadyInTrash > 1 ? 'm' : ''} na lixeira` : '',
       ]
         .filter(Boolean)
         .join(' · ') || (scan.options?.deleteMatches ? (P.retention ? 'exclusão pela política' : 'exclusão automática ligada') : 'pelo relatório');
@@ -1040,7 +1048,8 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     if (scan.options?.deleteMatches || t.deleted || t.missing || t.changed || t.failed) {
       tile = html`<div class="tile"><div class="label">Excluíd${o}s</div><div class="value">${fmtCompact(t.deleted)}</div><div class="detail">${detail}</div></div>`;
     } else if (P.retention) {
-      tile = html`<div class="tile"><div class="label">Excluíd${o}s</div><div class="value">0</div><div class="detail">simulação: nada foi excluído</div></div>`;
+      const why = scan.deletionBlocked ? `exclusão desativada nesta execução: ${scan.deletionBlocked}` : 'simulação: nada foi excluído';
+      tile = html`<div class="tile"><div class="label">Excluíd${o}s</div><div class="value">0</div><div class="detail">${why}</div></div>`;
     }
     paint($('[data-tiles]'), html`${P.tiles(st)}${tile}`);
     $('[data-error-count]').textContent = st.errors ? `(${fmtNum(st.errors)})` : '';

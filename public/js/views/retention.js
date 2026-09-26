@@ -4,6 +4,7 @@
 import { get, post, del } from '../api.js';
 import { html, render as paint, icon, toast, confirmDialog, openDialog, fmtNum, fmtServerDateTime, statusBadge, redraw, plural } from '../ui.js';
 import { zoneNote } from '../schedule-form.js';
+import { deletionModeText, deletionsText } from '../retention.js';
 
 const KIND = { files: 'Arquivos', mail: 'E-mail' };
 const TRIGGER = { schedule: 'No horário', 'catch-up': 'Atrasada', manual: 'Manual' };
@@ -16,11 +17,11 @@ const STATE = {
 const reportLink = (p, scanId) => `${p.kind === 'mail' ? '#/email/analises' : '#/analises'}/${scanId}`;
 const words = (p) => (p.kind === 'mail' ? { o: 'a', items: 'mensagens' } : { o: 'o', items: 'arquivos' });
 
-/** Forma e limite da exclusão: "exclusão definitiva, até 1.000 por execução". */
+/** Forma e limite da exclusão: "exclusão definitiva, até 1.000 exclusões por execução". */
 function deletionText(p) {
   const r = p.retention || {};
-  const mode = r.deleteMode === 'trash' ? (p.kind === 'mail' ? 'para a lixeira' : 'para a lixeira (OneDrive e SharePoint)') : 'definitiva';
-  return `exclusão ${mode}${r.maxDeletions ? `, até ${fmtNum(r.maxDeletions)} por execução` : ', sem limite por execução'}`;
+  const mode = deletionModeText(p.kind, r, (p.targets || []).map((t) => t.type || 'local'));
+  return `${mode}, ${r.maxDeletions ? `até ${deletionsText(r.maxDeletions)} por execução` : 'sem limite por execução'}`;
 }
 
 /** Resultado de uma execução do histórico (situação da análise, pulada, falhou ou perdida). */
@@ -31,7 +32,7 @@ function runResult(p, h) {
   if (h.status === 'failed') return html`<span class="badge failed">Não iniciada</span>`;
   const status = h.scanStatus || h.outcome?.status;
   const badge = status && status !== 'removed' ? statusBadge(status) : html`<span class="badge">Iniciada</span>`;
-  return h.reportExists ? html`<a href="${reportLink(p, h.scanId)}" class="result-link">${badge}<span class="sr-only"> (abrir o relatório)</span></a>` : badge;
+  return h.reportExists ? html`<a href="${reportLink(p, h.scanId)}" class="result-link" data-action="report">${badge}<span class="sr-only"> (abrir o relatório)</span></a>` : badge;
 }
 
 function outcomeText(p, h) {
@@ -54,7 +55,7 @@ export async function render(root, { ctx }) {
     const deleting = p.action === 'delete';
     return html`<tr data-id="${p.id}">
       <td>
-        <a href="#/retencao/${p.id}"><b>${p.name}</b></a>
+        <a href="#/retencao/${p.id}" data-action="open"><b>${p.name}</b></a>
         <span class="kind-badge">${KIND[p.kind]}</span>
         ${deleting ? html`<span class="chip danger">exclui ${p.kind === 'mail' ? 'as expiradas' : 'os expirados'}</span>` : html`<span class="chip">só lista (simulação)</span>`}
         <div class="muted small">${p.targets.map((t) => t.name).join(', ')}</div>
@@ -86,7 +87,7 @@ export async function render(root, { ctx }) {
             : html`<button class="icon-btn" data-action="resume" aria-label="Retomar ${p.name}" title="Retomar">${icon('refresh')}</button>`
           : ''}
         <button class="icon-btn" data-action="history" aria-label="Histórico de ${p.name}" title="Histórico">${icon('history')}</button>
-        <a class="icon-btn" href="#/retencao/${p.id}" aria-label="Editar ${p.name}" title="Editar">${icon('edit')}</a>
+        <a class="icon-btn" href="#/retencao/${p.id}" data-action="edit" aria-label="Editar ${p.name}" title="Editar">${icon('edit')}</a>
         <button class="icon-btn danger" data-action="delete" aria-label="Excluir ${p.name}" title="Excluir">${icon('trash')}</button>
       </td>
     </tr>`;
@@ -121,8 +122,8 @@ export async function render(root, { ctx }) {
           ? html`<div class="empty">
               <p>Nenhuma política ainda. Crie uma para eliminar, por exemplo, os arquivos sem uso há mais de 5 anos ou os e-mails com mais de 10 anos.</p>
               <div class="inline">
-                <a class="btn primary" href="#/retencao/nova">${icon('plus')} Política de arquivos</a>
-                <a class="btn" href="#/retencao/nova?tipo=email">${icon('plus')} Política de e-mail</a>
+                <a class="btn primary" href="#/retencao/nova" data-action="new-files">${icon('plus')} Política de arquivos</a>
+                <a class="btn" href="#/retencao/nova?tipo=email" data-action="new-mail">${icon('plus')} Política de e-mail</a>
               </div>
             </div>`
           : html`<div class="table-wrap">
@@ -201,7 +202,7 @@ export async function render(root, { ctx }) {
         const simulate = action === 'simulate';
         const message = simulate
           ? `Simular agora a política "${p.name}"? O relatório lista ${o}s ${items} que ${p.action === 'delete' ? 'seriam excluíd' : 'estão expirad'}${o}s; nada é excluído.`
-          : `Executar agora a política "${p.name}"? ${o === 'a' ? 'As' : 'Os'} ${items} expirad${o}s serão EXCLUÍD${o === 'a' ? 'A' : 'O'}S (${deletionText(p)}). Na dúvida, simule antes.`;
+          : `Executar agora a política "${p.name}"? ${o === 'a' ? 'As' : 'Os'} ${items} expirad${o}s serão EXCLUÍD${o === 'a' ? 'A' : 'O'}S: ${deletionText(p)}. Na dúvida, simule antes.`;
         const ok = await confirmDialog(message, { title: simulate ? 'Simular agora' : 'Executar e excluir agora', confirmLabel: simulate ? 'Simular' : 'Executar e excluir', danger: !simulate });
         if (!ok) return;
         const { scan } = await post(`/api/schedules/${p.id}/run`, simulate ? { simulate: true } : { confirm: true });

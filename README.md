@@ -578,7 +578,7 @@ recebidos há mais de 10 anos*. Aqui não há listas de referência: vale só a 
 
 | Critério | Data considerada | Quando usar |
 |---|---|---|
-| **Sem uso** (padrão) | A mais recente entre a última modificação, o último acesso e a criação | O mais seguro: o arquivo só expira se **nenhuma** dessas datas for recente. |
+| **Sem uso** (padrão) | A mais recente entre a última modificação, o último acesso e a criação | O mais seguro: o arquivo só expira se **nenhuma** dessas datas for recente. Sem o registro do último acesso (veja abaixo), um arquivo só lido não tem data recente — ele fica protegido só se tiver sido modificado ou criado recentemente. |
 | **Última modificação** | Quando o conteúdo foi alterado pela última vez | Confiável em qualquer servidor. Não considera os arquivos que só foram abertos (lidos). |
 | **Último acesso (abertura)** | Quando o arquivo foi aberto pela última vez | Só se o servidor de arquivos registrar o último acesso (veja abaixo). Não existe no OneDrive e no SharePoint. |
 | **Criação** | Quando o arquivo foi criado **ou copiado** para o repositório | Pastas de passagem: digitalizações, exportações, arquivos temporários. |
@@ -606,8 +606,9 @@ nada expira até essa data ficar antiga.
 **Idade máxima:** em dias, meses ou anos (meses e anos pelo calendário). A **data de corte** é
 calculada no início de cada execução — expiram os itens com a data do critério **anterior** a ela —
 e fica registrada no relatório; o formulário mostra a data de corte se a política fosse executada
-hoje. Arquivos sem a data do critério (um sistema de arquivos sem data de criação, por exemplo)
-nunca expiram e são contados à parte.
+hoje. Itens sem a data do critério (um sistema de arquivos sem data de criação, por exemplo) — ou
+com datas anteriores a 02/01/1980, que são valores padrão de sistemas antigos e de datas perdidas
+(01/01/1970, 01/01/1980) — nunca expiram e são contados à parte.
 
 **Demais opções:**
 
@@ -615,7 +616,9 @@ nunca expiram e são contados à parte.
   o nome, sem pastas); em branco, todos os arquivos. Pastas e arquivos ignorados no cadastro do
   repositório continuam ignorados;
 - e-mail: incluir ou não a **Lixeira** (Itens Excluídos) e o **Lixo Eletrônico**; as pastas
-  ignoradas no cadastro da conexão continuam ignoradas;
+  ignoradas no cadastro da conexão continuam ignoradas. Com a exclusão *para a lixeira*, as
+  mensagens expiradas que já estão na Lixeira aparecem no relatório (marcadas *na lixeira*), mas não
+  são movidas de novo nem contam como excluídas: o provedor as apaga pela regra da própria Lixeira;
 - **o que fazer**: *Somente listar (simulação)* ou *Excluir os itens expirados*. A exclusão exige
   **Permitir exclusão** nos locais escolhidos e a confirmação **EXCLUIR** a cada vez que a política é
   salva, e é conferida em cada execução como nos [agendamentos com exclusão](#agendamentos): se um
@@ -626,11 +629,16 @@ nunca expiram e são contados à parte.
   SharePoint (a forma da política, e não a do cadastro); nas pastas do Windows a exclusão é sempre
   definitiva;
 - **limite de exclusões por execução** (1.000 por padrão; 0 = sem limite): um freio contra uma
-  regra errada. Ao atingi-lo, a execução para de excluir e avisa; os demais itens expirados ficam só
-  no relatório e são excluídos nas execuções seguintes. As exclusões seguem a ordem da varredura
-  (não necessariamente dos mais antigos para os mais novos);
+  regra errada. Contam os itens de fato excluídos (uma falha não gasta a vaga) e as falhas têm o
+  mesmo limite, para a mesma falha não se repetir milhares de vezes (permissão, arquivo em uso,
+  rótulo de retenção). Ao atingir um dos dois, a execução para de excluir e avisa; os demais itens
+  expirados ficam só no relatório e são excluídos nas execuções seguintes. As exclusões seguem a
+  ordem da varredura (não necessariamente dos mais antigos para os mais novos). Itens em locais
+  protegidos (um repositório sem *Permitir exclusão* dentro do analisado, as pastas do CLEAN, contas
+  ou sites protegidos) aparecem no relatório, mas nunca são tentados nem contam no limite;
 - **quando executar**: *Manualmente* (pelos botões da lista) ou *Agendar*, com as mesmas regras de
-  recorrência, horários perdidos, histórico e relatórios guardados dos agendamentos.
+  recorrência, horários perdidos, histórico e relatórios guardados dos agendamentos (os relatórios
+  das simulações contam à parte: simular não apaga o relatório de uma execução que excluiu).
 
 **Na lista de políticas:** **Simular agora** executa a política sem excluir nada — o relatório mostra
 exatamente o que seria excluído (faça isso antes de ligar a exclusão); **Executar e excluir agora**
@@ -650,7 +658,10 @@ As execuções também aparecem em *Análises de arquivos* e *Análises de e-mai
 - pastas do Windows: só as datas de cada arquivo (o conteúdo não é lido); o arquivo expirado é
   excluído logo depois de registrado no relatório (com o proprietário, se a opção estiver marcada),
   com as mesmas conferências da exclusão automática — tamanho e data de modificação iguais aos da
-  listagem, dentro do repositório e fora dos locais protegidos;
+  listagem, dentro do repositório e fora dos locais protegidos — e **se continuar expirado**: a data
+  do critério é lida de novo na hora de excluir (um arquivo aberto depois da listagem é mantido,
+  como *alterado depois da análise*). A exclusão manual pelo relatório faz a mesma conferência e,
+  se o arquivo deixou de estar expirado, pede uma segunda confirmação;
 - OneDrive e SharePoint: as datas vêm do Microsoft 365, sem baixar os arquivos; a exclusão confere a
   versão do arquivo;
 - e-mail: só os cabeçalhos das mensagens anteriores à data de corte são lidos (no Microsoft 365 e no

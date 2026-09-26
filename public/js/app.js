@@ -66,6 +66,9 @@ async function route() {
     }
   }
   currentUrl = location.href;
+  // Um link dentro de um diálogo (ex.: o relatório no Histórico) leva a outra tela: o diálogo fecha.
+  const modal = document.getElementById('modal');
+  if (modal?.open) modal.close();
   const token = ++navigation;
   const hash = location.hash.replace(/^#/, '') || '/';
   const [path, query = ''] = hash.split('?');

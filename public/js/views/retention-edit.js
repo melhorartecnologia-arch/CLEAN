@@ -5,7 +5,7 @@ import { get, post, put } from '../api.js';
 import { html, render as paint, icon, toast, fmtServerDateTime, plural } from '../ui.js';
 import { go } from '../nav.js';
 import { scheduleSection, bindSchedule, readSchedule, scheduling, keepField } from '../schedule-form.js';
-import { FILE_CRITERIA, MAIL_CRITERIA, UNITS, DEFAULT_MAX_DELETIONS, describeRetention, cutoffPreview } from '../retention.js';
+import { FILE_CRITERIA, MAIL_CRITERIA, UNITS, DEFAULT_MAX_DELETIONS, describeRetention, cutoffPreview, deletionsText } from '../retention.js';
 
 const CLOUD_LABELS = { onedrive: 'OneDrive', sharepoint: 'SharePoint' };
 const TYPE_LABELS = { graph: 'Microsoft 365', gmail: 'Google Workspace', imap: 'IMAP' };
@@ -28,8 +28,9 @@ export async function render(root, { params, query, ctx }) {
   const id = params[0];
   const policy = id ? await get(`/api/schedules/${encodeURIComponent(id)}`) : null;
   if (policy && policy.purpose !== 'retention') {
-    // Um agendamento de análise aberto pelo endereço das políticas.
-    go(`/agendamentos/${policy.id}`);
+    // Um agendamento de análise aberto pelo endereço das políticas (sem nova entrada no histórico:
+    // "Voltar" não cai de novo aqui).
+    location.replace(`#/agendamentos/${policy.id}`);
     return null;
   }
   const kind = policy ? policy.kind : query.get('tipo') === 'email' ? 'mail' : 'files';
@@ -114,8 +115,8 @@ export async function render(root, { params, query, ctx }) {
                   <label class="check"><input type="checkbox" name="includeJunk" ${chk(r.includeJunk !== false)} /><span>Incluir o Lixo Eletrônico (spam)</span></label>`
               : html`<label class="field">
                   <span>Somente os arquivos com estes nomes (opcional)</span>
-                  <textarea name="patterns" rows="3" spellcheck="false" placeholder="*.tmp&#10;*.bak&#10;~$*">${(r.patterns || []).join('\n')}</textarea>
-                  <small>Um padrão por linha: * vale qualquer sequência e ? um caractere (ex.: *.tmp). Em branco: todos os arquivos.</small>
+                  <textarea name="patterns" rows="3" spellcheck="false" placeholder="*.tmp&#10;*.bak&#10;*.log">${(r.patterns || []).join('\n')}</textarea>
+                  <small>Um padrão por linha: * vale qualquer sequência e ? um caractere (ex.: *.tmp). Em branco: todos os arquivos. Os arquivos ignorados no repositório e por padrão (temporários do Office ~$*, Thumbs.db...) continuam de fora.</small>
                 </label>`}
             </div>
           </fieldset>
@@ -129,9 +130,9 @@ export async function render(root, { params, query, ctx }) {
                   <div>
                     <b>O último acesso só é confiável se o Windows do servidor de arquivos o registrar</b> — em muitos servidores esse registro fica desligado.
                     Para conferir, rode no servidor <span class="mono">fsutil behavior query disablelastaccess</span>: 0 ou 2, registra; 1 ou 3, não registra.
-                    Sem o registro, a data fica parada (na criação ou na cópia do arquivo) e um arquivo aberto todos os dias parece antigo — e seria excluído.
-                    Programas que leem todos os arquivos (antivírus, backup, indexação e as análises de conteúdo do CLEAN) também podem atualizar o último acesso.
-                    Na dúvida, prefira <b>Sem uso</b>: o arquivo só expira se nenhuma data for recente.
+                    Sem o registro, a data fica parada (na criação ou na cópia do arquivo) e um arquivo aberto todos os dias, mas não alterado, parece antigo — e seria excluído.
+                    Isso vale também para <b>Sem uso</b>, que nesse caso só protege os arquivos modificados ou criados recentemente.
+                    No sentido oposto, programas que leem todos os arquivos (antivírus, backup, indexação e as análises de conteúdo do CLEAN) podem atualizar o último acesso de tudo — e aí nada expira por esse critério.
                   </div>
                 </div>
                 <div class="alert error full" data-cloud-warning hidden>${icon('alert')}<div>O OneDrive e o SharePoint não informam o último acesso de cada arquivo: escolha outro critério ou desmarque os repositórios da nuvem.</div></div>`}
@@ -155,8 +156,8 @@ export async function render(root, { params, query, ctx }) {
                 </label>
                 <label class="check">
                   <input type="radio" name="deleteMode" value="trash" ${chk(r.deleteMode === 'trash')} />
-                  <span><b>Para a lixeira</b><br /><small class="muted">${mail
-                    ? 'Vai para Itens Excluídos (Microsoft 365) ou para a Lixeira (Google e IMAP), de onde ainda pode ser recuperada.'
+                  <span><b>Para a lixeira</b><br /><small class="muted" data-trash-hint>${mail
+                    ? 'Vai para Itens Excluídos (Microsoft 365) ou para a Lixeira (Google e IMAP), de onde ainda pode ser recuperada; as que já estão na Lixeira ficam lá até o provedor apagá-las.'
                     : 'Vale no OneDrive e no SharePoint (Lixeira do site). Nas pastas do Windows a exclusão é sempre definitiva: arquivos excluídos pela rede não vão para a Lixeira.'}</small></span>
                 </label>
               </fieldset>
@@ -169,7 +170,7 @@ export async function render(root, { params, query, ctx }) {
                 ${icon('alert')}
                 <div>
                   <b>${mail ? 'Exclusão das mensagens expiradas' : 'Exclusão sem volta nas pastas do Windows'}:</b> tudo o que a regra considerar expirado será excluído, em todas as execuções, sem nova confirmação.
-                  Cada execução confere o cadastro: se ${mail ? 'uma conexão' : 'um repositório'} deixar de permitir a exclusão, mudar de ${mail ? 'caixas' : 'caminho'} ou de forma de exclusão, as execuções não excluem até a política ser salva e confirmada de novo.
+                  Cada execução confere o cadastro: se ${mail ? 'uma conexão' : 'um repositório'} deixar de permitir a exclusão ou mudar de ${mail ? 'conta, servidor ou caixas' : 'caminho, contas ou sites'}, as execuções deixam de ser iniciadas até a política ser salva e confirmada de novo. A forma de exclusão é sempre a desta política.
                   <label class="field"><span>Digite EXCLUIR para confirmar${deleting ? ' (de novo, a cada vez que a política é salva)' : ''}</span><input type="text" name="confirmDelete" autocomplete="off" spellcheck="false" /></label>
                 </div>
               </div>
@@ -188,7 +189,7 @@ export async function render(root, { params, query, ctx }) {
 
           ${scheduleSection({ kind, schedule: policy, info: ctx.info, manual: true, period: false, keep: false })}
 
-          <div class="form-grid full">${keepField(policy, 'desta política')}</div>
+          <div class="form-grid full">${keepField(policy, 'desta política', 'Os relatórios das simulações contam à parte.')}</div>
         </div>
         <div class="inline page-actions">
           <button type="submit" class="btn primary" data-submit>${icon('check')} Salvar política</button>
@@ -213,9 +214,17 @@ export async function render(root, { params, query, ctx }) {
       ...(mail
         ? { includeTrash: f.get('includeTrash') === 'on', includeJunk: f.get('includeJunk') === 'on' }
         : { patterns: String(f.get('patterns') || '').split(/\r?\n/).map((p) => p.trim()).filter(Boolean) }),
-      maxDeletions: f.get('maxDeletions') === '' ? DEFAULT_MAX_DELETIONS : Number(f.get('maxDeletions')),
+      maxDeletions: limitValue(),
       deleteMode: f.get('deleteMode') === 'trash' ? 'trash' : 'permanent',
     };
+  };
+
+  /** Limite de exclusões (null se inválido); em branco, o padrão. */
+  const limitValue = () => {
+    const raw = String(form.elements.maxDeletions.value || '').trim();
+    if (raw === '') return DEFAULT_MAX_DELETIONS;
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= 0 && n <= 10_000_000 ? n : null;
   };
 
   const sync = () => {
@@ -228,18 +237,32 @@ export async function render(root, { params, query, ctx }) {
       form.querySelector('[data-access-warning]').hidden = c !== 'accessed';
       form.querySelector('[data-cloud-warning]').hidden = !(c === 'accessed' && cloudChosen());
     }
+    if (!mail) {
+      // "Para a lixeira" só existe no OneDrive e no SharePoint: sem eles, a exclusão é definitiva.
+      const trash = form.querySelector('[name="deleteMode"][value="trash"]');
+      trash.disabled = !cloudChosen();
+      if (trash.disabled && trash.checked) form.querySelector('[name="deleteMode"][value="permanent"]').checked = true;
+      form.querySelector('[data-trash-hint]').textContent = trash.disabled
+        ? 'Só para o OneDrive e o SharePoint. Nos repositórios escolhidos (pastas do Windows) a exclusão é sempre definitiva: arquivos excluídos pela rede não vão para a Lixeira.'
+        : 'Vale no OneDrive e no SharePoint (Lixeira do site). Nas pastas do Windows a exclusão é sempre definitiva: arquivos excluídos pela rede não vão para a Lixeira.';
+    }
     form.elements.amount.max = String(UNITS[retention.unit]?.max || 100);
     const cutoff = cutoffPreview(retention);
-    paint(
-      preview,
-      cutoff
-        ? html`<div class="preview-title">${icon('clock')} <b>${describeRetention(retention, kind)}</b></div>
-            <div class="muted small">Se executada hoje, a política ${deletingNow ? 'excluiria' : 'listaria'} os ${EXPIRES[c](cutoff.toLocaleDateString('pt-BR'))}.${deletingNow && retention.maxDeletions ? ` No máximo ${retention.maxDeletions.toLocaleString('pt-BR')} exclusões por execução.` : ''}</div>`
-        : html`<div class="danger-text small">${icon('alert')} Informe a idade máxima: de 1 a ${UNITS[retention.unit]?.max || 100} ${UNITS[retention.unit]?.many || 'anos'}.</div>`,
-    );
+    const limit = retention.maxDeletions;
+    const limitText = !deletingNow ? '' : limit === null ? ' Informe um limite de exclusões válido (0 = sem limite).' : limit ? ` No máximo ${deletionsText(limit)} por execução.` : ' Sem limite de exclusões por execução.';
+    const content = cutoff
+      ? html`<div class="preview-title">${icon('clock')} <b>${describeRetention(retention, kind)}</b></div>
+          <div class="muted small">Se executada hoje, a política ${deletingNow ? 'excluiria' : 'listaria'} os ${EXPIRES[c](cutoff.toLocaleDateString('pt-BR'))}.${limitText}</div>`
+      : html`<div class="danger-text small">${icon('alert')} Informe a idade máxima: de 1 a ${UNITS[retention.unit]?.max || 100} ${UNITS[retention.unit]?.many || 'anos'}.</div>`;
+    // A prévia é uma região "aria-live": só é redesenhada quando o texto muda.
+    if (content.value !== lastPreview) {
+      lastPreview = content.value;
+      paint(preview, content);
+    }
     submit.className = `btn ${deletingNow ? 'danger' : 'primary'}`;
     paint(submit, html`${icon(deletingNow ? 'trash' : 'check')} ${deletingNow ? 'Salvar política com exclusão' : 'Salvar política'}`);
   };
+  let lastPreview = '';
 
   const onChange = (event) => {
     if (event.target.name !== 'confirmDelete' && event.target.name !== 'name') sync();
@@ -279,6 +302,14 @@ export async function render(root, { params, query, ctx }) {
       return toast(`Informe a idade máxima: de 1 a ${UNITS[retention.unit].max} ${UNITS[retention.unit].many}.`, 'error');
     }
     if (!mail && retention.criterion === 'accessed' && cloudChosen()) return toast('O OneDrive e o SharePoint não informam o último acesso: escolha outro critério.', 'error');
+    if (retention.maxDeletions === null) {
+      // Só vale com a exclusão (o campo fica escondido em "Somente listar"): o padrão é mantido.
+      if (!deletingNow) retention.maxDeletions = policy?.retention?.maxDeletions ?? DEFAULT_MAX_DELETIONS;
+      else {
+        form.elements.maxDeletions.focus();
+        return toast('Informe o limite de exclusões por execução: um número inteiro (0 = sem limite).', 'error');
+      }
+    }
     if (deletingNow) {
       const blocked = targets.filter((t) => targetIds.includes(t.id) && !t.allowDelete).map((t) => t.name);
       if (blocked.length) {

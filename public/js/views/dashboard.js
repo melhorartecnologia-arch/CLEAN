@@ -21,12 +21,15 @@ export async function render(root, { ctx }) {
   const attention = planned.filter((s) => s.problems.length || s.lastRun?.status === 'failed');
   const isPolicy = (s) => s.purpose === 'retention';
   const editLink = (s) => `${isPolicy(s) ? '#/retencao' : '#/agendamentos'}/${s.id}`;
+  // Os problemas aparecem na lista (e não no formulário de edição).
+  const listLink = (s) => (isPolicy(s) ? '#/retencao' : '#/agendamentos');
   const terms = lists.reduce((sum, l) => sum + l.termCount, 0);
   // Os números de ocorrências vêm das análises por termos (as execuções da retenção não têm termos).
   const lastFiles = scans.find((s) => !isMail(s) && !s.retention && s.status === 'completed');
   const lastMail = scans.find((s) => isMail(s) && !s.retention && s.status === 'completed');
   const active = scans.filter(running);
-  const ready = (repos.length > 0 || sources.length > 0) && terms > 0;
+  // Pronto para usar: com locais cadastrados e uma lista com termos (ou uma política de retenção).
+  const ready = (repos.length > 0 || sources.length > 0) && (terms > 0 || policies.length > 0);
   const link = (s) => `${isMail(s) ? '#/email/analises' : '#/analises'}/${s.id}`;
 
   paint(
@@ -89,7 +92,7 @@ export async function render(root, { ctx }) {
             </div>
             <p class="muted small">${zoneNote(ctx.info)}</p>
             ${attention.length
-              ? html`<div class="alert">${icon('alert')}<div><b>Precisa${attention.length > 1 ? 'm' : ''} de atenção:</b> ${attention.map((s, i) => html`${i ? ', ' : ''}<a href="${editLink(s)}">${s.name}</a>${isPolicy(s) ? ' (retenção)' : ''}`)}.</div></div>`
+              ? html`<div class="alert">${icon('alert')}<div><b>Precisa${attention.length > 1 ? 'm' : ''} de atenção:</b> ${attention.map((s, i) => html`${i ? ', ' : ''}<a href="${listLink(s)}">${s.name}</a>${isPolicy(s) ? ' (retenção)' : ''}`)}. Os detalhes estão na lista.</div></div>`
               : ''}
             ${upcoming.length
               ? html`<ul class="upcoming">
@@ -99,7 +102,7 @@ export async function render(root, { ctx }) {
                       <a href="${editLink(s)}">${s.name}</a>
                       <span class="kind-badge">${s.kind === 'mail' ? 'E-mail' : 'Arquivos'}</span>
                       ${isPolicy(s) ? html`<span class="chip">retenção</span>` : ''}
-                      ${s.action === 'delete' ? html`<span class="chip danger">${isPolicy(s) ? 'exclui os expirados' : 'exclusão automática'}</span>` : ''}
+                      ${s.action === 'delete' ? html`<span class="chip danger">${isPolicy(s) ? `exclui ${s.kind === 'mail' ? 'as expiradas' : 'os expirados'}` : 'exclusão automática'}</span>` : ''}
                     </li>`,
                   )}
                 </ul>`
