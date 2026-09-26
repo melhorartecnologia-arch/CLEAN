@@ -61,7 +61,7 @@ export function retentionModeText(scan) {
   const cloud = repos.some((r) => CLOUD_TYPES.has(r.type));
   const local = repos.some((r) => !CLOUD_TYPES.has(r.type));
   if (cloud && local) return 'para a lixeira no OneDrive e no SharePoint; definitivamente nas pastas do Windows';
-  return cloud ? 'para a lixeira' : 'definitivamente (pastas do Windows)';
+  return cloud ? 'para a lixeira' : 'definitivamente, nas pastas do Windows';
 }
 
 export function retentionInfoRows(scan) {

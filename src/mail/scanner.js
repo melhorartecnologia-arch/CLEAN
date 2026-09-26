@@ -9,7 +9,7 @@ import { friendlyError, withTimeout } from '../scan/errors.js';
 import { createConnector } from './connectors.js';
 import { validDate } from './common.js';
 import { deletionEvent } from '../scan/delete.js';
-import { ageDays, MIN_VALID_DATE } from '../retention/policy.js';
+import { ageDays, MIN_VALID_DATE, limitWarning } from '../retention/policy.js';
 
 // Tempo máximo para ler uma mensagem já baixada (anexos incluídos).
 const MESSAGE_TIMEOUT = 5 * 60 * 1000;
@@ -97,7 +97,6 @@ export class MailScanner {
     // Limite de exclusões da execução: vagas em uso (exclusões feitas ou na fila) e falhas.
     this.deleteQueued = 0;
     this.deleteFailures = 0;
-    this.limitLogged = false;
   }
 
   cancel() {
@@ -170,6 +169,9 @@ export class MailScanner {
     this.current = null;
     const s = this.stats;
     const seconds = Math.round((Date.now() - started) / 1000);
+    // Retenção: aviso do limite pelos números finais (as exclusões de cada caixa são feitas no fim dela).
+    const warning = this.retention ? limitWarning({ limit: this.retention.maxDeletions, deleted: s.deleted, failures: this.deleteFailures, skipped: s.deleteSkipped }, 'mail') : null;
+    if (warning) this.log('warn', warning);
     this.log(
       'info',
       `${this.cancelled ? 'Análise cancelada' : 'Análise concluída'} em ${seconds}s: ${s.messagesSeen} mensagem(ns) verificadas em ${s.mailboxesDone} caixa(s), ${s.messagesMatched} ${this.retention ? 'expirada(s)' : 'com ocorrências'}.`,
@@ -268,6 +270,12 @@ export class MailScanner {
    * registradas) e as demais não começam.
    */
   async deleteMessages(connector, source, mailbox, pending) {
+    // Retenção com a exclusão desligada durante a análise (o aviso já foi registrado): nada foi
+    // tentado, então nada vira falha; as vagas do limite voltam.
+    if (this.retention && !source.allowDelete) {
+      this.deleteQueued -= pending.length;
+      return;
+    }
     const method = source.deleteMode === 'trash' ? 'trash' : 'permanent';
     this.flushResults(); // os registros chegam antes dos eventos de exclusão
     this.current = { source: source.name, mailbox: mailbox.address, folder: null, path: `${mailbox.address} › excluindo ${pending.length} mensagem(ns)` };
@@ -307,7 +315,14 @@ export class MailScanner {
       if (byId.size) this.log('warn', `Cancelado: ${byId.size} mensagem(ns) da caixa ${mailbox.address} não foram excluídas.`);
       return;
     }
-    if (!failure && !source.allowDelete) failure = 'A exclusão foi desativada no cadastro da conexão durante a análise.';
+    if (!failure && !source.allowDelete) {
+      if (this.retention) {
+        // Retenção: as que ainda não foram tentadas não viram falhas (as vagas voltam).
+        for (const list of byId.values()) this.deleteQueued -= list.length;
+        return;
+      }
+      failure = 'A exclusão foi desativada no cadastro da conexão durante a análise.';
+    }
     for (const id of [...byId.keys()]) record(id, { ok: false, error: failure || 'O servidor não confirmou a exclusão.' });
     this.progress(true);
   }
@@ -376,17 +391,7 @@ export class MailScanner {
   queueExpiredDelete(item) {
     const limit = this.retention.maxDeletions || 0;
     if (limit && (this.deleteQueued >= limit || this.deleteFailures >= limit)) {
-      this.stats.deleteSkipped++;
-      if (!this.limitLogged) {
-        this.limitLogged = true;
-        const count = `${limit} ${limit === 1 ? 'exclusão' : 'exclusões'}`;
-        this.log(
-          'warn',
-          this.deleteFailures >= limit
-            ? `${limit === 1 ? 'Uma falha' : `${limit} falhas`} de exclusão nesta execução (o limite da política): as demais mensagens expiradas foram apenas listadas. Confira a aba Erros.`
-            : `Limite de ${count} desta execução atingido: as demais mensagens expiradas foram apenas listadas. Confira o relatório e, se estiver certo, aumente o limite na política.`,
-        );
-      }
+      this.stats.deleteSkipped++; // o aviso sai no fim, pelos números finais
       return;
     }
     this.deleteQueued++;

@@ -146,6 +146,22 @@ export function ageBucket(days) {
   return AGE_BUCKETS.find((b) => days < b.max) || AGE_BUCKETS.at(-1);
 }
 
+/**
+ * Aviso do limite de exclusões da execução, pelos números finais (null: nada deixou de ser
+ * excluído por causa do limite). kind: 'files' | 'mail'.
+ */
+export function limitWarning({ limit, deleted, failures, skipped }, kind = 'files') {
+  if (!limit || !skipped) return null;
+  const items = kind === 'mail' ? `${skipped} mensagem(ns) expirada(s)` : `${skipped} arquivo(s) expirado(s)`;
+  if (failures >= limit) {
+    return `${limit === 1 ? 'Uma falha' : `${limit} falhas`} de exclusão nesta execução (o limite da política): as exclusões foram interrompidas e ${items} só foram listados. Confira a aba Erros (permissões, itens em uso, rótulos de retenção...).`;
+  }
+  if (deleted >= limit) {
+    return `Limite de ${limit} ${limit === 1 ? 'exclusão' : 'exclusões'} desta execução atingido: ${items} só foram listados. Confira o relatório e, se estiver certo, aumente o limite na política.`;
+  }
+  return `${items} não foram excluídos nesta execução: as vagas do limite ficaram reservadas para exclusões que falharam. Eles serão excluídos nas próximas execuções.`;
+}
+
 /** "5 anos", "1 mês", "30 dias". */
 export function amountText(retention) {
   const u = UNITS[retention.unit] || UNITS.years;
@@ -183,12 +199,13 @@ function globMatch(pattern, name) {
   let star = -1;
   let mark = 0;
   while (n < name.length) {
-    if (p < pattern.length && (pattern[p] === '?' || pattern[p] === name[n])) {
-      p++;
-      n++;
-    } else if (p < pattern.length && pattern[p] === '*') {
+    // O curinga vem primeiro: um "*" no próprio nome (possível em compartilhamentos Samba) não o anula.
+    if (p < pattern.length && pattern[p] === '*') {
       star = p++;
       mark = n;
+    } else if (p < pattern.length && (pattern[p] === '?' || pattern[p] === name[n])) {
+      p++;
+      n++;
     } else if (star !== -1) {
       p = star + 1;
       n = ++mark;

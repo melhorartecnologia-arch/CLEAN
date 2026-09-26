@@ -53,22 +53,34 @@ let cleanup = null;
 let navigation = 0;
 let currentUrl = location.href;
 let leaveGuard = null; // função async que decide se é possível sair da tela atual
+let guarding = false; // a pergunta do leaveGuard está aberta
 
 async function route() {
   // Tela com alterações não salvas: pergunta antes de sair (e volta a URL se o usuário desistir).
   if (leaveGuard && location.href !== currentUrl) {
     const guard = leaveGuard;
     leaveGuard = null;
-    if (!(await guard())) {
+    const started = navigation;
+    guarding = true;
+    let leave;
+    try {
+      leave = await guard();
+    } finally {
+      guarding = false;
+    }
+    // Outra navegação aconteceu com a pergunta aberta (ex.: "Voltar"): ela decide a tela.
+    if (navigation !== started) return;
+    if (!leave) {
       leaveGuard = guard;
       history.replaceState(null, '', currentUrl);
       return;
     }
   }
   currentUrl = location.href;
-  // Um link dentro de um diálogo (ex.: o relatório no Histórico) leva a outra tela: o diálogo fecha.
+  // Um link dentro de um diálogo (ex.: o relatório no Histórico) leva a outra tela: o diálogo fecha
+  // (menos a pergunta sobre alterações não salvas, que continua esperando a resposta).
   const modal = document.getElementById('modal');
-  if (modal?.open) modal.close();
+  if (modal?.open && !guarding) modal.close();
   const token = ++navigation;
   const hash = location.hash.replace(/^#/, '') || '/';
   const [path, query = ''] = hash.split('?');

@@ -95,11 +95,12 @@ const deletionFilter = (filters, o) => html`<label class="field"><span>Exclusão
 
 const isGone = (d) => d?.status === 'deleted' || d?.status === 'missing';
 
-function deletionChip(r, o) {
+function deletionChip(r, o, retention = false) {
   const d = r.deletion;
   if (!d) return '';
   if (d.status === 'failed') return html` <span class="chip danger">falha ao excluir</span>`;
-  if (d.status === 'changed') return html` <span class="chip">mantid${o}: alterad${o}</span>`;
+  // Retenção: "mudou" também quando o arquivo deixou de estar expirado (ex.: foi aberto).
+  if (d.status === 'changed') return html` <span class="chip">mantid${o}: ${retention ? 'mudou depois da listagem' : `alterad${o}`}</span>`;
   return html` <span class="chip deleted">${d.status === 'missing' ? `não encontrad${o}` : d.method === 'trash' ? 'na lixeira' : `excluíd${o}`}</span>`;
 }
 
@@ -688,7 +689,7 @@ const RETENTION_FILES = {
   tableHead: (scan) =>
     html`<tr><th><span class="sr-only">Detalhes</span></th><th>Arquivo</th><th>Último usuário</th><th>${(FILE_CRITERIA[scan.retention?.criterion] || FILE_CRITERIA.used).date}</th><th class="num">Tamanho</th></tr>`,
 
-  row: (r) => html`<td><div class="name">${r.name}</div>${deletionChip(r, 'o')}<div class="path">${folderOf(r)}</div></td>
+  row: (r) => html`<td><div class="name">${r.name}</div>${deletionChip(r, 'o', true)}<div class="path">${folderOf(r)}</div></td>
     <td>${r.lastUser ? html`${r.lastUser}<div><span class="chip source">${SOURCE_SHORT[r.lastUserSource]}</span></div>` : html`<span class="muted">não identificado</span>`}</td>
     ${ageCell(r)}
     <td class="num nowrap">${fmtBytes(r.size)}</td>`,
@@ -826,7 +827,7 @@ const RETENTION_MAIL = {
 
   tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Mensagem</th><th>Remetente</th><th>Recebida em</th><th class="num">Tamanho</th></tr>`,
 
-  row: (r) => html`<td><div class="name">${r.subject || '(sem assunto)'}</div>${deletionChip(r, 'a')}${r.inTrash && !r.deletion ? html` <span class="chip" title="A mensagem já está na Lixeira da caixa">na lixeira</span>` : ''}<div class="path">${r.mailbox} › ${r.folder}</div></td>
+  row: (r) => html`<td><div class="name">${r.subject || '(sem assunto)'}</div>${deletionChip(r, 'a')}${r.inTrash && !r.deletion ? html` <span class="chip" title="A mensagem já estava na Lixeira da caixa">já estava na lixeira</span>` : ''}<div class="path">${r.mailbox} › ${r.folder}</div></td>
     <td>${r.from || html`<span class="muted">sem remetente</span>`}</td>
     ${ageCell(r)}
     <td class="num nowrap">${fmtBytes(r.size)}</td>`,
@@ -960,7 +961,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const blocked = scan.deletionBlocked ? ` · exclusão desativada nesta execução: ${scan.deletionBlocked}` : '';
     const cutoff = P.retention
       ? html`<div class="sub">Expiram ${P.o === 'a' ? 'as mensagens' : 'os arquivos'} com a data do critério anterior a <b>${fmtServerDateTime(scan.retention.cutoff, { weekday: false })}</b>${scan.options?.deleteMatches
-          ? ` · ${mode}${limit}`
+          ? ` · ${mode}${limit}${scan.deletionRevoked ? ` · exclusão interrompida: ${scan.deletionRevoked}` : ''}`
           : blocked || ' · simulação: nada é excluído'}</div>`
       : '';
     const badge = scan.options?.deleteMatches
@@ -1035,12 +1036,16 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const detail =
       [
         t.missing ? `${fmtNum(t.missing)} já não existia${t.missing > 1 ? 'm' : ''}` : '',
-        t.changed ? `${fmtNum(t.changed)} mantid${o}${t.changed > 1 ? 's' : ''} (alterad${o}${t.changed > 1 ? 's' : ''} depois da análise)` : '',
+        t.changed
+          ? `${fmtNum(t.changed)} mantid${o}${t.changed > 1 ? 's' : ''} (alterad${o}${t.changed > 1 ? 's' : ''}${P.retention && scan.kind !== 'mail' ? ' ou não mais expirad' + o + (t.changed > 1 ? 's' : '') : ''} depois da ${P.retention ? 'listagem' : 'análise'})`
+          : '',
         t.failed ? `${fmtNum(t.failed)} com falha` : '',
         // Retenção: expirados além do limite de exclusões da execução (só listados).
         st.deleteSkipped ? `${fmtNum(st.deleteSkipped)} não excluíd${o}${st.deleteSkipped > 1 ? 's' : ''} (limite da execução)` : '',
         st.deleteProtected ? `${fmtNum(st.deleteProtected)} em locais protegidos` : '',
         st.alreadyInTrash ? `${fmtNum(st.alreadyInTrash)} já estava${st.alreadyInTrash > 1 ? 'm' : ''} na lixeira` : '',
+        // Exclusão desligada durante a execução (política pausada ou alterada, "Permitir exclusão" desligada).
+        scan.deletionRevoked ? `exclusão interrompida: ${scan.deletionRevoked}` : '',
       ]
         .filter(Boolean)
         .join(' · ') || (scan.options?.deleteMatches ? (P.retention ? 'exclusão pela política' : 'exclusão automática ligada') : 'pelo relatório');
@@ -1390,7 +1395,8 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           res = await send(false);
         } catch (err) {
           if (err.code !== 'changed') throw err;
-          if (!(await confirmDialog(err.message, { title: 'Arquivo alterado depois da análise', confirmLabel: 'Excluir mesmo assim' }))) return;
+          const title = P.retention ? 'Arquivo alterado ou não mais expirado' : 'Arquivo alterado depois da análise';
+          if (!(await confirmDialog(err.message, { title, confirmLabel: 'Excluir mesmo assim' }))) return;
           res = await send(true);
         }
         const d = res.deletion;

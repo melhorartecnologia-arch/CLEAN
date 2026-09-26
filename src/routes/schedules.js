@@ -126,7 +126,7 @@ export function schedulesRouter({ store, manager, scheduler }) {
 
   const find = (id) => {
     const schedule = store.getSchedule(id);
-    if (!schedule) throw new HttpError(404, 'Agendamento ou política de retenção não encontrado. Ele pode ter sido excluído.');
+    if (!schedule) throw new HttpError(404, 'Não encontrado no cadastro: o item pode ter sido excluído.');
     return schedule;
   };
 

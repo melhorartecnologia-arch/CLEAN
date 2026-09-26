@@ -66,11 +66,12 @@ export function cutoffPreview(r, now = new Date()) {
   const amount = Number(r.amount);
   if (!Number.isInteger(amount) || amount < 1 || !UNITS[r.unit] || amount > UNITS[r.unit].max) return null;
   const d = new Date(now);
-  if (r.unit === 'years') d.setFullYear(d.getFullYear() - amount);
-  else if (r.unit === 'months') {
+  if (r.unit === 'years' || r.unit === 'months') {
+    // Como no servidor: anos em meses, com o último dia do mês (29/02 menos 1 ano: 28/02).
+    const months = r.unit === 'years' ? amount * 12 : amount;
     const day = d.getDate();
     d.setDate(1);
-    d.setMonth(d.getMonth() - amount);
+    d.setMonth(d.getMonth() - months);
     d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
   } else d.setDate(d.getDate() - amount);
   return d;

@@ -215,7 +215,8 @@ export async function render(root, { params, query, ctx }) {
         ? { includeTrash: f.get('includeTrash') === 'on', includeJunk: f.get('includeJunk') === 'on' }
         : { patterns: String(f.get('patterns') || '').split(/\r?\n/).map((p) => p.trim()).filter(Boolean) }),
       maxDeletions: limitValue(),
-      deleteMode: f.get('deleteMode') === 'trash' ? 'trash' : 'permanent',
+      // Lida da opção marcada (mesmo desativada: sem OneDrive/SharePoint, a escolha fica guardada).
+      deleteMode: form.querySelector('[name="deleteMode"]:checked')?.value === 'trash' ? 'trash' : 'permanent',
     };
   };
 
@@ -238,10 +239,11 @@ export async function render(root, { params, query, ctx }) {
       form.querySelector('[data-cloud-warning]').hidden = !(c === 'accessed' && cloudChosen());
     }
     if (!mail) {
-      // "Para a lixeira" só existe no OneDrive e no SharePoint: sem eles, a exclusão é definitiva.
+      // "Para a lixeira" só existe no OneDrive e no SharePoint: sem eles, a opção fica desativada (a
+      // exclusão nas pastas do Windows é sempre definitiva), mas a escolha não muda — ela volta a valer
+      // se um repositório da nuvem for marcado de novo.
       const trash = form.querySelector('[name="deleteMode"][value="trash"]');
       trash.disabled = !cloudChosen();
-      if (trash.disabled && trash.checked) form.querySelector('[name="deleteMode"][value="permanent"]').checked = true;
       form.querySelector('[data-trash-hint]').textContent = trash.disabled
         ? 'Só para o OneDrive e o SharePoint. Nos repositórios escolhidos (pastas do Windows) a exclusão é sempre definitiva: arquivos excluídos pela rede não vão para a Lixeira.'
         : 'Vale no OneDrive e no SharePoint (Lixeira do site). Nas pastas do Windows a exclusão é sempre definitiva: arquivos excluídos pela rede não vão para a Lixeira.';

@@ -25,6 +25,7 @@ import { startMockApis } from './helpers/mock-apis.js';
 import { startFakeImap } from './helpers/fake-imap.js';
 import { withGraph, repo as cloudRepo, file, folder } from './helpers/cloud-world.js';
 import { exportRetentionCsv, exportRetentionHtml } from '../src/report/retention-exports.js';
+import { cutoffPreview } from '../public/js/retention.js';
 import { summarizeRetention, filterRecords, filterMailRecords } from '../src/report/model.js';
 import { PassThrough } from 'node:stream';
 
@@ -82,11 +83,18 @@ test('política: validação, data de corte, critérios e descrição', () => {
   const leap = new Date(2028, 1, 29, 12, 0);
   assert.equal(+cutoffDate({ amount: 1, unit: 'years' }, leap), +new Date(2027, 1, 28, 12, 0));
   assert.equal(+cutoffDate({ amount: 1, unit: 'years' }, leap), +cutoffDate({ amount: 12, unit: 'months' }, leap));
+  // A prévia do formulário usa a mesma conta que o servidor.
+  for (const rule of [{ amount: 1, unit: 'years' }, { amount: 4, unit: 'years' }, { amount: 1, unit: 'months' }, { amount: 30, unit: 'days' }]) {
+    assert.equal(+cutoffPreview(rule, leap), +cutoffDate(rule, leap), JSON.stringify(rule));
+  }
   // Padrões de nomes: comparação linear (um padrão com vários * não fica lento).
   const started = Date.now();
   assert.equal(patternMatcher(['*a*a*a*a*a*.tmp'])(`${'a'.repeat(5000)}.txt`), false);
   assert.ok(Date.now() - started < 1000);
   assert.equal(patternMatcher(['relat*rio??.pdf'])('RELATÓRIO01.PDF'), true);
+  // Um "*" no próprio nome (compartilhamentos Samba) não anula o curinga.
+  assert.equal(patternMatcher(['*.tmp'])('*x.tmp'), true);
+  assert.equal(patternMatcher(['*a*'])('*b*a'), true);
   const item = { lastModifiedDateTime: '2020-01-01T00:00:00Z', createdDateTime: '2022-01-01T00:00:00Z' };
   assert.equal(cloudDate(item, 'modified'), Date.parse('2020-01-01T00:00:00Z'));
   assert.equal(cloudDate(item, 'used'), Date.parse('2022-01-01T00:00:00Z'));

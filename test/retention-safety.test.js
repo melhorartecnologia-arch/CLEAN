@@ -17,6 +17,9 @@ import { Scheduler, deletionPins, deletionCriteria, scheduleProblems, checkDelet
 import { assertUnused } from '../src/routes/validate.js';
 import { startMockApis } from './helpers/mock-apis.js';
 import { startFakeImap } from './helpers/fake-imap.js';
+import { withGraph, repo as cloudRepo } from './helpers/cloud-world.js';
+import { DrivesConnector } from '../src/cloud/drives.js';
+import { ImapConnector } from '../src/mail/imap.js';
 
 let root;
 const OLD = new Date('2015-03-10T12:00:00Z');
@@ -340,5 +343,115 @@ test('agendador: relatórios guardados sem contar as simulações, políticas ma
     await scheduler.stop();
     await manager.shutdown?.({ graceMs: 100 });
     await store.close();
+  }
+});
+
+test('OneDrive: sem conferir as contas protegidas, cada item é uma falha com o motivo (e não um local protegido)', async () => {
+  await withGraph(async (data, endpoints) => {
+    const stamp = (items) =>
+      items.forEach((i) => {
+        i.modified = '2015-01-01T00:00:00Z';
+        i.created = '2015-01-01T00:00:00Z';
+        if (i.children) stamp(i.children);
+      });
+    stamp(data.drives['d-ana'].items);
+    const deleter = cloudRepo('onedrive', { allowDelete: true, exclude: [], cloud: { scope: 'list', accounts: ['ana@contoso.com'], sites: [], exclude: [] } });
+    // Outro repositório do OneDrive, sem exclusão, protege "diretoria@" — e a consulta dessa conta falha.
+    const keep = { all: null, accounts: [{ value: 'diretoria@contoso.com', error: 'Protegido pelo repositório "Diretoria".' }], sites: [] };
+    const factory = (rep, opts) => {
+      const c = new DrivesConnector(rep, opts);
+      const original = c.resolveUser.bind(c);
+      c.resolveUser = async (m, o) => {
+        if (String(m?.address).startsWith('diretoria')) throw Object.assign(new Error('Falha temporária de rede (ECONNRESET)'), { status: 0 });
+        return original(m, o);
+      };
+      return c;
+    };
+    const messages = [];
+    const stats = await new Scanner(
+      { repositories: [{ ...deleter, keep }], terms: [], options: { deleteMatches: true, checkContent: false, resolveOwner: false }, retention: policyOf({ criterion: 'modified', amount: 5, deleteMode: 'trash' }), endpoints },
+      (m) => messages.push(m),
+      { cloudConnectorFactory: factory },
+    ).run();
+    assert.ok(stats.filesMatched > 0);
+    assert.equal(stats.deleted, 0);
+    assert.equal(stats.deleteProtected, 0);
+    assert.equal(stats.deleteErrors, stats.filesMatched);
+    const events = messages.filter((m) => m.type === 'deletions').flatMap((m) => m.items);
+    assert.ok(events.every((e) => e.status === 'failed' && /Não foi possível conferir as contas protegidas/.test(e.error)));
+    assert.deepEqual(data.driveDeleted || [], [], 'nada foi excluído no servidor');
+  });
+});
+
+/** Conexão de e-mail simulada: caixas com mensagens antigas e uma exclusão que o servidor recusa. */
+function fakeMail({ boxes = 2, perBox = 1500, onList = null } = {}) {
+  return () => ({
+    mailboxes: async () => Array.from({ length: boxes }, (_, i) => ({ address: `caixa${i}@x.com` })),
+    async *messages(mailbox) {
+      for (let i = 0; i < perBox; i++) {
+        onList?.(i);
+        yield { folder: 'INBOX', id: `${mailbox.address}-${i}`, receivedAt: '2015-01-01T00:00:00Z', subject: `m${i}`, headersOnly: true, size: 1 };
+      }
+    },
+    async deleteMessages(mailbox, items, method, { onResult }) {
+      for (const it of items) onResult(it.id, { ok: false, error: 'Sem permissão para excluir (403).' });
+    },
+    close: async () => {},
+  });
+}
+
+test('e-mail: aviso do limite pelos números finais e exclusão desligada durante a caixa', async () => {
+  const source = { id: 's', name: 'M365', type: 'graph', allowDelete: true, deleteMode: 'permanent' };
+  // Todas as exclusões recusadas: o aviso é o das falhas (e não "aumente o limite").
+  let messages = [];
+  let stats = await new MailScanner(
+    { sources: [source], terms: [], options: { deleteMatches: true }, retention: policyOf({ amount: 5 }, 'mail') },
+    (m) => messages.push(m),
+    { connectorFactory: fakeMail() },
+  ).run();
+  assert.equal(stats.deleted, 0);
+  assert.equal(stats.deleteErrors, 1000);
+  const warns = messages.filter((m) => m.type === 'log' && m.level === 'warn').map((m) => m.message);
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /^1000 falhas de exclusão nesta execução \(o limite da política\): as exclusões foram interrompidas e 2000 mensagem\(ns\) expirada\(s\) só foram listados/);
+
+  // Exclusão desligada durante a listagem: o que estava na fila não vira falha.
+  messages = [];
+  let scanner;
+  scanner = new MailScanner(
+    { sources: [{ ...source }], terms: [], options: { deleteMatches: true }, retention: policyOf({ amount: 5, maxDeletions: 5 }, 'mail') },
+    (m) => messages.push(m),
+    { connectorFactory: fakeMail({ boxes: 1, perBox: 3, onList: (i) => i === 2 && scanner.revokeDeletion({ all: true, reason: 'a política de retenção foi pausada' }) }) },
+  );
+  stats = await scanner.run();
+  assert.equal(stats.deleteErrors, 0);
+  assert.equal(messages.filter((m) => m.type === 'deletions').length, 0);
+  assert.equal(scanner.deleteQueued, 0, 'as vagas voltam');
+});
+
+test('IMAP sem a Lixeira: as subpastas dela também ficam de fora (como no Microsoft 365)', async () => {
+  const old = new Date('2014-01-01T00:00:00Z');
+  const imap = await startFakeImap({
+    'u@x.com': {
+      password: 'p',
+      folders: { INBOX: [{ raw: mime('inbox'), date: old }], Lixeira: [{ raw: mime('lixeira'), date: old }], 'Lixeira/Antigas': [{ raw: mime('sub'), date: old }] },
+      special: { Lixeira: '\\Trash' },
+    },
+  });
+  try {
+    const connector = new ImapConnector({ id: 's', name: 'I', type: 'imap', imap: { host: '127.0.0.1', port: imap.port, security: 'none' }, secrets: { defaultPassword: 'p' }, mailboxes: [{ address: 'u@x.com' }], excludeFolders: [] }, {});
+    const list = async (includeTrash) => {
+      const out = [];
+      for await (const m of connector.messages({ address: 'u@x.com' }, { before: new Date('2020-01-01'), headersOnly: true, includeTrash })) out.push([m.folder, m.inTrash]);
+      return out.sort();
+    };
+    assert.deepEqual(await list(false), [['INBOX', false]]);
+    assert.deepEqual(await list(true), [
+      ['INBOX', false],
+      ['Lixeira', true],
+      ['Lixeira/Antigas', true],
+    ]);
+  } finally {
+    await imap.close();
   }
 });

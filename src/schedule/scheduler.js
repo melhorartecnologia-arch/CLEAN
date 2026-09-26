@@ -591,7 +591,7 @@ export class Scheduler {
     // ser os confirmados agora: uma nova confirmação com outros critérios não vale para ela.
     if (!scan.scheduleCriteria || scan.scheduleCriteria !== schedule.deleteConfirmation?.criteria) {
       return schedule.purpose === 'retention'
-        ? 'a exclusão da política foi confirmada de novo com outras pastas ignoradas ou locais protegidos depois que esta execução foi criada'
+        ? `a exclusão da política foi confirmada de novo com ${schedule.kind === 'mail' ? 'outras caixas ou pastas ignoradas' : 'outras pastas ignoradas ou outros locais protegidos'} depois que esta execução foi criada`
         : 'a exclusão do agendamento foi confirmada de novo com outros termos, pastas ignoradas ou locais protegidos depois que esta execução foi criada';
     }
     const targets = scan.kind === 'mail' ? scan.sourceIds : scan.repositoryIds;

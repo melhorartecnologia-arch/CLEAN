@@ -633,9 +633,13 @@ com datas anteriores a 02/01/1980, que são valores padrão de sistemas antigos 
   mesmo limite, para a mesma falha não se repetir milhares de vezes (permissão, arquivo em uso,
   rótulo de retenção). Ao atingir um dos dois, a execução para de excluir e avisa; os demais itens
   expirados ficam só no relatório e são excluídos nas execuções seguintes. As exclusões seguem a
-  ordem da varredura (não necessariamente dos mais antigos para os mais novos). Itens em locais
+  ordem da varredura (não necessariamente dos mais antigos para os mais novos). No e-mail, as
+  exclusões de cada caixa são feitas ao fim dela: as vagas de mensagens que falharam valem para as
+  caixas seguintes (não para o restante da mesma caixa). Itens em locais
   protegidos (um repositório sem *Permitir exclusão* dentro do analisado, as pastas do CLEAN, contas
-  ou sites protegidos) aparecem no relatório, mas nunca são tentados nem contam no limite;
+  ou sites protegidos) aparecem no relatório, mas nunca são tentados nem contam no limite. Se não
+  for possível conferir as contas protegidas do OneDrive (falha no Microsoft 365), nada daquele
+  repositório é excluído e cada item conta como falha;
 - **quando executar**: *Manualmente* (pelos botões da lista) ou *Agendar*, com as mesmas regras de
   recorrência, horários perdidos, histórico e relatórios guardados dos agendamentos (os relatórios
   das simulações contam à parte: simular não apaga o relatório de uma execução que excluiu).

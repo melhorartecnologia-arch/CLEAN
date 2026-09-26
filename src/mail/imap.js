@@ -175,14 +175,15 @@ export class ImapConnector {
     let selected = all ? list.filter((f) => f === all || f.specialUse === '\\Junk' || f.specialUse === '\\Trash') : list;
     const excluded = folderMatcher(this.source.excludeFolders);
     const display = (f) => (f.delimiter ? f.path.split(f.delimiter).join('/') : f.path);
+    // inTrash: a Lixeira e as subpastas dela (sem a Lixeira, as subpastas também ficam de fora, como no
+    // Microsoft 365).
+    const trash = list.find((f) => f.specialUse === '\\Trash');
+    const inTrash = (f) => Boolean(trash) && (f === trash || Boolean(trash.delimiter && f.path.startsWith(`${trash.path}${trash.delimiter}`)));
     selected = selected.filter((f) => {
-      if (f.specialUse === '\\Trash' && !includeTrash) return false;
+      if (!includeTrash && inTrash(f)) return false;
       if (f.specialUse === '\\Junk' && !includeJunk) return false;
       return !excluded(display(f));
     });
-    // inTrash: a Lixeira e as subpastas dela.
-    const trash = list.find((f) => f.specialUse === '\\Trash');
-    const inTrash = (f) => Boolean(trash) && (f === trash || (trash.delimiter && f.path.startsWith(`${trash.path}${trash.delimiter}`)));
     return selected
       .map((f) => ({ path: f.path, display: display(f), inbox: f.specialUse === '\\Inbox' || f.path.toUpperCase() === 'INBOX', all: f === all, inTrash: inTrash(f) }))
       .sort((a, b) => Number(b.inbox) - Number(a.inbox) || a.display.localeCompare(b.display));

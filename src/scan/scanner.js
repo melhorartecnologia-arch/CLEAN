@@ -11,7 +11,7 @@ import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
 import { friendlyError, withTimeout } from './errors.js';
 import { deleteFile, deletionEvent, isWithin, isCloudRepo, guardFor } from './delete.js';
 import { DrivesConnector, person, keptCloudTarget, cloudTarget } from '../cloud/drives.js';
-import { fileDate, cloudDate, ageDays, patternMatcher } from '../retention/policy.js';
+import { fileDate, cloudDate, ageDays, patternMatcher, limitWarning } from '../retention/policy.js';
 
 // Tempo máximo para ler um arquivo (o que passar disso é registrado como erro e a análise segue).
 const FILE_TIMEOUT = 5 * 60 * 1000;
@@ -169,7 +169,7 @@ export class Scanner {
     // Limite de exclusões da execução: vagas em uso (exclusões feitas ou em andamento) e falhas.
     this.deleteAttempts = 0;
     this.deleteFailures = 0;
-    this.limitLogged = false;
+    this.deletesInFlight = new Set();
     // OneDrive e SharePoint: um conector por repositório (usado também na exclusão automática).
     this.endpoints = config.endpoints || {};
     this.cloudConnectorFactory = cloudConnectorFactory || ((repo, options) => new DrivesConnector(repo, options));
@@ -243,6 +243,9 @@ export class Scanner {
     this.current = null;
     const seconds = Math.round((Date.now() - started) / 1000);
     const found = this.retention ? 'expirado(s)' : 'com ocorrências';
+    // Aviso do limite pelos números finais (as exclusões em andamento podiam falhar).
+    const warning = this.retention ? limitWarning({ limit: this.retention.maxDeletions, deleted: this.stats.deleted, failures: this.deleteFailures, skipped: this.stats.deleteSkipped }) : null;
+    if (warning) this.log('warn', warning);
     if (this.stats.deleteProtected) {
       this.log('info', `${this.stats.deleteProtected} arquivo(s) expirado(s) em locais protegidos (repositórios sem "Permitir exclusão" dentro dos analisados, contas ou sites protegidos, pastas do CLEAN) não foram excluídos.`);
     }
@@ -768,18 +771,26 @@ export class Scanner {
   /**
    * Retenção: exclui um item expirado. Com a exclusão desligada no repositório (o aviso é registrado
    * uma vez) ou num local protegido, nada é tentado nem registrado como falha. O limite da execução
-   * conta as exclusões feitas (a vaga fica reservada enquanto a exclusão está em andamento e volta
-   * se ela não acontecer); as falhas têm o mesmo limite, para não repetir a mesma falha milhares de
-   * vezes (permissão, rótulo de retenção...).
+   * conta as exclusões feitas: a vaga fica reservada enquanto a exclusão está em andamento e volta se
+   * ela não acontecer (com as vagas ocupadas, espera as exclusões em andamento terminarem). As falhas
+   * têm o mesmo limite, para a mesma falha não se repetir milhares de vezes (permissão, rótulo de
+   * retenção...).
    */
   async deleteExpired(record, repo, method) {
     if (!repo?.allowDelete) return;
     const cloud = Boolean(record.cloud);
     const connector = cloud ? this.cloudConnector(repo) : null;
     let kept;
+    let unverified = null;
     if (cloud) {
       if (!this.cloudKept.has(repo.id)) this.cloudKept.set(repo.id, connector.resolveKept(repo.keep));
-      kept = keptCloudTarget(record.cloud, await this.cloudKept.get(repo.id));
+      const keep = await this.cloudKept.get(repo.id);
+      kept = keptCloudTarget(record.cloud, keep);
+      // Não foi possível conferir as contas protegidas: é uma falha (com o motivo), e não um local protegido.
+      if (kept && kept === keep?.unresolved) {
+        unverified = kept;
+        kept = null;
+      }
     } else {
       kept = guardFor([...this.protect, ...(repo.keep || [])], record.path);
     }
@@ -788,29 +799,35 @@ export class Scanner {
       return;
     }
     const limit = this.retention.maxDeletions || 0;
+    while (limit && this.deleteAttempts >= limit && this.deleteFailures < limit && this.deletesInFlight.size) {
+      await Promise.race(this.deletesInFlight);
+    }
     if (limit && (this.deleteAttempts >= limit || this.deleteFailures >= limit)) {
       this.stats.deleteSkipped++;
-      if (!this.limitLogged) {
-        this.limitLogged = true;
-        const count = `${limit} ${limit === 1 ? 'exclusão' : 'exclusões'}`;
-        this.log(
-          'warn',
-          this.deleteFailures >= limit
-            ? `${limit === 1 ? 'Uma falha' : `${limit} falhas`} de exclusão nesta execução (o limite da política): os demais arquivos expirados foram apenas listados. Confira a aba Erros (permissões, arquivos em uso, rótulos de retenção...).`
-            : `Limite de ${count} desta execução atingido: os demais arquivos expirados foram apenas listados. Confira o relatório e, se estiver certo, aumente o limite na política.`,
-        );
-      }
       return;
     }
     this.deleteAttempts++; // vaga reservada
-    const result = cloud
-      ? await connector.deleteItem(cloudTarget(record), method, { signal: null })
-      : await deleteFile(record.path, {
+    const job = (async () => {
+      try {
+        if (unverified) return { status: 'failed', error: unverified.error };
+        if (cloud) return await connector.deleteItem(cloudTarget(record), method, { signal: null });
+        return await deleteFile(record.path, {
           root: repo.path,
           expected: { size: record.size, modified: record.modified },
           protect: [...this.protect, ...(repo.keep || [])],
           check: (st) => this.stillExpired(st),
         });
+      } catch (err) {
+        return { status: 'failed', error: friendlyError(err) };
+      }
+    })();
+    this.deletesInFlight.add(job);
+    let result;
+    try {
+      result = await job;
+    } finally {
+      this.deletesInFlight.delete(job);
+    }
     if (result.status !== 'deleted') this.deleteAttempts--;
     if (result.status === 'failed') this.deleteFailures++;
     countDeletion(this.stats, result.status);
