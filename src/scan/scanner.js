@@ -9,7 +9,7 @@ import { extractFile, extractBuffer } from './extractors/index.js';
 import { OwnerResolver } from './owner.js';
 import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
 import { friendlyError, withTimeout } from './errors.js';
-import { deleteFile, deletionEvent, isWithin, isCloudRepo } from './delete.js';
+import { deleteFile, deletionEvent, isWithin, isCloudRepo, guardFor } from './delete.js';
 import { DrivesConnector, person, keptCloudTarget, cloudTarget } from '../cloud/drives.js';
 import { fileDate, cloudDate, ageDays, patternMatcher } from '../retention/policy.js';
 
@@ -116,6 +116,7 @@ export function newStats(repositoriesTotal = 0) {
     bytesExpired: 0, // retenção: tamanho dos arquivos expirados
     retentionUnknown: 0, // retenção: arquivos sem a data do critério (não expiram)
     deleteSkipped: 0, // retenção: expirados não excluídos por causa do limite da execução
+    deleteProtected: 0, // retenção: expirados em locais protegidos (não são excluídos)
     deleted: 0, // excluídos na análise ("analisar e excluir")
     deleteMissing: 0, // já não existiam na hora da exclusão
     deleteChanged: 0, // alterados depois de analisados: mantidos
@@ -165,7 +166,9 @@ export class Scanner {
     // (sem termos: o conteúdo não é lido).
     const r = config.retention || null;
     this.retention = r ? { ...r, cutoffMs: Date.parse(r.cutoff), matchName: patternMatcher(r.patterns || []) } : null;
+    // Limite de exclusões da execução: vagas em uso (exclusões feitas ou em andamento) e falhas.
     this.deleteAttempts = 0;
+    this.deleteFailures = 0;
     this.limitLogged = false;
     // OneDrive e SharePoint: um conector por repositório (usado também na exclusão automática).
     this.endpoints = config.endpoints || {};
@@ -240,6 +243,9 @@ export class Scanner {
     this.current = null;
     const seconds = Math.round((Date.now() - started) / 1000);
     const found = this.retention ? 'expirado(s)' : 'com ocorrências';
+    if (this.stats.deleteProtected) {
+      this.log('info', `${this.stats.deleteProtected} arquivo(s) expirado(s) em locais protegidos (repositórios sem "Permitir exclusão" dentro dos analisados, contas ou sites protegidos, pastas do CLEAN) não foram excluídos.`);
+    }
     this.log('info', `${this.cancelled ? 'Análise cancelada' : 'Análise concluída'} em ${seconds}s: ${this.stats.filesSeen} arquivo(s) verificados, ${this.stats.filesMatched} ${found}.`);
     this.emit({ type: 'done', stats: { ...this.stats }, cancelled: this.cancelled });
     return this.stats;
@@ -731,19 +737,12 @@ export class Scanner {
     for (const record of records) {
       if (this.cancelled) break;
       const repo = this.repoById.get(record.repositoryId);
-      // Retenção: limite de exclusões por execução (proteção contra uma idade máxima errada).
-      const limit = this.retention?.maxDeletions || 0;
-      if (limit && this.deleteAttempts >= limit) {
-        this.stats.deleteSkipped++;
-        if (!this.limitLogged) {
-          this.limitLogged = true;
-          this.log('warn', `Limite de ${limit} exclusões desta execução atingido: os demais arquivos expirados foram apenas listados. Confira o relatório e, se estiver certo, aumente o limite na política.`);
-        }
-        continue;
-      }
-      if (repo?.allowDelete) this.deleteAttempts++;
       const cloud = Boolean(record.cloud);
       const method = cloud ? (repo?.deleteMode === 'permanent' ? 'permanent' : 'trash') : 'file';
+      if (this.retention) {
+        await this.deleteExpired(record, repo, method);
+        continue;
+      }
       let result;
       if (!repo?.allowDelete) {
         result = { status: 'failed', error: 'A exclusão não está permitida neste repositório.' };
@@ -762,8 +761,71 @@ export class Scanner {
       }
       countDeletion(this.stats, result.status);
       if (result.status === 'failed') this.error(record.path, `Falha ao excluir: ${result.error}`);
-      this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: this.retention ? 'retention' : 'auto', method, by: this.deletedBy, item: record.path })] });
+      this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: 'auto', method, by: this.deletedBy, item: record.path })] });
     }
+  }
+
+  /**
+   * Retenção: exclui um item expirado. Com a exclusão desligada no repositório (o aviso é registrado
+   * uma vez) ou num local protegido, nada é tentado nem registrado como falha. O limite da execução
+   * conta as exclusões feitas (a vaga fica reservada enquanto a exclusão está em andamento e volta
+   * se ela não acontecer); as falhas têm o mesmo limite, para não repetir a mesma falha milhares de
+   * vezes (permissão, rótulo de retenção...).
+   */
+  async deleteExpired(record, repo, method) {
+    if (!repo?.allowDelete) return;
+    const cloud = Boolean(record.cloud);
+    const connector = cloud ? this.cloudConnector(repo) : null;
+    let kept;
+    if (cloud) {
+      if (!this.cloudKept.has(repo.id)) this.cloudKept.set(repo.id, connector.resolveKept(repo.keep));
+      kept = keptCloudTarget(record.cloud, await this.cloudKept.get(repo.id));
+    } else {
+      kept = guardFor([...this.protect, ...(repo.keep || [])], record.path);
+    }
+    if (kept) {
+      this.stats.deleteProtected++;
+      return;
+    }
+    const limit = this.retention.maxDeletions || 0;
+    if (limit && (this.deleteAttempts >= limit || this.deleteFailures >= limit)) {
+      this.stats.deleteSkipped++;
+      if (!this.limitLogged) {
+        this.limitLogged = true;
+        const count = `${limit} ${limit === 1 ? 'exclusão' : 'exclusões'}`;
+        this.log(
+          'warn',
+          this.deleteFailures >= limit
+            ? `${limit === 1 ? 'Uma falha' : `${limit} falhas`} de exclusão nesta execução (o limite da política): os demais arquivos expirados foram apenas listados. Confira a aba Erros (permissões, arquivos em uso, rótulos de retenção...).`
+            : `Limite de ${count} desta execução atingido: os demais arquivos expirados foram apenas listados. Confira o relatório e, se estiver certo, aumente o limite na política.`,
+        );
+      }
+      return;
+    }
+    this.deleteAttempts++; // vaga reservada
+    const result = cloud
+      ? await connector.deleteItem(cloudTarget(record), method, { signal: null })
+      : await deleteFile(record.path, {
+          root: repo.path,
+          expected: { size: record.size, modified: record.modified },
+          protect: [...this.protect, ...(repo.keep || [])],
+          check: (st) => this.stillExpired(st),
+        });
+    if (result.status !== 'deleted') this.deleteAttempts--;
+    if (result.status === 'failed') this.deleteFailures++;
+    countDeletion(this.stats, result.status);
+    if (result.status === 'failed') this.error(record.path, `Falha ao excluir: ${result.error}`);
+    this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: 'retention', method, by: this.deletedBy, item: record.path })] });
+  }
+
+  /**
+   * Retenção: o arquivo continua expirado na hora de excluir? A data do critério pode ter mudado
+   * depois da listagem (ex.: o arquivo foi aberto). Devolve o motivo para mantê-lo, ou null.
+   */
+  stillExpired(st) {
+    const when = fileDate(st, this.retention.criterion);
+    if (when !== null && when < this.retention.cutoffMs) return null;
+    return 'O arquivo deixou de estar expirado depois da listagem: a data do critério da política mudou (por exemplo, ele foi aberto ou recriado).';
   }
 
   finishRecords(records) {

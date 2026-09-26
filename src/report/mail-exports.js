@@ -139,7 +139,7 @@ function scanInfoRows(scan) {
     ['Anexos protegidos por senha', s.attachmentsEncrypted ?? 0],
     ['Mensagens criptografadas', s.messagesEncrypted ?? 0],
     ['Erros', s.errors ?? 0],
-    ...deletionInfoRows(o, s, { noun: 'Excluídas', gone: 'Já não existiam', changed: 'Alteradas depois da análise (mantidas)' }),
+    ...deletionInfoRows(o, s, { noun: 'Excluídas', gone: 'Já não existiam', changed: 'Alteradas depois da análise (mantidas)', blocked: scan.deletionBlocked, revoked: scan.deletionRevoked }),
   ];
 }
 

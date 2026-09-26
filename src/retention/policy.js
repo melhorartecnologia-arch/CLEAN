@@ -89,18 +89,24 @@ export function sanitizeRetention(input, kind, { cloud = false } = {}) {
 /** Data de corte: agora menos a idade máxima (meses e anos pelo calendário, na hora local). */
 export function cutoffDate(retention, now = new Date()) {
   const d = new Date(now);
-  if (retention.unit === 'years') d.setFullYear(d.getFullYear() - retention.amount);
-  else if (retention.unit === 'months') {
+  if (retention.unit === 'years' || retention.unit === 'months') {
+    const months = retention.unit === 'years' ? retention.amount * 12 : retention.amount;
     const day = d.getDate();
     d.setDate(1);
-    d.setMonth(d.getMonth() - retention.amount);
-    // 31/03 menos 1 mês: 28 ou 29/02 (último dia), e não 03/03.
+    d.setMonth(d.getMonth() - months);
+    // 31/03 menos 1 mês: 28 ou 29/02 (último dia), e não 03/03; 29/02 menos 1 ano: 28/02.
     d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
   } else d.setDate(d.getDate() - retention.amount);
   return d;
 }
 
-const valid = (ms) => (Number.isFinite(ms) && ms > 0 ? ms : null);
+/**
+ * Datas anteriores a 02/01/1980 são tratadas como desconhecidas: são valores padrão de sistemas
+ * antigos ou de datas perdidas (01/01/1970, 01/01/1980 do FAT e do ZIP), e não a idade real do item.
+ */
+export const MIN_VALID_DATE = Date.UTC(1980, 0, 2);
+export const validDate = (ms) => (Number.isFinite(ms) && ms >= MIN_VALID_DATE ? ms : null);
+const valid = validDate;
 
 /** Data do critério de um arquivo (fs.Stats), em ms; null quando o sistema não informa. */
 export function fileDate(st, criterion) {
@@ -167,9 +173,39 @@ export function describeRetention(retention, kind) {
   return `Arquivos ${verb} ${amountText(retention)}${only}`;
 }
 
+/**
+ * O nome combina com o padrão (curingas * e ?, sem diferenciar maiúsculas)? Comparação linear, sem
+ * expressões regulares: um padrão com vários * não fica lento com nomes compridos.
+ */
+function globMatch(pattern, name) {
+  let p = 0;
+  let n = 0;
+  let star = -1;
+  let mark = 0;
+  while (n < name.length) {
+    if (p < pattern.length && (pattern[p] === '?' || pattern[p] === name[n])) {
+      p++;
+      n++;
+    } else if (p < pattern.length && pattern[p] === '*') {
+      star = p++;
+      mark = n;
+    } else if (star !== -1) {
+      p = star + 1;
+      n = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (pattern[p] === '*') p++;
+  return p === pattern.length;
+}
+
 /** Nomes de arquivo aceitos pela política (curingas * e ?; sem padrões: todos). */
 export function patternMatcher(patterns = []) {
   if (!patterns.length) return () => true;
-  const regexes = patterns.map((p) => new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i'));
-  return (name) => regexes.some((re) => re.test(name));
+  const lower = patterns.map((p) => p.toLowerCase().replace(/\*+/g, '*'));
+  return (name) => {
+    const n = String(name).toLowerCase();
+    return lower.some((p) => globMatch(p, n));
+  };
 }

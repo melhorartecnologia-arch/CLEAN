@@ -48,6 +48,22 @@ function policyRows(scan) {
   ];
 }
 
+const CLOUD_TYPES = new Set(['onedrive', 'sharepoint']);
+
+/**
+ * Forma da exclusão por extenso. Nas pastas do Windows ela é sempre definitiva: "para a lixeira"
+ * vale só para o e-mail, o OneDrive e o SharePoint.
+ */
+export function retentionModeText(scan) {
+  if (scan.retention?.deleteMode !== 'trash') return 'definitivamente';
+  if (isMail(scan)) return 'para a lixeira';
+  const repos = scan.summary?.repositories || [];
+  const cloud = repos.some((r) => CLOUD_TYPES.has(r.type));
+  const local = repos.some((r) => !CLOUD_TYPES.has(r.type));
+  if (cloud && local) return 'para a lixeira no OneDrive e no SharePoint; definitivamente nas pastas do Windows';
+  return cloud ? 'para a lixeira' : 'definitivamente (pastas do Windows)';
+}
+
 export function retentionInfoRows(scan) {
   const s = scan.stats || {};
   const o = scan.options || {};
@@ -58,6 +74,7 @@ export function retentionInfoRows(scan) {
         ['Caixas ignoradas (sem e-mail)', s.mailboxesSkipped ?? 0],
         ['Mensagens expiradas', s.messagesMatched ?? 0],
         ['Tamanho das expiradas (MB)', mb(s.bytesExpired)],
+        ['Sem data de recebimento válida (mantidas)', s.retentionUnknown ?? 0],
         ['Erros', s.errors ?? 0],
       ]
     : [
@@ -67,9 +84,14 @@ export function retentionInfoRows(scan) {
         ['Sem a data do critério (mantidos)', s.retentionUnknown ?? 0],
         ['Erros de acesso/leitura', s.errors ?? 0],
       ];
+  const retention = {
+    mode: retentionModeText(scan),
+    extra: mail ? [['Já estavam na lixeira (não movidas de novo)', s.alreadyInTrash ?? 0]] : [['Em locais protegidos (não excluídos)', s.deleteProtected ?? 0]],
+  };
+  const stops = { blocked: scan.deletionBlocked, revoked: scan.deletionRevoked };
   const deletion = mail
-    ? { noun: 'Excluídas', gone: 'Já não existiam', changed: 'Alteradas depois da análise (mantidas)', retention: scan.retention }
-    : { retention: scan.retention };
+    ? { noun: 'Excluídas', gone: 'Já não existiam', changed: 'Alteradas depois da análise (mantidas)', skipped: 'Não excluídas (limite da execução)', retention, ...stops }
+    : { changed: 'Alterados ou não mais expirados (mantidos)', retention, ...stops };
   return [
     ['Análise', scan.name],
     ...(scan.scheduleId ? [['Política de retenção', scan.scheduleName || '']] : []),

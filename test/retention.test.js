@@ -68,12 +68,25 @@ test('política: validação, data de corte, critérios e descrição', () => {
   assert.equal(+cutoffDate({ amount: 1, unit: 'months' }, now), +new Date(2026, 1, 28, 10, 0), '31/03 menos 1 mês: último dia de fevereiro');
   assert.equal(+cutoffDate({ amount: 30, unit: 'days' }, now), +new Date(2026, 2, 1, 10, 0));
 
-  const st = { mtimeMs: 1000, atimeMs: 5000, birthtimeMs: 3000 };
-  assert.equal(fileDate(st, 'modified'), 1000);
-  assert.equal(fileDate(st, 'accessed'), 5000);
-  assert.equal(fileDate(st, 'created'), 3000);
-  assert.equal(fileDate(st, 'used'), 5000, 'sem uso: a data mais recente');
-  assert.equal(fileDate({ mtimeMs: 1000, atimeMs: 0, birthtimeMs: 0 }, 'created'), null, 'sem data de criação: desconhecida');
+  const [t1, t3, t5] = [Date.UTC(2010, 0, 1), Date.UTC(2012, 0, 1), Date.UTC(2015, 0, 1)];
+  const st = { mtimeMs: t1, atimeMs: t5, birthtimeMs: t3 };
+  assert.equal(fileDate(st, 'modified'), t1);
+  assert.equal(fileDate(st, 'accessed'), t5);
+  assert.equal(fileDate(st, 'created'), t3);
+  assert.equal(fileDate(st, 'used'), t5, 'sem uso: a data mais recente');
+  assert.equal(fileDate({ mtimeMs: t1, atimeMs: 0, birthtimeMs: 0 }, 'created'), null, 'sem data de criação: desconhecida');
+  // Datas zeradas ou padrão de sistemas antigos (01/01/1970, 01/01/1980) não contam como idade real.
+  assert.equal(fileDate({ mtimeMs: Date.UTC(1980, 0, 1), atimeMs: 0, birthtimeMs: 0 }, 'modified'), null);
+  assert.equal(fileDate({ mtimeMs: Date.UTC(1980, 0, 1), atimeMs: t5, birthtimeMs: 0 }, 'used'), t5);
+  // Anos pelo calendário: 29/02 menos 1 ano é 28/02 (como 12 meses), e não 01/03.
+  const leap = new Date(2028, 1, 29, 12, 0);
+  assert.equal(+cutoffDate({ amount: 1, unit: 'years' }, leap), +new Date(2027, 1, 28, 12, 0));
+  assert.equal(+cutoffDate({ amount: 1, unit: 'years' }, leap), +cutoffDate({ amount: 12, unit: 'months' }, leap));
+  // Padrões de nomes: comparação linear (um padrão com vários * não fica lento).
+  const started = Date.now();
+  assert.equal(patternMatcher(['*a*a*a*a*a*.tmp'])(`${'a'.repeat(5000)}.txt`), false);
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(patternMatcher(['relat*rio??.pdf'])('RELATÓRIO01.PDF'), true);
   const item = { lastModifiedDateTime: '2020-01-01T00:00:00Z', createdDateTime: '2022-01-01T00:00:00Z' };
   assert.equal(cloudDate(item, 'modified'), Date.parse('2020-01-01T00:00:00Z'));
   assert.equal(cloudDate(item, 'used'), Date.parse('2022-01-01T00:00:00Z'));
@@ -193,10 +206,14 @@ test('arquivos: expirados pelo critério, padrões de nomes, simulação e exclu
 
   // Repositório protegido dentro do analisado e exclusão não permitida: nada é excluído.
   const dir2 = tree();
-  run = await runFiles(dir2, { criterion: 'modified', amount: 5 }, { deleteMatches: true, keep: [{ path: path.join(dir2, 'RH'), error: 'Protegido.' }] });
+  // Os protegidos não são tentados (nem contam no limite: com limite 2, os dois de Temp são excluídos).
+  run = await runFiles(dir2, { criterion: 'modified', amount: 5, maxDeletions: 2 }, { deleteMatches: true, keep: [{ path: path.join(dir2, 'RH'), error: 'Protegido.' }] });
   assert.ok(fs.existsSync(path.join(dir2, 'RH/antigo.docx')));
-  assert.equal(run.events.filter((e) => e.status === 'failed').length, 2);
+  assert.equal(run.stats.deleteProtected, 2);
+  assert.equal(run.events.filter((e) => e.status === 'failed').length, 0);
+  assert.equal(run.stats.deleted, 2);
   assert.ok(!fs.existsSync(path.join(dir2, 'Temp/velho.tmp')));
+  assert.ok(run.logs.some((l) => /2 arquivo\(s\) expirado\(s\) em locais protegidos/.test(l)));
   run = await runFiles(tree(), { criterion: 'modified', amount: 5 }, { deleteMatches: true, allowDelete: false });
   assert.equal(run.stats.deleted, 0);
 });
@@ -483,7 +500,7 @@ test('API das políticas de retenção', async () => {
     const real = await api('POST', `/api/schedules/${id}/run`, { confirm: true });
     scan = await wait(real.data.scan.id);
     assert.equal(scan.stats.deleted, 3);
-    assert.match(scan.startedBy, /política de retenção "Limpeza anual" \(exclusão confirmada por acesso local/);
+    assert.match(scan.startedBy, /^política de retenção "Limpeza anual", executada agora por acesso local \(exclusão confirmada por acesso local em /);
     assert.ok(!fs.existsSync(path.join(dir, 'RH/antigo.docx')));
     assert.ok(fs.existsSync(path.join(dir, 'Temp/aberto-ontem.tmp')));
     const deletions = fs.readFileSync(path.join(store.dataDir, 'exclusoes.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -504,7 +521,7 @@ test('API das políticas de retenção', async () => {
     assert.equal(lines.length, 4, 'cabeçalho e três arquivos (sem termos)');
     assert.match(lines[0], /Data considerada;Idade \(dias\);Faixa de idade/);
     assert.match(lines[1], /Mais de 10 anos/);
-    assert.match(lines[1], /Excluído em .* exclusão pela política de retenção/);
+    assert.match(lines[1], /Excluído em .* — política de retenção ""Limpeza anual"", executada agora por acesso local \(exclusão confirmada por/);
     const html = await (await fetch(`${base}/api/scans/${scan.id}/export.html`)).text();
     assert.match(html, /Relatório CLEAN – retenção/);
     assert.match(html, /Arquivos sem acesso há mais de 5 anos/);

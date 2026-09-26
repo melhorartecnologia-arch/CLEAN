@@ -58,7 +58,8 @@ export function keptPaths(repo, repositories) {
     .map((other) => ({ path: other.path, error: `O arquivo está dentro do repositório "${other.name}", que não permite exclusão.` }));
 }
 
-function guardFor(guards, target) {
+/** A pasta protegida que contém o arquivo (ou null). guards: [{ path, except?, error }]. */
+export function guardFor(guards, target) {
   return guards.find((g) => isWithin(g.path, target) && !(g.except || []).some((e) => isWithin(e, target))) || null;
 }
 
@@ -118,8 +119,10 @@ async function checkLocation(root, filePath, guards) {
  * expected: { size, modified } registrados na análise; se o arquivo mudou depois disso, a exclusão
  * só acontece com force = true (status 'changed').
  * protect: pastas cujos arquivos nunca são excluídos ({ path, except?, error }).
+ * check(st): conferência extra na hora de excluir (ex.: o arquivo continua expirado pela política de
+ * retenção); devolve o motivo para manter o arquivo (status 'changed') ou null. Ignorada com force.
  */
-export async function deleteFile(filePath, { root, expected = null, force = false, protect = [] } = {}) {
+export async function deleteFile(filePath, { root, expected = null, force = false, protect = [], check = null } = {}) {
   if (!isInside(root, filePath)) return { status: 'failed', error: 'O arquivo não está dentro da pasta do repositório.' };
   const guard = guardFor(protect, filePath);
   if (guard) return { status: 'failed', error: guard.error };
@@ -140,6 +143,10 @@ export async function deleteFile(filePath, { root, expected = null, force = fals
     if (!sameSize || !sameDate) {
       return { status: 'changed', error: 'O arquivo foi alterado depois da análise (tamanho ou data de modificação diferentes).' };
     }
+  }
+  if (check && !force) {
+    const reason = check(st);
+    if (reason) return { status: 'changed', error: reason };
   }
   try {
     await fs.unlink(filePath);

@@ -9,7 +9,7 @@ import { friendlyError, withTimeout } from '../scan/errors.js';
 import { createConnector } from './connectors.js';
 import { validDate } from './common.js';
 import { deletionEvent } from '../scan/delete.js';
-import { ageDays } from '../retention/policy.js';
+import { ageDays, MIN_VALID_DATE } from '../retention/policy.js';
 
 // Tempo máximo para ler uma mensagem já baixada (anexos incluídos).
 const MESSAGE_TIMEOUT = 5 * 60 * 1000;
@@ -53,6 +53,8 @@ export function newMailStats(sourcesTotal = 0) {
     gaps: 0, // conexões ou caixas que não puderam ser lidas (a análise ficou incompleta)
     bytesExpired: 0, // retenção: tamanho das mensagens expiradas
     deleteSkipped: 0, // retenção: expiradas não excluídas por causa do limite da execução
+    retentionUnknown: 0, // retenção: sem data de recebimento válida (não expiram)
+    alreadyInTrash: 0, // retenção "para a lixeira": expiradas que já estavam na Lixeira (não são movidas de novo)
     deleted: 0, // excluídas na análise ("analisar e excluir")
     deleteMissing: 0, // já não existiam na hora da exclusão
     deleteChanged: 0,
@@ -92,7 +94,9 @@ export class MailScanner {
     // Política de retenção: mensagens recebidas antes da data de corte (só os cabeçalhos são lidos).
     const r = config.retention || null;
     this.retention = r ? { ...r, cutoffMs: Date.parse(r.cutoff) } : null;
+    // Limite de exclusões da execução: vagas em uso (exclusões feitas ou na fila) e falhas.
     this.deleteQueued = 0;
+    this.deleteFailures = 0;
     this.limitLogged = false;
   }
 
@@ -277,6 +281,9 @@ export class MailScanner {
       if (!list) return;
       byId.delete(messageId);
       const status = r.ok ? 'deleted' : r.missing ? 'missing' : 'failed';
+      // Retenção: a vaga no limite da execução volta quando a mensagem não foi excluída.
+      if (this.retention && status !== 'deleted') this.deleteQueued -= list.length;
+      if (this.retention && status === 'failed') this.deleteFailures += list.length;
       const items = list.map((p) => {
         countDeletion(this.stats, status);
         if (status === 'failed') this.error(`${mailbox.address} › ${p.folder}`, `Falha ao excluir a mensagem "${p.subject || '(sem assunto)'}": ${r.error}`);
@@ -309,8 +316,13 @@ export class MailScanner {
   processExpiredMessage(source, mailbox, item) {
     this.stats.messagesSeen++;
     const date = Date.parse(item.receivedAt);
-    // O servidor já filtrou pela data; sem data conhecida (ou depois do corte), não expira.
-    if (!Number.isFinite(date) || date >= this.retention.cutoffMs) return;
+    // O servidor já filtrou pela data. Sem data de recebimento válida (inclusive datas zeradas, como
+    // 01/01/1970, de mensagens migradas), a mensagem não expira; depois do corte, também não.
+    if (!Number.isFinite(date) || date < MIN_VALID_DATE) {
+      this.stats.retentionUnknown++;
+      return;
+    }
+    if (date >= this.retention.cutoffMs) return;
     this.stats.messagesMatched++;
     this.stats.bytesExpired += Number(item.size) || 0;
     const from = item.from || null;
@@ -341,22 +353,44 @@ export class MailScanner {
       terms: [],
       matches: [],
       retention: { criterion: 'received', date: item.receivedAt, ageDays: ageDays(date) },
+      // Já na Lixeira: com a exclusão "para a lixeira", a mensagem não é movida de novo (o provedor a
+      // apaga depois, pela regra da própria Lixeira).
+      inTrash: Boolean(item.inTrash),
     });
-    if (this.options.deleteMatches) {
-      // Limite de exclusões por execução (proteção contra uma idade máxima errada).
-      const limit = this.retention.maxDeletions || 0;
-      if (limit && this.deleteQueued >= limit) {
-        this.stats.deleteSkipped++;
-        if (!this.limitLogged) {
-          this.limitLogged = true;
-          this.log('warn', `Limite de ${limit} exclusões desta execução atingido: as demais mensagens expiradas foram apenas listadas. Confira o relatório e, se estiver certo, aumente o limite na política.`);
-        }
+    // Com a exclusão desligada na conexão (o aviso é registrado uma vez), nada é colocado na fila.
+    if (this.options.deleteMatches && source.allowDelete) {
+      if (item.inTrash && source.deleteMode === 'trash') {
+        this.stats.alreadyInTrash++;
       } else {
-        this.deleteQueued++;
-        this.pendingDeletes.push({ recordId: this.seq, messageId: item.id, internetMessageId: item.internetMessageId || null, folder: item.folder, subject: item.subject || '' });
+        this.queueExpiredDelete(item);
       }
     }
     if (this.pendingResults.length >= 50) this.flushResults();
+  }
+
+  /**
+   * Retenção: coloca a mensagem na fila de exclusão da caixa, respeitando o limite da execução (que
+   * conta as exclusões feitas ou na fila: a vaga volta se a mensagem não for excluída) e o mesmo
+   * limite para as falhas.
+   */
+  queueExpiredDelete(item) {
+    const limit = this.retention.maxDeletions || 0;
+    if (limit && (this.deleteQueued >= limit || this.deleteFailures >= limit)) {
+      this.stats.deleteSkipped++;
+      if (!this.limitLogged) {
+        this.limitLogged = true;
+        const count = `${limit} ${limit === 1 ? 'exclusão' : 'exclusões'}`;
+        this.log(
+          'warn',
+          this.deleteFailures >= limit
+            ? `${limit === 1 ? 'Uma falha' : `${limit} falhas`} de exclusão nesta execução (o limite da política): as demais mensagens expiradas foram apenas listadas. Confira a aba Erros.`
+            : `Limite de ${count} desta execução atingido: as demais mensagens expiradas foram apenas listadas. Confira o relatório e, se estiver certo, aumente o limite na política.`,
+        );
+      }
+      return;
+    }
+    this.deleteQueued++;
+    this.pendingDeletes.push({ recordId: this.seq, messageId: item.id, internetMessageId: item.internetMessageId || null, folder: item.folder, subject: item.subject || '' });
   }
 
   countAttachments(attachments) {

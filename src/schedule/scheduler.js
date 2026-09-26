@@ -43,6 +43,30 @@ const NOUNS = {
   mail: { one: 'a conexão de e-mail', gender: 'a', registry: 'da conexão de e-mail' },
 };
 
+/** Palavras de cada finalidade: agendamento de análise (por termos) ou política de retenção. */
+const WORDS = {
+  terms: {
+    the: 'o agendamento',
+    title: 'Agendamento',
+    edit: 'edite o agendamento',
+    analyze: 'Somente analisar',
+    confirmed: 'a exclusão automática foi confirmada neste agendamento',
+    removed: 'o agendamento foi excluído',
+    paused: 'o agendamento foi pausado',
+  },
+  retention: {
+    the: 'a política',
+    title: 'Política de retenção',
+    edit: 'edite a política',
+    analyze: 'Somente listar (simulação)',
+    confirmed: 'a exclusão foi confirmada nesta política',
+    removed: 'a política de retenção foi excluída',
+    paused: 'a política de retenção foi pausada',
+  },
+};
+export const wordsOf = (schedule) => (schedule?.purpose === 'retention' ? WORDS.retention : WORDS.terms);
+const upper = (text) => `${text[0].toUpperCase()}${text.slice(1)}`;
+
 /** Repositório (arquivos) ou conexão de e-mail (mail) do agendamento, ou null. */
 export function targetOf(store, kind, id) {
   return kind === 'mail' ? store.getMailSource(id) : store.getRepository(id);
@@ -101,12 +125,13 @@ export function remainingOf(schedule) {
 export function scheduleProblems(store, schedule) {
   const problems = [];
   const retention = schedule.purpose === 'retention';
+  const w = wordsOf(schedule);
   // Política de retenção sem regra: executada só manualmente.
   if (schedule.rule || !retention) {
     try {
       validateRule(schedule.rule);
     } catch (err) {
-      problems.push(`A regra de recorrência salva é inválida (${err.message}) Edite o agendamento.`);
+      problems.push(`A regra de recorrência salva é inválida (${err.message}) ${upper(w.edit)}.`);
     }
   }
   const noun = NOUNS[schedule.kind] || NOUNS.files;
@@ -115,13 +140,13 @@ export function scheduleProblems(store, schedule) {
   for (const id of schedule.targetIds || []) {
     const t = targetOf(store, schedule.kind, id);
     if (t) targets.push(t);
-    else problems.push(`${noun.one[0].toUpperCase()}${noun.one.slice(1)} "${name(id)}" foi excluíd${noun.gender} do cadastro. Edite o agendamento.`);
+    else problems.push(`${upper(noun.one)} "${name(id)}" foi excluíd${noun.gender} do cadastro. ${upper(w.edit)}.`);
   }
   const lists = [];
   for (const id of schedule.listIds || []) {
     const l = store.getList(id);
     if (l) lists.push(l);
-    else problems.push(`A lista de referência "${name(id)}" foi excluída. Edite o agendamento.`);
+    else problems.push(`A lista de referência "${name(id)}" foi excluída. ${upper(w.edit)}.`);
   }
   if (!retention && lists.length && lists.every((l) => !(l.terms || []).length)) problems.push('As listas de referência do agendamento não têm termos.');
   if (retention) {
@@ -134,21 +159,21 @@ export function scheduleProblems(store, schedule) {
   if (schedule.action === 'delete') {
     const confirmation = schedule.deleteConfirmation || {};
     const pins = confirmation.targets || {};
-    const again = 'Edite o agendamento e confirme a exclusão de novo (ou escolha "Somente analisar").';
+    const again = `${upper(w.edit)} e confirme a exclusão de novo (ou escolha "${w.analyze}").`;
     for (const t of targets) {
       const pin = pins[t.id];
-      if (!t.allowDelete) problems.push(`A exclusão foi desligada no cadastro ${noun.registry} "${t.name}". Permita a exclusão de novo ou edite o agendamento para "Somente analisar".`);
+      if (!t.allowDelete) problems.push(`A exclusão foi desligada no cadastro ${noun.registry} "${t.name}". Permita a exclusão de novo ou ${w.edit} para "${w.analyze}".`);
       else if (!pin || pin.scope !== scopeOf(schedule.kind, t)) {
         const what = schedule.kind === 'mail' ? 'a conta, o servidor ou as caixas' : 'o caminho, as contas ou os sites';
-        problems.push(`O cadastro ${noun.registry} "${t.name}" mudou (${what}) depois que a exclusão automática foi confirmada neste agendamento. ${again}`);
+        problems.push(`O cadastro ${noun.registry} "${t.name}" mudou (${what}) depois que ${w.confirmed}. ${again}`);
       } else if (!retention && pin.mode !== 'permanent' && modeOf(schedule.kind, t) === 'permanent') {
         // (na retenção vale a forma de exclusão da própria política, confirmada ao salvá-la)
-        problems.push(`A exclusão em "${t.name}" passou a ser definitiva depois que a exclusão automática foi confirmada neste agendamento. ${again}`);
+        problems.push(`A exclusão em "${t.name}" passou a ser definitiva depois que ${w.confirmed}. ${again}`);
       }
     }
     if (targets.length === (schedule.targetIds || []).length && lists.length === (schedule.listIds || []).length && confirmation.criteria !== deletionCriteria(store, schedule)) {
       const what = schedule.kind === 'mail' ? 'as caixas ou pastas ignoradas' : 'as pastas ignoradas ou os locais protegidos por repositórios sem exclusão';
-      problems.push(`Os termos das listas de referência, ${what} mudaram depois que a exclusão automática foi confirmada neste agendamento. ${again}`);
+      problems.push(`${retention ? upper(what) : `Os termos das listas de referência, ${what}`} mudaram depois que ${w.confirmed}. ${again}`);
     }
   }
   return problems;
@@ -164,13 +189,24 @@ export function checkDeleteSchedules(store, apply, scheduler = null) {
   const result = apply();
   // Execuções agendadas em andamento deixam de excluir se a exclusão confirmada não vale mais.
   scheduler?.reviewAll();
-  const names = affected.filter((s) => fine.has(s.id) && store.getSchedule(s.id) && scheduleProblems(store, s).length > 0).map((s) => `"${s.name}"`);
-  if (!names.length) return { result, warning: '' };
-  const one = names.length === 1;
-  return {
-    result,
-    warning: `A exclusão automática ${one ? 'do agendamento' : 'dos agendamentos'} ${names.join(', ')} ficou suspensa com esta alteração: ${one ? 'ele não exclui' : 'eles não excluem'} nada até ${one ? 'ser salvo e confirmado' : 'serem salvos e confirmados'} de novo em Agendamentos.`,
-  };
+  const suspended = affected.filter((s) => fine.has(s.id) && store.getSchedule(s.id) && scheduleProblems(store, s).length > 0);
+  const names = (list) => list.map((s) => `"${s.name}"`).join(', ');
+  const schedules = suspended.filter((s) => s.purpose !== 'retention');
+  const policies = suspended.filter((s) => s.purpose === 'retention');
+  const warnings = [];
+  if (schedules.length) {
+    const one = schedules.length === 1;
+    warnings.push(
+      `A exclusão automática ${one ? 'do agendamento' : 'dos agendamentos'} ${names(schedules)} ficou suspensa com esta alteração: ${one ? 'ele não exclui' : 'eles não excluem'} nada até ${one ? 'ser salvo e confirmado' : 'serem salvos e confirmados'} de novo em Agendamentos.`,
+    );
+  }
+  if (policies.length) {
+    const one = policies.length === 1;
+    warnings.push(
+      `A exclusão ${one ? 'da política de retenção' : 'das políticas de retenção'} ${names(policies)} ficou suspensa com esta alteração: ${one ? 'ela não é executada' : 'elas não são executadas'} até ${one ? 'ser salva e confirmada' : 'serem salvas e confirmadas'} de novo em Retenção.`,
+    );
+  }
+  return { result, warning: warnings.join(' ') };
 }
 
 /** O que a análise alcança (sem o período): muda quando a ação, os locais, os termos ou as opções mudam. */
@@ -216,10 +252,11 @@ export class Scheduler {
   start() {
     this.stopped = false;
     for (const schedule of this.store.listSchedules()) {
+      if (schedule.purpose === 'retention' && !schedule.rule) continue; // política executada só manualmente
       try {
         validateRule(schedule.rule);
       } catch (err) {
-        console.warn(`[CLEAN] Agendamento "${schedule.name}" com regra inválida: ${err.message}`);
+        console.warn(`[CLEAN] ${wordsOf(schedule).title} "${schedule.name}" com regra inválida: ${err.message}`);
       }
     }
     if (!this.timer) {
@@ -370,7 +407,15 @@ export class Scheduler {
       const criteria = deleting ? deletionCriteria(this.store, schedule) : null;
       const confirmed = schedule.deleteConfirmation;
       const what = retention ? 'política de retenção' : 'agendamento';
-      const origin = `${what} "${schedule.name}"${deleting && confirmed ? ` (${retention ? 'exclusão' : 'exclusão automática'} confirmada por ${confirmed.by} em ${fmt(confirmed.at)})` : ''}${simulate ? ' (simulação)' : ''}`;
+      const confirmation = deleting && confirmed ? ` (${retention ? 'exclusão' : 'exclusão automática'} confirmada por ${confirmed.by} em ${fmt(confirmed.at)})` : '';
+      const origin = `${what} "${schedule.name}"${confirmation}${simulate ? ' (simulação)' : ''}`;
+      // Quem iniciou (registrado nas exclusões): na política, "executada agora por ..." sem parênteses
+      // dentro de parênteses.
+      const startedBy = !manual
+        ? origin
+        : retention
+          ? `${what} "${schedule.name}", ${simulate ? 'simulada' : 'executada'} agora por ${by}${confirmation}`
+          : `${by} (Executar agora, ${origin})`;
       const request = retention
         ? { retention: schedule.retention, options: { ...schedule.options, deleteMatches: deleting } }
         : { listIds: schedule.listIds, options: { ...schedule.options, deleteMatches: deleting, [mail ? 'receivedAfter' : 'modifiedAfter']: period.from ? period.from.toISOString() : null } };
@@ -382,7 +427,7 @@ export class Scheduler {
           ...request,
           confirmDelete: deleting ? 'EXCLUIR' : '',
         },
-        { by: manual ? `${by} (Executar agora, ${origin})` : origin, schedule: { id: schedule.id, name: schedule.name, criteria, enabled: schedule.enabled } },
+        { by: startedBy, schedule: { id: schedule.id, name: schedule.name, criteria, enabled: schedule.enabled, ...(simulate ? { simulated: true } : {}) } },
       );
     } catch (err) {
       const message = err instanceof ScanError ? err.message : `Falha ao iniciar a análise: ${err.message}`;
@@ -392,7 +437,7 @@ export class Scheduler {
       return null;
     }
     const notes = [note, period.text].filter(Boolean);
-    for (const message of notes) this.store.appendLog(scan.id, { level: 'info', message: `Agendamento "${schedule.name}": ${message}` });
+    for (const message of notes) this.store.appendLog(scan.id, { level: 'info', message: `${wordsOf(schedule).title} "${schedule.name}": ${message}` });
     this.#record(schedule, {
       ...base,
       status: 'started',
@@ -501,12 +546,15 @@ export class Scheduler {
       .map(({ scan }) => scan);
     // Concluído sem falhas de acesso (um relatório de quando um local estava fora do ar não conta).
     const good = (scan) => scan.status === 'completed' && !scan.stats?.gaps;
-    const lastFull = (schedule.history || []).find((h) => h.status === 'started' && h.full && h.outcome?.status === 'completed' && !h.outcome.gaps)?.scanId;
-    let completed = 0;
+    // Simulações ("Simular agora") contam à parte: não tiram o lugar dos relatórios das execuções.
+    const simulated = new Set([...own.filter((scan) => scan.simulated).map((scan) => scan.id), ...(schedule.history || []).filter((h) => h.simulated && h.scanId).map((h) => h.scanId)]);
+    const lastFull = (schedule.history || []).find((h) => h.status === 'started' && !h.simulated && h.full && h.outcome?.status === 'completed' && !h.outcome.gaps)?.scanId;
+    const completed = { run: 0, simulation: 0 };
     let removed = 0;
     for (const scan of own) {
-      const kept = completed < keep;
-      if (good(scan)) completed++;
+      const group = simulated.has(scan.id) ? 'simulation' : 'run';
+      const kept = completed[group] < keep;
+      if (good(scan)) completed[group]++;
       if (kept || scan.id === lastFull || !FINISHED.has(scan.status)) continue;
       if (this.manager.isActive(scan.id) || this.manager.hasItemDeletion(scan.id)) continue;
       try {
@@ -519,7 +567,10 @@ export class Scheduler {
     if (removed && own[0]) {
       this.store.appendLog(own[0].id, {
         level: 'info',
-        message: `Agendamento "${schedule.name}": ${removed} relatório(s) antigo(s) excluído(s) (o agendamento guarda até o ${keep}º relatório concluído mais recente e o da última análise completa; o registro geral de exclusões é mantido).`,
+        message:
+          schedule.purpose === 'retention'
+            ? `Política de retenção "${schedule.name}": ${removed} relatório(s) antigo(s) excluído(s) (a política guarda até o ${keep}º relatório concluído mais recente das execuções e, à parte, o das simulações; o registro geral de exclusões é mantido).`
+            : `Agendamento "${schedule.name}": ${removed} relatório(s) antigo(s) excluído(s) (o agendamento guarda até o ${keep}º relatório concluído mais recente e o da última análise completa; o registro geral de exclusões é mantido).`,
       });
     }
   }
@@ -531,17 +582,22 @@ export class Scheduler {
    */
   deletionGuard(scan) {
     const schedule = this.store.getSchedule(scan.scheduleId);
-    if (!schedule) return 'o agendamento foi excluído';
+    if (!schedule) return scan.retention ? WORDS.retention.removed : WORDS.terms.removed;
+    const w = wordsOf(schedule);
     // Pausado depois de a execução ser criada ("Executar agora" num agendamento pausado vale).
-    if (!schedule.enabled && scan.scheduleEnabled !== false) return 'o agendamento foi pausado';
-    if (schedule.action !== 'delete') return 'o agendamento passou a "Somente analisar"';
+    if (!schedule.enabled && scan.scheduleEnabled !== false) return w.paused;
+    if (schedule.action !== 'delete') return `${w.the} passou a "${w.analyze}"`;
     // Os critérios com que a execução começou (termos, pastas ignoradas, locais protegidos) precisam
     // ser os confirmados agora: uma nova confirmação com outros critérios não vale para ela.
     if (!scan.scheduleCriteria || scan.scheduleCriteria !== schedule.deleteConfirmation?.criteria) {
-      return 'a exclusão do agendamento foi confirmada de novo com outros termos, pastas ignoradas ou locais protegidos depois que esta execução foi criada';
+      return schedule.purpose === 'retention'
+        ? 'a exclusão da política foi confirmada de novo com outras pastas ignoradas ou locais protegidos depois que esta execução foi criada'
+        : 'a exclusão do agendamento foi confirmada de novo com outros termos, pastas ignoradas ou locais protegidos depois que esta execução foi criada';
     }
     const targets = scan.kind === 'mail' ? scan.sourceIds : scan.repositoryIds;
-    if (!sameIds(targets, schedule.targetIds) || !sameIds(scan.listIds, schedule.listIds)) return 'os locais ou as listas do agendamento foram alterados';
+    if (!sameIds(targets, schedule.targetIds) || !sameIds(scan.listIds, schedule.listIds)) {
+      return schedule.purpose === 'retention' ? 'os locais da política foram alterados' : 'os locais ou as listas do agendamento foram alterados';
+    }
     if (schedule.purpose === 'retention') {
       // A política (critério, idade máxima, nomes, limite e forma de exclusão) precisa ser a mesma.
       // eslint-disable-next-line no-unused-vars

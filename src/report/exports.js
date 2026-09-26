@@ -116,16 +116,25 @@ export function deletionsSheet(deletions, records, columns, label, labels = DELE
   };
 }
 
-/** Linhas do resumo da análise sobre a exclusão automática. */
-export function deletionInfoRows(opts, s, { noun = 'Excluídos', gone = 'Já não existiam', changed = 'Alterados depois da análise (mantidos)', retention = null } = {}) {
-  if (!opts.deleteMatches) return [['Ação', retention ? 'Somente listar os itens expirados (simulação)' : 'Somente analisar']];
+/**
+ * Linhas do resumo da análise sobre a exclusão automática. retention: linhas próprias das
+ * políticas de retenção ({ mode: forma da exclusão por extenso, extra: [[rótulo, valor]] });
+ * blocked / revoked: motivo de a exclusão ter sido desativada antes do início ou interrompida.
+ */
+export function deletionInfoRows(opts, s, { noun = 'Excluídos', gone = 'Já não existiam', changed = 'Alterados depois da análise (mantidos)', skipped = 'Não excluídos (limite da execução)', retention = null, blocked = '', revoked = '' } = {}) {
+  const action = retention ? 'Excluir os itens expirados' : 'Analisar e excluir automaticamente';
+  if (!opts.deleteMatches) {
+    if (blocked) return [['Ação', `${action} — exclusão desativada nesta execução: ${blocked}`]];
+    return [['Ação', retention ? 'Somente listar os itens expirados (simulação)' : 'Somente analisar']];
+  }
   return [
-    ['Ação', retention ? `Excluir os itens expirados (${retention.deleteMode === 'trash' ? 'para a lixeira' : 'definitivamente'})` : 'Analisar e excluir automaticamente'],
+    ['Ação', retention ? `${action} (${retention.mode})` : action],
+    ...(revoked ? [['Exclusão interrompida', revoked]] : []),
     [`${noun} na análise`, s.deleted ?? 0],
     [gone, s.deleteMissing ?? 0],
     [changed, s.deleteChanged ?? 0],
     ['Falhas na exclusão', s.deleteErrors ?? 0],
-    ...(retention ? [['Não excluídos (limite da execução)', s.deleteSkipped ?? 0]] : []),
+    ...(retention ? [[skipped, s.deleteSkipped ?? 0], ...(retention.extra || [])] : []),
   ];
 }
 
@@ -184,7 +193,7 @@ function scanInfoRows(scan) {
     ['Protegidos por senha', s.contentEncrypted ?? 0],
     ['Grandes demais (só nome)', s.contentSkippedSize ?? 0],
     ['Erros de acesso/leitura', s.errors ?? 0],
-    ...deletionInfoRows(opts, s),
+    ...deletionInfoRows(opts, s, { blocked: scan.deletionBlocked, revoked: scan.deletionRevoked }),
   ];
 }
 

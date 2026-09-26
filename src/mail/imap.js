@@ -180,8 +180,11 @@ export class ImapConnector {
       if (f.specialUse === '\\Junk' && !includeJunk) return false;
       return !excluded(display(f));
     });
+    // inTrash: a Lixeira e as subpastas dela.
+    const trash = list.find((f) => f.specialUse === '\\Trash');
+    const inTrash = (f) => Boolean(trash) && (f === trash || (trash.delimiter && f.path.startsWith(`${trash.path}${trash.delimiter}`)));
     return selected
-      .map((f) => ({ path: f.path, display: display(f), inbox: f.specialUse === '\\Inbox' || f.path.toUpperCase() === 'INBOX', all: f === all }))
+      .map((f) => ({ path: f.path, display: display(f), inbox: f.specialUse === '\\Inbox' || f.path.toUpperCase() === 'INBOX', all: f === all, inTrash: inTrash(f) }))
       .sort((a, b) => Number(b.inbox) - Number(a.inbox) || a.display.localeCompare(b.display));
   }
 
@@ -230,6 +233,7 @@ export class ImapConnector {
                 subject: env.subject || '',
                 from: from ? { name: from.name || '', address: from.address || '' } : null,
                 internetMessageId: env.messageId || null,
+                inTrash: folder.inTrash,
                 headersOnly: true,
               };
             }

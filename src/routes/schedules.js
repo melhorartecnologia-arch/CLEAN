@@ -11,6 +11,8 @@ import { isCloudRepo } from '../scan/delete.js';
 const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
 const KEEP_MAX = 500;
 const NEVER = 'Pela regra informada, o agendamento nunca seria executado (a data e a hora já passaram). Confira a data de início, o horário e o término.';
+const NEVER_POLICY = 'Pela regra informada, a política nunca seria executada (a data e a hora já passaram). Confira a data de início, o horário e o término.';
+const never = (data) => bad(data.purpose === 'retention' ? NEVER_POLICY : NEVER);
 
 function parseRule(input) {
   try {
@@ -124,7 +126,7 @@ export function schedulesRouter({ store, manager, scheduler }) {
 
   const find = (id) => {
     const schedule = store.getSchedule(id);
-    if (!schedule) throw new HttpError(404, 'Agendamento não encontrado.');
+    if (!schedule) throw new HttpError(404, 'Agendamento ou política de retenção não encontrado. Ele pode ter sido excluído.');
     return schedule;
   };
 
@@ -199,7 +201,7 @@ export function schedulesRouter({ store, manager, scheduler }) {
   router.post('/', (req, res) => {
     const by = actor(req);
     const data = parseSchedule(req.body || {}, { store, by });
-    if (data.rule && !nextOccurrence(data.rule, now(), { remaining: remainingOf({ rule: data.rule }) })) throw bad(NEVER);
+    if (data.rule && !nextOccurrence(data.rule, now(), { remaining: remainingOf({ rule: data.rule }) })) throw never(data);
     const schedule = store.createSchedule({ ...data, enabled: req.body?.enabled !== false, createdBy: by, updatedBy: by, runCount: 0, countDone: 0, history: [], nextRunAt: null });
     store.updateScheduleState(schedule.id, { nextRunAt: scheduler.plan(schedule) });
     res.status(201).json(view(schedule));
@@ -219,7 +221,7 @@ export function schedulesRouter({ store, manager, scheduler }) {
     const planned = scheduler.plan({ ...existing, ...data, countDone });
     // Regra alterada que nunca mais executaria: recusada (com a mesma regra, um agendamento já
     // encerrado pode ser renomeado ou ajustado).
-    if (existing.enabled && !same && data.rule && !planned) throw bad(NEVER);
+    if (existing.enabled && !same && data.rule && !planned) throw never(data);
     // Horário que acabou de chegar e ainda não foi executado: continua valendo (o agendador o
     // executa na próxima verificação).
     const due = same && existing.enabled && existing.nextRunAt && Date.parse(existing.nextRunAt) <= +now();

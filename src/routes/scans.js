@@ -26,6 +26,7 @@ import { PROJECT_ROOT } from '../config.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
 import { exportMailXlsx, exportMailCsv, exportMailHtml } from '../report/mail-exports.js';
 import { RETENTION_EXPORTS } from '../report/retention-exports.js';
+import { fileDate } from '../retention/policy.js';
 
 const byName = (a, b) => a.localeCompare(b, 'pt-BR');
 
@@ -68,6 +69,13 @@ const MODELS = {
 };
 
 const modelOf = (scan) => (scan.kind === 'mail' ? MODELS.mail : MODELS.files);
+
+/** Retenção, na exclusão manual: o motivo para não excluir um arquivo que deixou de estar expirado. */
+function expiredCheck(retention, st) {
+  const when = fileDate(st, retention.criterion);
+  if (when !== null && when < Date.parse(retention.cutoff)) return null;
+  return 'O arquivo não está mais expirado pela política: a data do critério mudou depois da análise (por exemplo, ele foi aberto).';
+}
 
 /** Exportações: as das políticas de retenção têm uma linha por item expirado (sem termos). */
 const exportsOf = (scan) => (scan.retention ? RETENTION_EXPORTS : modelOf(scan));
@@ -396,6 +404,8 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         expected: { size: record.size, modified: record.modified },
         force: req.body?.force === true,
         protect: [...cleanPaths({ dataDir: store.dataDir, appDir: PROJECT_ROOT }), ...keptPaths(repo, store.listRepositories())],
+        // Relatório de retenção: o arquivo ainda está expirado pela política (ex.: não foi aberto depois)?
+        check: scan.retention ? (st) => expiredCheck(scan.retention, st) : null,
       });
       if (result.status === 'changed') return res.status(409).json({ error: `${result.error} Confirme para excluir mesmo assim.`, code: 'changed' });
     }

@@ -140,6 +140,8 @@ export class ScanManager {
     const origin = {
       startedBy: by,
       ...(schedule ? { scheduleId: schedule.id, scheduleName: schedule.name, scheduleCriteria: schedule.criteria ?? null, scheduleEnabled: schedule.enabled !== false } : {}),
+      // "Simular agora" de uma política de retenção (lista o que seria excluído, sem excluir).
+      ...(schedule?.simulated ? { simulated: true } : {}),
     };
     if (body?.retention) return this.#startRetention(body, origin);
     if (body?.kind === 'mail') return this.#startMail(body, origin);
@@ -268,7 +270,8 @@ export class ScanManager {
     if (blocked) {
       deleting = false;
       warn(`Exclusão automática desativada nesta execução: ${blocked}. A análise continua sem excluir.`);
-      this.store.updateScan(id, { options: { ...scan.options, deleteMatches: false } });
+      // O relatório mostra o motivo (e não "somente analisar" ou "simulação").
+      this.store.updateScan(id, { options: { ...scan.options, deleteMatches: false }, deletionBlocked: blocked });
     }
     const extra = { startedBy: scan?.startedBy || null, protect: cleanPaths({ dataDir: this.store.dataDir, appDir: PROJECT_ROOT }) };
     if (config.kind !== 'mail') {

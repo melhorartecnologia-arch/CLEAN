@@ -69,8 +69,9 @@ export class GraphConnector extends GraphClient {
   /** Pastas da caixa (com subpastas), sem as excluídas pelas opções e pelos padrões da conexão. */
   async folders(userId, { includeTrash = true, includeJunk = false } = {}) {
     const skip = new Set();
+    let trash = null;
     try {
-      const trash = await this.wellKnownFolder(userId, 'deleteditems');
+      trash = await this.wellKnownFolder(userId, 'deleteditems');
       const junk = await this.wellKnownFolder(userId, 'junkemail');
       const sync = await this.wellKnownFolder(userId, 'syncissues');
       if (!includeTrash && trash) skip.add(trash);
@@ -86,19 +87,21 @@ export class GraphConnector extends GraphClient {
     const excluded = folderMatcher(this.source.excludeFolders);
     const fields = '$select=id,displayName,childFolderCount,totalItemCount&$top=250';
     const out = [];
-    const walk = async (url, parent) => {
+    // inTrash: a pasta Itens Excluídos e as subpastas dela.
+    const walk = async (url, parent, parentInTrash) => {
       for (let next = url; next; ) {
         const page = await this.api(next);
         for (const f of page?.value || []) {
           const path = parent ? `${parent}/${f.displayName}` : f.displayName;
           if (skip.has(f.id) || excluded(path)) continue;
-          out.push({ id: f.id, path, total: Number(f.totalItemCount) || 0 });
-          if (f.childFolderCount > 0) await walk(`/users/${enc(userId)}/mailFolders/${enc(f.id)}/childFolders?${fields}`, path);
+          const inTrash = parentInTrash || (trash !== null && f.id === trash);
+          out.push({ id: f.id, path, total: Number(f.totalItemCount) || 0, inTrash });
+          if (f.childFolderCount > 0) await walk(`/users/${enc(userId)}/mailFolders/${enc(f.id)}/childFolders?${fields}`, path, inTrash);
         }
         next = this.next(page);
       }
     };
-    await walk(`/users/${enc(userId)}/mailFolders?${fields}`, '');
+    await walk(`/users/${enc(userId)}/mailFolders?${fields}`, '', false);
     return out;
   }
 
@@ -134,7 +137,9 @@ export class GraphConnector extends GraphClient {
                 receivedAt: m.receivedDateTime || null,
                 webLink: m.webLink || null,
                 size: Number(m.singleValueExtendedProperties?.[0]?.value) || 0,
-                ...(headersOnly ? { subject: m.subject || '', from: from ? { name: from.name || '', address: from.address || '' } : null, internetMessageId: m.internetMessageId || null, headersOnly: true } : {}),
+                ...(headersOnly
+                  ? { subject: m.subject || '', from: from ? { name: from.name || '', address: from.address || '' } : null, internetMessageId: m.internetMessageId || null, inTrash: folder.inTrash, headersOnly: true }
+                  : {}),
               };
             }
             url = self.next(page);

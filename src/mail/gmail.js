@@ -259,6 +259,7 @@ export class GmailConnector {
             subject: decodeHeader(header(msg, 'subject')),
             from,
             internetMessageId: header(msg, 'message-id') || null,
+            inTrash: (msg?.labelIds || []).includes('TRASH'),
             headersOnly: true,
           };
         } catch (err) {

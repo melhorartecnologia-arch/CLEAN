@@ -22,10 +22,18 @@ export const bad = (message) => new HttpError(400, message);
 export function assertUnused(store, kind, id, what) {
   const using = store.schedulesUsing(kind, id);
   if (!using.length) return;
-  const names = using.map((s) => `"${s.name}"`).join(', ');
-  const one = using.length === 1;
+  const names = (list) => list.map((s) => `"${s.name}"`).join(', ');
+  const schedules = using.filter((s) => s.purpose !== 'retention');
+  const policies = using.filter((s) => s.purpose === 'retention');
+  const pick = (list, one, many) => (list.length ? (list.length === 1 ? one : many) : '');
+  const where = [
+    schedules.length && `${pick(schedules, 'no agendamento', 'nos agendamentos')} ${names(schedules)}`,
+    policies.length && `${pick(policies, 'na política de retenção', 'nas políticas de retenção')} ${names(policies)}`,
+  ].filter(Boolean);
+  const from = [pick(schedules, 'do agendamento', 'dos agendamentos'), pick(policies, 'da política', 'das políticas')].filter(Boolean);
+  const remove = [pick(schedules, 'o agendamento', 'os agendamentos'), pick(policies, 'a política', 'as políticas')].filter(Boolean);
   const it = what.startsWith('A ') ? 'a' : 'o';
-  throw new HttpError(409, `${what} está em uso ${one ? 'no agendamento' : 'nos agendamentos'} ${names}. Retire-${it} ${one ? 'do agendamento' : 'dos agendamentos'} (ou exclua ${one ? 'o agendamento' : 'os agendamentos'}) antes de excluir.`, 'in-use');
+  throw new HttpError(409, `${what} está em uso ${where.join(' e ')}. Retire-${it} ${from.join(' e ')} (ou exclua ${remove.join(' e ')}) antes de excluir.`, 'in-use');
 }
 
 export const EMAIL_RE = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+$/;
