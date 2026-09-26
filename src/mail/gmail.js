@@ -4,6 +4,7 @@
 import crypto from 'node:crypto';
 import { request, pool, ApiError } from './http.js';
 import { SkipMailboxError, folderMatcher, addressMatcher, deletionItems } from './common.js';
+import { parseAddresses, decodeHeader } from '../scan/extractors/mime.js';
 
 export const GOOGLE_ENDPOINTS = {
   token: 'https://oauth2.googleapis.com/token',
@@ -210,7 +211,7 @@ export class GmailConnector {
    * ignorada são descartadas. Mensagens maiores que maxBytes não são baixadas inteiras: vêm só o
    * corpo e a lista de anexos (formato "full"), sem o conteúdo dos anexos.
    */
-  async *messages(mailbox, { since = null, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
+  async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
     const { address } = mailbox;
     const base = `${this.endpoints.gmail}/users/${enc(address)}`;
     const labels = await this.labels(address);
@@ -218,6 +219,7 @@ export class GmailConnector {
     const excluded = folderMatcher(this.source.excludeFolders);
     const terms = [];
     if (since) terms.push(`after:${Math.floor(since.getTime() / 1000)}`);
+    if (before) terms.push(`before:${Math.floor(before.getTime() / 1000)}`);
     const spamTrash = includeTrash || includeJunk;
     if (spamTrash && !includeJunk) terms.push('-in:spam');
     if (spamTrash && !includeTrash) terms.push('-in:trash');
@@ -235,6 +237,36 @@ export class GmailConnector {
     async function* all() {
       yield* list(`smaller:${limit}`, false);
       yield* list(`larger:${limit - 1}`, true);
+    }
+    if (headersOnly) {
+      // Retenção: só os cabeçalhos (sem baixar a mensagem nem os anexos).
+      const header = (msg, name) => msg?.payload?.headers?.find((h) => h.name.toLowerCase() === name)?.value || '';
+      yield* pool(list('', false), Math.max(1, Math.min(concurrency, MAX_CONCURRENCY)), async ({ id }) => {
+        try {
+          const msg = await this.api(address, GMAIL_SCOPE, `${base}/messages/${enc(id)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Message-ID`, { retries: 4 });
+          const names = (msg?.labelIds || []).map((l) => labels.get(l)).filter(Boolean);
+          if (names.some((n) => excluded(n))) return undefined;
+          const received = Number(msg?.internalDate);
+          const at = Number.isFinite(received) && received > 0 ? received : null;
+          if (before && (at === null || at >= before.getTime())) return undefined;
+          const from = parseAddresses(header(msg, 'from'))[0] || null;
+          return {
+            folder: names.join('; ') || 'Todos os e-mails',
+            id,
+            size: Number(msg?.sizeEstimate) || 0,
+            receivedAt: at ? new Date(at).toISOString() : null,
+            webLink: null,
+            subject: decodeHeader(header(msg, 'subject')),
+            from,
+            internetMessageId: header(msg, 'message-id') || null,
+            headersOnly: true,
+          };
+        } catch (err) {
+          if (this.signal?.aborted) throw err;
+          return { folder: '', id, raw: null, error: err };
+        }
+      });
+      return;
     }
     yield* pool(all(), Math.max(1, Math.min(concurrency, MAX_CONCURRENCY)), async ({ id, big }) => {
       try {

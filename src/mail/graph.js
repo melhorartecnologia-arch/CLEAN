@@ -105,30 +105,36 @@ export class GraphConnector extends GraphClient {
   /**
    * Mensagens da caixa, já baixadas (MIME), com até `concurrency` downloads simultâneos.
    * Entrega { folder, id, raw, truncated, size, receivedAt, webLink } ou { folder, id, error }.
+   * before: só as recebidas antes desta data; headersOnly: sem baixar a mensagem (retenção) —
+   * entrega também { subject, from, internetMessageId, headersOnly: true }.
    */
-  async *messages(mailbox, { since = null, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
+  async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
     const user = await this.resolveUser(mailbox);
     mailbox.name ||= user.name;
     const folders = await this.folders(user.id, { includeTrash, includeJunk });
     const userPath = `/users/${enc(user.id)}`;
-    const filter = since ? `&$filter=${enc(`receivedDateTime ge ${since.toISOString()}`)}` : '';
+    const conditions = [since && `receivedDateTime ge ${since.toISOString()}`, before && `receivedDateTime lt ${before.toISOString()}`].filter(Boolean);
+    const filter = conditions.length ? `&$filter=${enc(conditions.join(' and '))}` : '';
+    const fields = headersOnly ? 'id,receivedDateTime,webLink,subject,from,internetMessageId' : 'id,receivedDateTime,webLink';
     const size = `&$expand=${enc("singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')")}`;
     const self = this;
     async function* list() {
       for (const folder of folders) {
         onFolder?.(folder.path);
         if (!folder.total) continue;
-        let url = `${userPath}/mailFolders/${enc(folder.id)}/messages?$select=id,receivedDateTime,webLink&$top=100${size}${filter}`;
+        let url = `${userPath}/mailFolders/${enc(folder.id)}/messages?$select=${fields}&$top=100${size}${filter}`;
         try {
           while (url) {
             const page = await self.api(url, { headers: IMMUTABLE_IDS });
             for (const m of page?.value || []) {
+              const from = m.from?.emailAddress;
               yield {
                 folder: folder.path,
                 id: m.id,
                 receivedAt: m.receivedDateTime || null,
                 webLink: m.webLink || null,
                 size: Number(m.singleValueExtendedProperties?.[0]?.value) || 0,
+                ...(headersOnly ? { subject: m.subject || '', from: from ? { name: from.name || '', address: from.address || '' } : null, internetMessageId: m.internetMessageId || null, headersOnly: true } : {}),
               };
             }
             url = self.next(page);
@@ -140,6 +146,10 @@ export class GraphConnector extends GraphClient {
           yield { folder: folder.path, id: null, error: err };
         }
       }
+    }
+    if (headersOnly) {
+      yield* list();
+      return;
     }
     yield* pool(list(), Math.max(1, Math.min(concurrency, MAX_CONCURRENCY)), async (item) => {
       if (item.error) return item;

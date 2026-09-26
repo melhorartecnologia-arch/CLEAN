@@ -150,6 +150,12 @@ function drivesApi({ req, res, path, url, base, graph, find, json }) {
  * google: { publicKey, admin, users: [{ mail, name, disabled?, labels: [{ id, name, type }],
  *          messages: [{ id, raw, labelIds, internalDate }] }], flakyDelete? }
  */
+/** Cabeçalho de uma mensagem MIME do simulador (primeira ocorrência). */
+function mimeHeader(raw, name) {
+  const head = raw.toString('utf8').split(/\r?\n\r?\n/)[0];
+  return (new RegExp(`^${name}:[ \t]*(.*)$`, 'im').exec(head)?.[1] || '').trim();
+}
+
 export function startMockApis({ graph = null, google = null } = {}) {
   const calls = [];
   const throttled = new Set();
@@ -246,8 +252,12 @@ export function startMockApis({ graph = null, google = null } = {}) {
           if (graph.failFolders?.has(m[1])) return json(res, 404, { error: { code: 'ErrorItemNotFound', message: 'The specified object was not found in the store.' } });
           const list = user.messages[m[1]] || [];
           const filter = url.searchParams.get('$filter');
-          const since = filter ? new Date(/receivedDateTime ge (\S+)/.exec(filter)[1]) : null;
-          const all = list.filter((x) => !since || new Date(x.received) >= since);
+          const ge = filter && /receivedDateTime ge (\S+)/.exec(filter);
+          const lt = filter && /receivedDateTime lt (\S+)/.exec(filter);
+          const since = ge ? new Date(ge[1]) : null;
+          const before = lt ? new Date(lt[1]) : null;
+          const all = list.filter((x) => (!since || new Date(x.received) >= since) && (!before || new Date(x.received) < before));
+          const headers = (url.searchParams.get('$select') || '').includes('subject');
           const skip = Number(url.searchParams.get('$skip') || 0);
           const page = all.slice(skip, skip + 2);
           const next = skip + 2 < all.length ? { '@odata.nextLink': `${base}/graph/v1.0/users/${user.id}/mailFolders/${m[1]}/messages?$skip=${skip + 2}${filter ? `&$filter=${encodeURIComponent(filter)}` : ''}` } : {};
@@ -257,6 +267,13 @@ export function startMockApis({ graph = null, google = null } = {}) {
               receivedDateTime: x.received,
               webLink: `https://outlook.office365.com/owa/?ItemID=${x.id}`,
               singleValueExtendedProperties: [{ id: 'Integer 0x0e08', value: String(x.raw.length) }],
+              ...(headers
+                ? {
+                    subject: mimeHeader(x.raw, 'Subject'),
+                    internetMessageId: mimeHeader(x.raw, 'Message-ID') || null,
+                    from: { emailAddress: { name: /^(.*?)\s*</.exec(mimeHeader(x.raw, 'From'))?.[1]?.replace(/"/g, '') || '', address: /<([^>]+)>/.exec(mimeHeader(x.raw, 'From'))?.[1] || mimeHeader(x.raw, 'From') } },
+                  }
+                : {}),
             })),
             ...next,
           });
@@ -324,6 +341,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
           const spamTrash = url.searchParams.get('includeSpamTrash') === 'true';
           const q = url.searchParams.get('q') || '';
           const after = Number(/after:(\d+)/.exec(q)?.[1] || 0) * 1000;
+          const before = Number(/before:(\d+)/.exec(q)?.[1] || Infinity) * 1000;
           const smaller = Number(/smaller:(\d+)/.exec(q)?.[1] || Infinity);
           const larger = Number(/larger:(\d+)/.exec(q)?.[1] || -1);
           const list = user.messages.filter((m) => {
@@ -333,7 +351,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
             if (q.includes('-in:trash') && labels.includes('TRASH')) return false;
             const size = m.size ?? m.raw.length;
             if (!(size < smaller) || !(size > larger)) return false;
-            return Number(m.internalDate) >= after;
+            return Number(m.internalDate) >= after && Number(m.internalDate) < before;
           });
           const start = Number(url.searchParams.get('pageToken') || 0);
           const page = list.slice(start, start + 2);
@@ -364,6 +382,10 @@ export function startMockApis({ graph = null, google = null } = {}) {
           }
           const common = { id: m.id, threadId: m.id, labelIds: m.labelIds, sizeEstimate: m.size ?? m.raw.length, internalDate: String(m.internalDate) };
           if (url.searchParams.get('format') === 'full') return json(res, 200, { ...common, payload: m.payload });
+          if (url.searchParams.get('format') === 'metadata') {
+            const wanted = url.searchParams.getAll('metadataHeaders');
+            return json(res, 200, { ...common, payload: { headers: wanted.map((name) => ({ name, value: mimeHeader(m.raw, name) })).filter((h) => h.value) } });
+          }
           return json(res, 200, { ...common, raw: m.raw.toString('base64url') });
         }
       }

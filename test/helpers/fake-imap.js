@@ -158,7 +158,15 @@ export function startFakeImap(
             if (/\bFLAGS\b/.test(items)) parts.push(`FLAGS (${[...(m.flags || []), ...(m.deleted ? ['\\Deleted'] : [])].join(' ')})`);
             if (items.includes('ENVELOPE')) {
               const mid = messageIdOf(m.raw);
-              parts.push(`ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL ${mid ? `"${mid.replace(/["\\]/g, '')}"` : 'NIL'})`);
+              const head = m.raw.toString('utf8').split(/\r?\n\r?\n/)[0];
+              const header = (name) => (new RegExp(`^${name}:[ \t]*(.*)$`, 'im').exec(head)?.[1] || '').trim();
+              const q = (v) => (v ? `"${v.replace(/["\\]/g, '')}"` : 'NIL');
+              const fromText = header('From');
+              const address = /<([^>]+)>/.exec(fromText)?.[1] || fromText;
+              const name = /^(.*?)\s*</.exec(fromText)?.[1]?.replace(/"/g, '') || '';
+              const [user, host] = address.split('@');
+              const from = address ? `((${q(name)} NIL ${q(user)} ${q(host)}))` : 'NIL';
+              parts.push(`ENVELOPE (${q(header('Date'))} ${q(header('Subject'))} ${from} NIL NIL NIL NIL NIL NIL ${mid ? `"${mid.replace(/["\\]/g, '')}"` : 'NIL'})`);
             }
             const partial = /BODY\.PEEK\[\]<(\d+)\.(\d+)>/.exec(items);
             const head = `* ${i + 1} FETCH (${parts.join(' ')}`;

@@ -4,6 +4,7 @@ import { newStats, DEFAULT_OPTIONS } from './scanner.js';
 import { newMailStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
 import { cleanPaths, keptPaths, isCloudRepo, deletionScope, mailDeletionScope } from './delete.js';
 import { keptCloud } from '../cloud/drives.js';
+import { sanitizeRetention, cutoffDate } from '../retention/policy.js';
 import { PROJECT_ROOT } from '../config.js';
 
 export class ScanError extends Error {
@@ -83,6 +84,15 @@ function checkDeletion(opts, body, targets, noun) {
 
 const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
 
+/** Opções de uma análise de retenção (arquivos: proprietário; e-mail: Lixeira e Lixo Eletrônico). */
+function retentionOptions(input, retention, mail) {
+  const i = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const concurrency = Number(i.concurrency);
+  const base = { deleteMatches: i.deleteMatches === true, concurrency: Number.isInteger(concurrency) && concurrency > 0 ? Math.min(concurrency, mail ? 8 : 16) : 4 };
+  if (mail) return { ...MAIL_DEFAULT_OPTIONS, ...base, includeTrash: retention.includeTrash, includeJunk: retention.includeJunk, receivedAfter: null };
+  return { ...DEFAULT_OPTIONS, ...base, checkContent: false, resolveOwner: i.resolveOwner !== false, modifiedAfter: null };
+}
+
 export class ScanManager {
   /** mailEndpoints: endereços alternativos das APIs de e-mail (usado nos testes). */
   constructor(store, { maxConcurrent = 1, workerUrl = new URL('./worker.js', import.meta.url), mailEndpoints = {} } = {}) {
@@ -131,6 +141,7 @@ export class ScanManager {
       startedBy: by,
       ...(schedule ? { scheduleId: schedule.id, scheduleName: schedule.name, scheduleCriteria: schedule.criteria ?? null, scheduleEnabled: schedule.enabled !== false } : {}),
     };
+    if (body?.retention) return this.#startRetention(body, origin);
     if (body?.kind === 'mail') return this.#startMail(body, origin);
     const { name, repositoryIds, listIds, options } = body || {};
     const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
@@ -196,6 +207,51 @@ export class ScanManager {
   }
 
   /**
+   * Análise de retenção: lista (e, com exclusão, elimina) os arquivos ou mensagens mais antigos que
+   * a idade máxima da política, pelo critério de data escolhido. Sem listas de referência. A forma
+   * de exclusão (definitiva ou para a lixeira) é a da política.
+   */
+  async #startRetention(body, origin) {
+    const mail = body.kind === 'mail';
+    const targets = ids(mail ? body.sourceIds : body.repositoryIds).map((id) => (mail ? this.store.getMailSource(id) : this.store.getRepository(id)));
+    if (targets.length === 0 || targets.some((t) => !t)) throw new ScanError(mail ? 'Selecione conexões de e-mail válidas.' : 'Selecione repositórios válidos.');
+    let retention;
+    try {
+      retention = sanitizeRetention(body.retention, mail ? 'mail' : 'files', { cloud: !mail && targets.some(isCloudRepo) });
+    } catch (err) {
+      throw new ScanError(err.message);
+    }
+    const opts = retentionOptions(body.options, retention, mail);
+    checkDeletion(opts, body, targets, mail ? 'da conexão de e-mail' : 'do repositório');
+    const policy = { ...retention, cutoff: cutoffDate(retention).toISOString() };
+    const summary = mail
+      ? { sources: targets.map((s) => ({ id: s.id, name: s.name, type: s.type, scope: s.scope, mailboxCount: s.scope === 'all' ? null : (s.mailboxes || []).length })) }
+      : { repositories: targets.map((r) => ({ id: r.id, name: r.name, path: r.path, type: r.type || 'local' })) };
+    const scan = this.store.createScan({
+      kind: mail ? 'mail' : 'files',
+      name: this.#scanName(body.name, 'Retenção'),
+      status: 'queued',
+      [mail ? 'sourceIds' : 'repositoryIds']: targets.map((t) => t.id),
+      listIds: [],
+      options: opts,
+      retention: policy,
+      ...origin,
+      summary: { ...summary, lists: [], termCount: 0 },
+      stats: mail ? newMailStats(targets.length) : newStats(targets.length),
+      current: null,
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+    });
+    // A forma de exclusão registrada em cada local é a da política.
+    const snapshots = targets.map((t) => ({ ...(mail ? mailSnapshot(t) : repoSnapshot(t)), ...(mail || isCloudRepo(t) ? { deleteMode: policy.deleteMode } : {}) }));
+    await this.store.writeScanConfig(scan.id, mail ? { kind: 'mail', sources: snapshots, terms: [], options: opts, retention: policy } : { repositories: snapshots, terms: [], options: opts, retention: policy });
+    this.queue.push(scan.id);
+    this.#pump();
+    return scan;
+  }
+
+  /**
    * Configuração entregue à thread. Nas análises de e-mail, os segredos são decifrados só agora e
    * vão apenas para a memória da thread (o config.json da análise não os contém).
    * A exclusão automática é conferida de novo com o cadastro atual: só continua se ainda for
@@ -240,8 +296,9 @@ export class ScanManager {
           return repo;
         }
         if (!isCloudRepo(r)) return { ...repo, allowDelete: true, keep: keptPaths(current, all) };
-        // Vale a forma confirmada ao criar a análise (ou a lixeira, se o cadastro passou a ser assim).
-        const deleteMode = r.deleteMode === 'trash' || current.deleteMode !== 'permanent' ? 'trash' : 'permanent';
+        // Vale a forma confirmada ao criar a análise (ou a lixeira, se o cadastro passou a ser assim);
+        // na retenção, a forma da política.
+        const deleteMode = config.retention ? r.deleteMode : r.deleteMode === 'trash' || current.deleteMode !== 'permanent' ? 'trash' : 'permanent';
         return { ...repo, allowDelete: true, deleteMode, keep: keptCloud(current, all) };
       });
       return { ...config, options: { ...config.options, deleteMatches: deleting }, repositories, endpoints: this.mailEndpoints, ...extra };
@@ -255,7 +312,7 @@ export class ScanManager {
       const reason = !live.allowDelete ? 'a opção "Permitir exclusão" foi desligada' : mailDeletionScope(live) !== mailDeletionScope(s) ? 'a conta, o servidor ou as caixas da conexão foram alterados' : null;
       const allowDelete = deleting && s.allowDelete && !reason;
       if (deleting && s.allowDelete && reason) warn(`Exclusão automática desativada para "${s.name}": ${reason} depois que a análise foi criada.`);
-      const deleteMode = s.deleteMode === 'trash' || live.deleteMode === 'trash' ? 'trash' : 'permanent';
+      const deleteMode = config.retention ? s.deleteMode : s.deleteMode === 'trash' || live.deleteMode === 'trash' ? 'trash' : 'permanent';
       return { ...live, allowDelete, deleteMode, secrets: this.store.openMailSecrets(current) };
     });
     return { ...config, options: { ...config.options, deleteMatches: deleting }, sources, endpoints: this.mailEndpoints, ...extra };

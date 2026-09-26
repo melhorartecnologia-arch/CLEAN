@@ -107,7 +107,8 @@ export function deletionsSheet(deletions, records, columns, label, labels = DELE
     rows: (function* () {
       for (const d of deletions) {
         const record = byId.get(d.recordId);
-        const how = `${d.mode === 'auto' ? 'Automática (na análise)' : 'Manual (relatório)'}${d.method === 'trash' ? ' – para a lixeira' : d.method === 'permanent' ? ' – definitiva' : ''}`;
+        const kind = { auto: 'Automática (na análise)', retention: 'Política de retenção' }[d.mode] || 'Manual (relatório)';
+        const how = `${kind}${d.method === 'trash' ? ' – para a lixeira' : d.method === 'permanent' || d.method === 'file' ? ' – definitiva' : ''}`;
         const by = d.by ? (d.mode === 'auto' ? `iniciada por ${d.by}` : d.by) : d.mode === 'auto' ? 'análise automática' : '';
         yield [toDate(d.at), ...label(record, d), labels[d.status] || d.status, how, by, d.error || d.note || ''];
       }
@@ -116,14 +117,15 @@ export function deletionsSheet(deletions, records, columns, label, labels = DELE
 }
 
 /** Linhas do resumo da análise sobre a exclusão automática. */
-export function deletionInfoRows(opts, s, { noun = 'Excluídos', gone = 'Já não existiam', changed = 'Alterados depois da análise (mantidos)' } = {}) {
-  if (!opts.deleteMatches) return [['Ação', 'Somente analisar']];
+export function deletionInfoRows(opts, s, { noun = 'Excluídos', gone = 'Já não existiam', changed = 'Alterados depois da análise (mantidos)', retention = null } = {}) {
+  if (!opts.deleteMatches) return [['Ação', retention ? 'Somente listar os itens expirados (simulação)' : 'Somente analisar']];
   return [
-    ['Ação', 'Analisar e excluir automaticamente'],
+    ['Ação', retention ? `Excluir os itens expirados (${retention.deleteMode === 'trash' ? 'para a lixeira' : 'definitivamente'})` : 'Analisar e excluir automaticamente'],
     [`${noun} na análise`, s.deleted ?? 0],
     [gone, s.deleteMissing ?? 0],
     [changed, s.deleteChanged ?? 0],
     ['Falhas na exclusão', s.deleteErrors ?? 0],
+    ...(retention ? [['Não excluídos (limite da execução)', s.deleteSkipped ?? 0]] : []),
   ];
 }
 

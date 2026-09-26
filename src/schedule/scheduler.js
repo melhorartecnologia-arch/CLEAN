@@ -17,6 +17,7 @@ import { nextOccurrence, countBetween, validateRule } from './recurrence.js';
 import { ScanError, sanitizeOptions, sanitizeMailOptions } from '../scan/manager.js';
 import { deletionScope, mailDeletionScope, isCloudRepo, keptPaths } from '../scan/delete.js';
 import { keptCloud } from '../cloud/drives.js';
+import { sanitizeRetention } from '../retention/policy.js';
 
 const TICK_MS = 15000;
 // Atraso tolerado (servidor ocupado): acima disso, o horário conta como perdido.
@@ -99,10 +100,14 @@ export function remainingOf(schedule) {
  */
 export function scheduleProblems(store, schedule) {
   const problems = [];
-  try {
-    validateRule(schedule.rule);
-  } catch (err) {
-    problems.push(`A regra de recorrência salva é inválida (${err.message}) Edite o agendamento.`);
+  const retention = schedule.purpose === 'retention';
+  // Política de retenção sem regra: executada só manualmente.
+  if (schedule.rule || !retention) {
+    try {
+      validateRule(schedule.rule);
+    } catch (err) {
+      problems.push(`A regra de recorrência salva é inválida (${err.message}) Edite o agendamento.`);
+    }
   }
   const noun = NOUNS[schedule.kind] || NOUNS.files;
   const name = (id) => schedule.names?.[id] || id;
@@ -118,7 +123,14 @@ export function scheduleProblems(store, schedule) {
     if (l) lists.push(l);
     else problems.push(`A lista de referência "${name(id)}" foi excluída. Edite o agendamento.`);
   }
-  if (lists.length && lists.every((l) => !(l.terms || []).length)) problems.push('As listas de referência do agendamento não têm termos.');
+  if (!retention && lists.length && lists.every((l) => !(l.terms || []).length)) problems.push('As listas de referência do agendamento não têm termos.');
+  if (retention) {
+    try {
+      sanitizeRetention(schedule.retention, schedule.kind, { cloud: targets.some(isCloudRepo) });
+    } catch (err) {
+      problems.push(`${err.message} Edite a política.`);
+    }
+  }
   if (schedule.action === 'delete') {
     const confirmation = schedule.deleteConfirmation || {};
     const pins = confirmation.targets || {};
@@ -129,7 +141,8 @@ export function scheduleProblems(store, schedule) {
       else if (!pin || pin.scope !== scopeOf(schedule.kind, t)) {
         const what = schedule.kind === 'mail' ? 'a conta, o servidor ou as caixas' : 'o caminho, as contas ou os sites';
         problems.push(`O cadastro ${noun.registry} "${t.name}" mudou (${what}) depois que a exclusão automática foi confirmada neste agendamento. ${again}`);
-      } else if (pin.mode !== 'permanent' && modeOf(schedule.kind, t) === 'permanent') {
+      } else if (!retention && pin.mode !== 'permanent' && modeOf(schedule.kind, t) === 'permanent') {
+        // (na retenção vale a forma de exclusão da própria política, confirmada ao salvá-la)
         problems.push(`A exclusão em "${t.name}" passou a ser definitiva depois que a exclusão automática foi confirmada neste agendamento. ${again}`);
       }
     }
@@ -266,7 +279,7 @@ export class Scheduler {
 
   /** Próxima execução de um agendamento ativo a partir de agora (ISO) ou null. */
   plan(schedule, now = this.now()) {
-    if (!schedule.enabled) return null;
+    if (!schedule.enabled || !schedule.rule) return null; // sem regra: só manualmente
     try {
       return nextOccurrence(schedule.rule, now, { remaining: remainingOf(schedule) })?.toISOString() || null;
     } catch {
@@ -307,11 +320,11 @@ export class Scheduler {
    * também fica no histórico). Não muda a próxima execução programada nem conta como execução
    * do término "depois de N execuções".
    */
-  async runNow(id, by) {
+  async runNow(id, by, { simulate = false } = {}) {
     this.collectOutcomes();
     const schedule = this.store.getSchedule(id);
     if (!schedule) throw new ScanError('Agendamento não encontrado.', 404);
-    return this.#fire(schedule, { trigger: 'manual', by });
+    return this.#fire(schedule, { trigger: 'manual', by, simulate });
   }
 
   /** Execução deste agendamento na fila ou em andamento, se houver. */
@@ -320,7 +333,7 @@ export class Scheduler {
   }
 
   /** Inicia a análise do agendamento e registra o resultado no histórico. */
-  async #fire(schedule, { trigger, plannedFor = null, note = '', by = null }) {
+  async #fire(schedule, { trigger, plannedFor = null, note = '', by = null, simulate = false }) {
     const base = { trigger, plannedFor: plannedFor ? plannedFor.toISOString() : null };
     const manual = trigger === 'manual';
     // Verificação e reserva sem pausa (sem await): duas execuções do mesmo agendamento nunca
@@ -333,35 +346,40 @@ export class Scheduler {
     }
     this.firing.add(schedule.id);
     try {
-      return await this.#start(schedule, { base, manual, note, by });
+      return await this.#start(schedule, { base, manual, note, by, simulate });
     } finally {
       this.firing.delete(schedule.id);
     }
   }
 
-  async #start(schedule, { base, manual, note, by }) {
+  async #start(schedule, { base, manual, note, by, simulate = false }) {
     const now = this.now();
     let scan;
     let period;
     let signature;
     try {
-      const problems = scheduleProblems(this.store, schedule);
+      // Simulação ("Simular agora"): lista o que seria excluído, sem excluir nem conferir a exclusão.
+      const problems = scheduleProblems(this.store, simulate ? { ...schedule, action: 'analyze' } : schedule);
       if (problems.length) throw new ScanError(problems[0]);
       signature = coverageSignature(this.store, schedule);
       period = this.#period(schedule, now, signature);
       const mail = schedule.kind === 'mail';
-      const deleting = schedule.action === 'delete';
+      const deleting = schedule.action === 'delete' && !simulate;
+      const retention = schedule.purpose === 'retention';
       // Critérios da exclusão com que esta execução começa (iguais aos confirmados: sem problemas).
       const criteria = deleting ? deletionCriteria(this.store, schedule) : null;
       const confirmed = schedule.deleteConfirmation;
-      const origin = `agendamento "${schedule.name}"${deleting && confirmed ? ` (exclusão automática confirmada por ${confirmed.by} em ${fmt(confirmed.at)})` : ''}`;
+      const what = retention ? 'política de retenção' : 'agendamento';
+      const origin = `${what} "${schedule.name}"${deleting && confirmed ? ` (${retention ? 'exclusão' : 'exclusão automática'} confirmada por ${confirmed.by} em ${fmt(confirmed.at)})` : ''}${simulate ? ' (simulação)' : ''}`;
+      const request = retention
+        ? { retention: schedule.retention, options: { ...schedule.options, deleteMatches: deleting } }
+        : { listIds: schedule.listIds, options: { ...schedule.options, deleteMatches: deleting, [mail ? 'receivedAfter' : 'modifiedAfter']: period.from ? period.from.toISOString() : null } };
       scan = await this.manager.start(
         {
           kind: schedule.kind,
-          name: `${schedule.name} – ${fmt(now)}`,
+          name: `${schedule.name}${simulate ? ' (simulação)' : ''} – ${fmt(now)}`,
           [mail ? 'sourceIds' : 'repositoryIds']: schedule.targetIds,
-          listIds: schedule.listIds,
-          options: { ...schedule.options, deleteMatches: deleting, [mail ? 'receivedAfter' : 'modifiedAfter']: period.from ? period.from.toISOString() : null },
+          ...request,
           confirmDelete: deleting ? 'EXCLUIR' : '',
         },
         { by: manual ? `${by} (Executar agora, ${origin})` : origin, schedule: { id: schedule.id, name: schedule.name, criteria, enabled: schedule.enabled } },
@@ -385,6 +403,7 @@ export class Scheduler {
       base: period.base,
       from: period.from ? period.from.toISOString() : null,
       by: manual ? by : null,
+      ...(simulate ? { simulated: true } : {}),
       message: notes.join(' '),
     });
     return scan;
@@ -523,6 +542,14 @@ export class Scheduler {
     }
     const targets = scan.kind === 'mail' ? scan.sourceIds : scan.repositoryIds;
     if (!sameIds(targets, schedule.targetIds) || !sameIds(scan.listIds, schedule.listIds)) return 'os locais ou as listas do agendamento foram alterados';
+    if (schedule.purpose === 'retention') {
+      // A política (critério, idade máxima, nomes, limite e forma de exclusão) precisa ser a mesma.
+      // eslint-disable-next-line no-unused-vars
+      const { cutoff, ...policy } = scan.retention || {};
+      if (JSON.stringify(policy) !== JSON.stringify(schedule.retention)) return 'a política de retenção foi alterada';
+      const problems = scheduleProblems(this.store, schedule);
+      return problems.length ? problems[0] : null;
+    }
     // eslint-disable-next-line no-unused-vars
     const strip = ({ deleteMatches, modifiedAfter, receivedAfter, concurrency, ...rest } = {}) => JSON.stringify(Object.entries(rest).sort(([a], [b]) => a.localeCompare(b)));
     let current;

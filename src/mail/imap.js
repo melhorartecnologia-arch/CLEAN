@@ -190,7 +190,7 @@ export class ImapConnector {
    * uma a uma e apenas até o limite. Entrega { folder, id, raw, truncated, size, receivedAt } ou
    * { folder, id, error } (pasta que não pôde ser aberta).
    */
-  async *messages(mailbox, { since = null, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, onFolder } = {}) {
+  async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, onFolder } = {}) {
     const { client, dispose } = await this.connect(mailbox);
     try {
       const gmail = client.capabilities?.has?.('X-GM-EXT-1');
@@ -209,11 +209,31 @@ export class ImapConnector {
           if (!client.mailbox?.exists) continue;
           const validity = String(client.mailbox.uidValidity ?? '');
           const meta = [];
-          for await (const m of client.fetch('1:*', { uid: true, size: true, internalDate: true, labels: Boolean(gmail && folder.all) }, { uid: true })) {
+          for await (const m of client.fetch('1:*', { uid: true, size: true, internalDate: true, labels: Boolean(gmail && folder.all), envelope: headersOnly }, { uid: true })) {
             // O filtro por data é feito aqui, e não com SEARCH SINCE: a lista de UIDs de uma busca
             // pode passar do tamanho máximo de comando do servidor (10 KB no Exchange).
             if (since && m.internalDate instanceof Date && m.internalDate < since) continue;
-            meta.push({ uid: m.uid, size: Number(m.size) || 0, date: m.internalDate, labels: m.labels });
+            // "Antes de" (retenção): sem data conhecida, a mensagem não entra.
+            if (before && !(m.internalDate instanceof Date && m.internalDate < before)) continue;
+            meta.push({ uid: m.uid, size: Number(m.size) || 0, date: m.internalDate, labels: m.labels, envelope: m.envelope });
+          }
+          if (headersOnly) {
+            // Retenção: só os dados do envelope (sem baixar a mensagem).
+            for (const info of meta) {
+              const env = info.envelope || {};
+              const from = env.from?.[0];
+              yield {
+                folder: (folder.all && labelsText(info.labels)) || folder.display,
+                id: `${folder.path}:${validity}:${info.uid}`,
+                size: info.size,
+                receivedAt: info.date instanceof Date && !Number.isNaN(info.date.getTime()) ? info.date.toISOString() : null,
+                subject: env.subject || '',
+                from: from ? { name: from.name || '', address: from.address || '' } : null,
+                internetMessageId: env.messageId || null,
+                headersOnly: true,
+              };
+            }
+            continue;
           }
           const small = meta.filter((m) => m.size <= maxBytes);
           const large = meta.filter((m) => m.size > maxBytes);

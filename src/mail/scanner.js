@@ -9,6 +9,7 @@ import { friendlyError, withTimeout } from '../scan/errors.js';
 import { createConnector } from './connectors.js';
 import { validDate } from './common.js';
 import { deletionEvent } from '../scan/delete.js';
+import { ageDays } from '../retention/policy.js';
 
 // Tempo máximo para ler uma mensagem já baixada (anexos incluídos).
 const MESSAGE_TIMEOUT = 5 * 60 * 1000;
@@ -50,6 +51,8 @@ export function newMailStats(sourcesTotal = 0) {
     bytesDownloaded: 0,
     errors: 0,
     gaps: 0, // conexões ou caixas que não puderam ser lidas (a análise ficou incompleta)
+    bytesExpired: 0, // retenção: tamanho das mensagens expiradas
+    deleteSkipped: 0, // retenção: expiradas não excluídas por causa do limite da execução
     deleted: 0, // excluídas na análise ("analisar e excluir")
     deleteMissing: 0, // já não existiam na hora da exclusão
     deleteChanged: 0,
@@ -86,6 +89,11 @@ export class MailScanner {
     this.messageTimeoutMs = config.messageTimeoutMs || MESSAGE_TIMEOUT;
     this.since = validDate(this.options.receivedAfter);
     this.deletedBy = config.startedBy || null; // quem iniciou a análise com exclusão automática
+    // Política de retenção: mensagens recebidas antes da data de corte (só os cabeçalhos são lidos).
+    const r = config.retention || null;
+    this.retention = r ? { ...r, cutoffMs: Date.parse(r.cutoff) } : null;
+    this.deleteQueued = 0;
+    this.limitLogged = false;
   }
 
   cancel() {
@@ -139,9 +147,14 @@ export class MailScanner {
 
   async run() {
     const started = Date.now();
-    for (const { term, error } of this.matcher.invalid) this.log('warn', `Termo ignorado "${term.value}": ${error}`);
-    if (this.matcher.size === 0) this.log('warn', 'Nenhum termo válido nas listas selecionadas.');
-    this.log('info', `Análise de e-mail iniciada com ${this.matcher.size} termo(s) em ${this.sources.length} conexão(ões).`);
+    if (this.retention) {
+      const cutoff = new Date(this.retention.cutoffMs).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+      this.log('info', `Retenção iniciada em ${this.sources.length} conexão(ões): mensagens recebidas antes de ${cutoff}.`);
+    } else {
+      for (const { term, error } of this.matcher.invalid) this.log('warn', `Termo ignorado "${term.value}": ${error}`);
+      if (this.matcher.size === 0) this.log('warn', 'Nenhum termo válido nas listas selecionadas.');
+      this.log('info', `Análise de e-mail iniciada com ${this.matcher.size} termo(s) em ${this.sources.length} conexão(ões).`);
+    }
     for (const source of this.sources) {
       if (this.cancelled) break;
       await this.scanSource(source);
@@ -202,6 +215,9 @@ export class MailScanner {
     try {
       const items = connector.messages(mailbox, {
         since: this.since,
+        // Retenção: só as recebidas antes da data de corte, sem baixar as mensagens.
+        before: this.retention ? new Date(this.retention.cutoffMs) : null,
+        headersOnly: Boolean(this.retention),
         includeTrash: this.options.includeTrash,
         includeJunk: this.options.includeJunk,
         maxBytes: this.maxBytes,
@@ -216,6 +232,8 @@ export class MailScanner {
           const where = [mailbox.address, item.folder, item.id].filter(Boolean).join(' › ');
           this.error(where, item.id ? `Falha ao baixar a mensagem: ${friendlyError(item.error)}` : friendlyError(item.error));
           if (!item.id) this.stats.gaps++; // uma pasta inteira não pôde ser lida
+        } else if (this.retention) {
+          this.processExpiredMessage(source, mailbox, item);
         } else {
           await this.processMessage(source, mailbox, item);
         }
@@ -263,7 +281,7 @@ export class MailScanner {
         countDeletion(this.stats, status);
         if (status === 'failed') this.error(`${mailbox.address} › ${p.folder}`, `Falha ao excluir a mensagem "${p.subject || '(sem assunto)'}": ${r.error}`);
         const item = `${mailbox.address} › ${p.folder} › ${p.subject || '(sem assunto)'}`;
-        return deletionEvent(p.recordId, { status, error: r.ok ? null : r.error, note: r.note }, { mode: 'auto', method, by: this.deletedBy, item });
+        return deletionEvent(p.recordId, { status, error: r.ok ? null : r.error, note: r.note }, { mode: this.retention ? 'retention' : 'auto', method, by: this.deletedBy, item });
       });
       this.emit({ type: 'deletions', items });
       this.progress();
@@ -285,6 +303,60 @@ export class MailScanner {
     if (!failure && !source.allowDelete) failure = 'A exclusão foi desativada no cadastro da conexão durante a análise.';
     for (const id of [...byId.keys()]) record(id, { ok: false, error: failure || 'O servidor não confirmou a exclusão.' });
     this.progress(true);
+  }
+
+  /** Retenção: mensagem recebida antes da data de corte (listada e, com exclusão, excluída). */
+  processExpiredMessage(source, mailbox, item) {
+    this.stats.messagesSeen++;
+    const date = Date.parse(item.receivedAt);
+    // O servidor já filtrou pela data; sem data conhecida (ou depois do corte), não expira.
+    if (!Number.isFinite(date) || date >= this.retention.cutoffMs) return;
+    this.stats.messagesMatched++;
+    this.stats.bytesExpired += Number(item.size) || 0;
+    const from = item.from || null;
+    this.pendingResults.push({
+      id: ++this.seq,
+      kind: 'mail',
+      sourceId: source.id,
+      sourceName: source.name,
+      sourceType: source.type,
+      mailbox: mailbox.address,
+      mailboxName: mailbox.name || '',
+      folder: item.folder,
+      messageId: item.id,
+      internetMessageId: item.internetMessageId || null,
+      subject: item.subject || '',
+      from: from ? formatAddress(from) : '',
+      fromAddress: (from?.address || '').toLowerCase(),
+      to: [],
+      cc: [],
+      date: item.receivedAt,
+      sent: null,
+      size: Number(item.size) || 0,
+      attachments: [],
+      contentStatus: 'not-requested',
+      contentNote: null,
+      webLink: item.webLink || null,
+      occurrences: 0,
+      terms: [],
+      matches: [],
+      retention: { criterion: 'received', date: item.receivedAt, ageDays: ageDays(date) },
+    });
+    if (this.options.deleteMatches) {
+      // Limite de exclusões por execução (proteção contra uma idade máxima errada).
+      const limit = this.retention.maxDeletions || 0;
+      if (limit && this.deleteQueued >= limit) {
+        this.stats.deleteSkipped++;
+        if (!this.limitLogged) {
+          this.limitLogged = true;
+          this.log('warn', `Limite de ${limit} exclusões desta execução atingido: as demais mensagens expiradas foram apenas listadas. Confira o relatório e, se estiver certo, aumente o limite na política.`);
+        }
+      } else {
+        this.deleteQueued++;
+        this.pendingDeletes.push({ recordId: this.seq, messageId: item.id, internetMessageId: item.internetMessageId || null, folder: item.folder, subject: item.subject || '' });
+      }
+    }
+    if (this.pendingResults.length >= 50) this.flushResults();
   }
 
   countAttachments(attachments) {

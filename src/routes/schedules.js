@@ -5,6 +5,8 @@ import { actor } from './scans.js';
 import { ScanError, sanitizeOptions, sanitizeMailOptions } from '../scan/manager.js';
 import { validateRule, RuleError, describeRule, upcoming, lastOccurrence, nextOccurrence } from '../schedule/recurrence.js';
 import { targetOf, deletionPins, deletionCriteria, scheduleProblems, remainingOf } from '../schedule/scheduler.js';
+import { sanitizeRetention, RetentionError, describeRetention } from '../retention/policy.js';
+import { isCloudRepo } from '../scan/delete.js';
 
 const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
 const KEEP_MAX = 500;
@@ -43,37 +45,59 @@ function parsePeriod(input) {
  * o alcance e a forma de exclusão de cada local ficam registrados junto com quem confirmou.
  */
 function parseSchedule(body = {}, { store, existing = null, by }) {
+  // Política de retenção: agendamento que exclui (ou lista) os itens mais antigos que a idade
+  // máxima, sem listas de referência; pode ser executada só manualmente (sem regra).
+  const purpose = body.purpose === 'retention' ? 'retention' : 'terms';
+  const policy = purpose === 'retention';
   const kind = body.kind === 'mail' ? 'mail' : 'files';
-  if (existing && existing.kind !== kind) throw bad('Não é possível trocar o tipo do agendamento (arquivos ou e-mail).');
-  const name = text(body.name, 'o nome do agendamento', { required: true, max: 120 });
+  if (existing && (existing.purpose || 'terms') !== purpose) throw bad('Não é possível transformar um agendamento em política de retenção (ou o contrário).');
+  if (existing && existing.kind !== kind) throw bad(`Não é possível trocar o tipo ${policy ? 'da política' : 'do agendamento'} (arquivos ou e-mail).`);
+  const name = text(body.name, policy ? 'o nome da política' : 'o nome do agendamento', { required: true, max: 120 });
   const targetIds = ids(kind === 'mail' ? body.sourceIds : body.repositoryIds);
   const targets = targetIds.map((id) => targetOf(store, kind, id));
   if (targets.length === 0 || targets.some((t) => !t)) throw bad(kind === 'mail' ? 'Selecione conexões de e-mail válidas.' : 'Selecione repositórios válidos.');
-  const listIds = ids(body.listIds);
-  const lists = listIds.map((id) => store.getList(id));
-  if (lists.length === 0 || lists.some((l) => !l)) throw bad('Selecione listas de referência válidas.');
-  if (lists.every((l) => !(l.terms || []).length)) throw bad('As listas selecionadas não possuem termos.');
+  let listIds = [];
+  let lists = [];
   let options;
-  try {
-    // O período de cada execução substitui a data fixa ("a partir de").
-    options = kind === 'mail' ? sanitizeMailOptions({ ...body.options, receivedAfter: null }) : sanitizeOptions({ ...body.options, modifiedAfter: null });
-  } catch (err) {
-    if (err instanceof ScanError) throw bad(err.message);
-    throw err;
+  let retention = null;
+  let deleting;
+  if (policy) {
+    try {
+      retention = sanitizeRetention(body.retention, kind, { cloud: kind === 'files' && targets.some(isCloudRepo) });
+    } catch (err) {
+      if (err instanceof RetentionError) throw bad(err.message);
+      throw err;
+    }
+    options = kind === 'mail' ? {} : { resolveOwner: body.options?.resolveOwner !== false };
+    deleting = body.action === 'delete';
+  } else {
+    listIds = ids(body.listIds);
+    lists = listIds.map((id) => store.getList(id));
+    if (lists.length === 0 || lists.some((l) => !l)) throw bad('Selecione listas de referência válidas.');
+    if (lists.every((l) => !(l.terms || []).length)) throw bad('As listas selecionadas não possuem termos.');
+    try {
+      // O período de cada execução substitui a data fixa ("a partir de").
+      options = kind === 'mail' ? sanitizeMailOptions({ ...body.options, receivedAfter: null }) : sanitizeOptions({ ...body.options, modifiedAfter: null });
+    } catch (err) {
+      if (err instanceof ScanError) throw bad(err.message);
+      throw err;
+    }
+    deleting = options.deleteMatches === true;
+    options.deleteMatches = false; // decidido em cada execução pela ação do agendamento
   }
-  const deleting = options.deleteMatches === true;
-  options.deleteMatches = false; // decidido em cada execução pela ação do agendamento
   const keepLast = body.keepLast === undefined || body.keepLast === null || body.keepLast === '' ? 0 : Number(body.keepLast);
   if (!Number.isInteger(keepLast) || keepLast < 0 || keepLast > KEEP_MAX) throw bad(`Informe quantos relatórios guardar: de 1 a ${KEEP_MAX} (ou 0, para todos).`);
   const data = {
+    purpose,
     name,
     kind,
     targetIds,
     listIds,
     options,
+    retention,
     action: deleting ? 'delete' : 'analyze',
-    rule: parseRule(body.rule),
-    period: parsePeriod(body.period),
+    rule: policy && body.rule === null ? null : parseRule(body.rule),
+    period: policy ? { type: 'all' } : parsePeriod(body.period),
     catchUp: body.catchUp !== false,
     keepLast,
     // Nomes no momento em que foi salvo (para explicar a falha se algo for excluído do cadastro).
@@ -83,8 +107,10 @@ function parseSchedule(body = {}, { store, existing = null, by }) {
   if (deleting) {
     const blocked = targets.filter((t) => !t.allowDelete).map((t) => `"${t.name}"`);
     const where = kind === 'mail' ? 'da conexão de e-mail' : 'do repositório';
-    if (blocked.length) throw bad(`A exclusão não está permitida em ${blocked.join(', ')}. Ative "Permitir exclusão" no cadastro ${where} ou escolha "Somente analisar".`);
-    if (String(body.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') throw bad('Para agendar a análise com exclusão automática, digite EXCLUIR na confirmação.');
+    if (blocked.length) throw bad(`A exclusão não está permitida em ${blocked.join(', ')}. Ative "Permitir exclusão" no cadastro ${where} ou escolha "${policy ? 'Somente listar (simulação)' : 'Somente analisar'}".`);
+    if (String(body.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') {
+      throw bad(policy ? 'Para salvar a política com exclusão, digite EXCLUIR na confirmação.' : 'Para agendar a análise com exclusão automática, digite EXCLUIR na confirmação.');
+    }
     // Registra o alcance e a forma de exclusão de cada local e os critérios (termos, exclusões e
     // locais protegidos) no momento da confirmação: se algo disso mudar, a exclusão fica suspensa.
     data.deleteConfirmation = { by, at: new Date().toISOString(), targets: deletionPins(kind, targets), criteria: deletionCriteria(store, data) };
@@ -114,10 +140,10 @@ export function schedulesRouter({ store, manager, scheduler }) {
     const { deleteConfirmation, names, history: all = [], ...rest } = schedule;
     const named = (id, item) => ({ id, name: item?.name || names?.[id] || id, missing: !item });
     const remaining = remainingOf(schedule);
-    let description = '';
+    let description = schedule.rule ? '' : 'Somente quando executada manualmente';
     let end = null;
     try {
-      description = describeRule(schedule.rule);
+      if (schedule.rule) description = describeRule(schedule.rule);
       end = schedule.enabled && schedule.nextRunAt ? lastOccurrence(schedule.rule, { after: now(), remaining }) : null;
     } catch {
       // regra inválida (dados corrompidos): aparece em "problems"
@@ -130,7 +156,8 @@ export function schedulesRouter({ store, manager, scheduler }) {
       description,
       remaining: Number.isFinite(remaining) ? remaining : null,
       endsAt: end ? end.toISOString() : null,
-      state: !schedule.enabled ? 'paused' : schedule.nextRunAt ? 'active' : 'finished',
+      state: !schedule.rule && schedule.purpose === 'retention' ? 'manual' : !schedule.enabled ? 'paused' : schedule.nextRunAt ? 'active' : 'finished',
+      ...(schedule.retention ? { retentionText: describeRetention(schedule.retention, schedule.kind) } : {}),
       running: store.listScans().some((s) => s.scheduleId === schedule.id && manager.isActive(s.id)),
       lastRun: withScan(all[0]),
       problems: scheduleProblems(store, schedule),
@@ -147,9 +174,11 @@ export function schedulesRouter({ store, manager, scheduler }) {
   router.get('/', (req, res) => {
     scheduler.collectOutcomes();
     const kind = req.query.kind === 'mail' || req.query.kind === 'files' ? req.query.kind : '';
+    // Agendamentos de análise (padrão) ou políticas de retenção (?purpose=retention).
+    const purpose = req.query.purpose === 'retention' ? 'retention' : 'terms';
     const list = store
       .listSchedules()
-      .filter((s) => !kind || s.kind === kind)
+      .filter((s) => (s.purpose || 'terms') === purpose && (!kind || s.kind === kind))
       .map((s) => view(s))
       .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
     res.json(list);
@@ -170,7 +199,7 @@ export function schedulesRouter({ store, manager, scheduler }) {
   router.post('/', (req, res) => {
     const by = actor(req);
     const data = parseSchedule(req.body || {}, { store, by });
-    if (!nextOccurrence(data.rule, now(), { remaining: remainingOf({ rule: data.rule }) })) throw bad(NEVER);
+    if (data.rule && !nextOccurrence(data.rule, now(), { remaining: remainingOf({ rule: data.rule }) })) throw bad(NEVER);
     const schedule = store.createSchedule({ ...data, enabled: req.body?.enabled !== false, createdBy: by, updatedBy: by, runCount: 0, countDone: 0, history: [], nextRunAt: null });
     store.updateScheduleState(schedule.id, { nextRunAt: scheduler.plan(schedule) });
     res.status(201).json(view(schedule));
@@ -190,7 +219,7 @@ export function schedulesRouter({ store, manager, scheduler }) {
     const planned = scheduler.plan({ ...existing, ...data, countDone });
     // Regra alterada que nunca mais executaria: recusada (com a mesma regra, um agendamento já
     // encerrado pode ser renomeado ou ajustado).
-    if (existing.enabled && !same && !planned) throw bad(NEVER);
+    if (existing.enabled && !same && data.rule && !planned) throw bad(NEVER);
     // Horário que acabou de chegar e ainda não foi executado: continua valendo (o agendador o
     // executa na próxima verificação).
     const due = same && existing.enabled && existing.nextRunAt && Date.parse(existing.nextRunAt) <= +now();
@@ -216,11 +245,13 @@ export function schedulesRouter({ store, manager, scheduler }) {
     res.json(view(schedule));
   });
 
+  // Executar agora (ou, com simulate: true, só listar o que seria excluído).
   router.post('/:id/run', async (req, res) => {
     const schedule = find(req.params.id);
-    if (schedule.action === 'delete' && req.body?.confirm !== true) throw bad('Confirme a execução: ela exclui os itens encontrados.');
+    const simulate = req.body?.simulate === true;
+    if (schedule.action === 'delete' && !simulate && req.body?.confirm !== true) throw bad('Confirme a execução: ela exclui os itens encontrados.');
     try {
-      const scan = await scheduler.runNow(schedule.id, actor(req));
+      const scan = await scheduler.runNow(schedule.id, actor(req), { simulate });
       res.status(201).json({ scan, schedule: view(store.getSchedule(schedule.id)) });
     } catch (err) {
       throw translate(err);

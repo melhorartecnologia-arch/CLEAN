@@ -48,6 +48,7 @@ export const MAIL_DELETION_LABELS = {
 
 /** Como a exclusão foi feita (automática, com quem iniciou a análise, ou manual, com quem excluiu). */
 export function deletionHow(d) {
+  if (d.mode === 'retention') return `exclusão pela política de retenção${d.by ? ` (${d.by})` : ''}`;
   return d.mode === 'auto' ? `exclusão automática da análise${d.by ? ` iniciada por ${d.by}` : ''}` : `exclusão manual${d.by ? ` por ${d.by}` : ''}`;
 }
 

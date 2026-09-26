@@ -106,7 +106,13 @@ function deletionChip(r, o) {
 function deletionBlock(r, noun, { active, deleting }) {
   const w = DELETION_WORDS[noun];
   const d = r.deletion;
-  const how = d ? (d.mode === 'auto' ? `exclusão automática da análise${d.by ? ` iniciada por ${d.by}` : ''}` : `exclusão manual${d.by ? ` por ${d.by}` : ''}`) : '';
+  const how = d
+    ? d.mode === 'retention'
+      ? `exclusão pela política de retenção${d.by ? ` (${d.by})` : ''}`
+      : d.mode === 'auto'
+        ? `exclusão automática da análise${d.by ? ` iniciada por ${d.by}` : ''}`
+        : `exclusão manual${d.by ? ` por ${d.by}` : ''}`
+    : '';
   const where = d?.status === 'deleted' ? (d.note ? ` (${d.note})` : d.method === 'trash' ? ` (movid${w.o} para a lixeira)` : '') : '';
   const status = d
     ? html`<p class="small ${d.status === 'failed' ? 'danger-text' : ''}"><b>${deletionLabel(d.status, w.o)}</b> em ${fmtDateTime(d.at)}${where} — ${how}${d.status === 'failed' && d.error ? html`<br />${d.error}` : ''}</p>`

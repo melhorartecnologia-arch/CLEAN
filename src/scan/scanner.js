@@ -11,6 +11,7 @@ import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
 import { friendlyError, withTimeout } from './errors.js';
 import { deleteFile, deletionEvent, isWithin, isCloudRepo } from './delete.js';
 import { DrivesConnector, person, keptCloudTarget, cloudTarget } from '../cloud/drives.js';
+import { fileDate, cloudDate, ageDays, patternMatcher } from '../retention/policy.js';
 
 // Tempo máximo para ler um arquivo (o que passar disso é registrado como erro e a análise segue).
 const FILE_TIMEOUT = 5 * 60 * 1000;
@@ -112,6 +113,9 @@ export function newStats(repositoriesTotal = 0) {
     libraries: 0, // bibliotecas do OneDrive/SharePoint analisadas
     accountsSkipped: 0, // contas sem OneDrive
     gaps: 0, // repositórios, contas ou sites que não puderam ser lidos (a análise ficou incompleta)
+    bytesExpired: 0, // retenção: tamanho dos arquivos expirados
+    retentionUnknown: 0, // retenção: arquivos sem a data do critério (não expiram)
+    deleteSkipped: 0, // retenção: expirados não excluídos por causa do limite da execução
     deleted: 0, // excluídos na análise ("analisar e excluir")
     deleteMissing: 0, // já não existiam na hora da exclusão
     deleteChanged: 0, // alterados depois de analisados: mantidos
@@ -157,6 +161,12 @@ export class Scanner {
     if (Number.isNaN(this.modifiedAfter)) this.modifiedAfter = null;
     // Pastas do próprio CLEAN (dados e instalação): nunca têm arquivos excluídos.
     this.protect = config.protect || [];
+    // Política de retenção: arquivos mais antigos que a data de corte, pelo critério escolhido
+    // (sem termos: o conteúdo não é lido).
+    const r = config.retention || null;
+    this.retention = r ? { ...r, cutoffMs: Date.parse(r.cutoff), matchName: patternMatcher(r.patterns || []) } : null;
+    this.deleteAttempts = 0;
+    this.limitLogged = false;
     // OneDrive e SharePoint: um conector por repositório (usado também na exclusão automática).
     this.endpoints = config.endpoints || {};
     this.cloudConnectorFactory = cloudConnectorFactory || ((repo, options) => new DrivesConnector(repo, options));
@@ -208,9 +218,14 @@ export class Scanner {
 
   async run() {
     const started = Date.now();
-    for (const { term, error } of this.matcher.invalid) this.log('warn', `Termo ignorado "${term.value}": ${error}`);
-    if (this.matcher.size === 0) this.log('warn', 'Nenhum termo válido nas listas selecionadas.');
-    this.log('info', `Análise iniciada com ${this.matcher.size} termo(s) em ${this.repositories.length} repositório(s).`);
+    if (this.retention) {
+      const cutoff = new Date(this.retention.cutoffMs).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+      this.log('info', `Retenção iniciada em ${this.repositories.length} repositório(s): arquivos com a data do critério anterior a ${cutoff}.`);
+    } else {
+      for (const { term, error } of this.matcher.invalid) this.log('warn', `Termo ignorado "${term.value}": ${error}`);
+      if (this.matcher.size === 0) this.log('warn', 'Nenhum termo válido nas listas selecionadas.');
+      this.log('info', `Análise iniciada com ${this.matcher.size} termo(s) em ${this.repositories.length} repositório(s).`);
+    }
     for (const repo of this.repositories) {
       if (this.cancelled) break;
       if (isCloudRepo(repo)) await this.scanCloudRepository(repo);
@@ -242,7 +257,8 @@ export class Scanner {
       return;
     }
     this.log('info', `Analisando "${repo.name}" (${repo.path})`);
-    const auditIndex = await this.loadAudit(repo);
+    // Na retenção o log de auditoria não é carregado (o último usuário vem do proprietário).
+    const auditIndex = this.retention ? null : await this.loadAudit(repo);
     const isExcluded = compileExclusions([...DEFAULT_EXCLUDES, ...(repo.exclude || [])]);
     // A pasta de dados do CLEAN (com os relatórios, que contêm os próprios termos) não é analisada.
     const dataDir = this.protect.find((p) => p.data)?.path;
@@ -394,6 +410,7 @@ export class Scanner {
       this.stats.filesSkippedByDate++;
       return;
     }
+    if (this.retention) return this.processExpiredCloudFile(repo, drive, entry);
     const size = Number(item.size) || 0;
     const { options, matcher } = this;
     let content = null;
@@ -422,23 +439,33 @@ export class Scanner {
     const occurrences = matches.reduce((sum, m) => sum + m.count, 0);
     this.stats.filesMatched++;
     this.stats.occurrences += occurrences;
-    const createdBy = person(item.createdBy);
-    const record = {
-      id: ++this.seq,
-      repositoryId: repo.id,
-      repositoryName: repo.name,
-      path: item.webUrl ? readableUrl(item.webUrl) : label,
-      relativePath,
-      name: item.name,
-      extension: path.extname(item.name).toLowerCase(),
-      size,
-      created: iso(new Date(item.createdDateTime)),
-      modified: iso(new Date(item.lastModifiedDateTime)),
-      accessed: null,
+    const record = this.cloudRecord(repo, drive, entry, {
       contentType: content?.type || null,
       contentStatus: options.checkContent ? content?.status || null : 'not-requested',
       contentNote: content?.note || null,
       metadata: content?.metadata || {},
+      occurrences,
+      terms: [...new Set(matches.map((m) => m.term))],
+      matches,
+    });
+    this.finishRecords([record]);
+    await this.deleteRecords([record]);
+  }
+
+  /** Registro de um arquivo do OneDrive/SharePoint no relatório. */
+  cloudRecord(repo, drive, { item, relativePath }, fields) {
+    return {
+      id: ++this.seq,
+      repositoryId: repo.id,
+      repositoryName: repo.name,
+      path: item.webUrl ? readableUrl(item.webUrl) : `${drive.label} › ${relativePath}`,
+      relativePath,
+      name: item.name,
+      extension: path.extname(item.name).toLowerCase(),
+      size: Number(item.size) || 0,
+      created: iso(new Date(item.createdDateTime)),
+      modified: iso(new Date(item.lastModifiedDateTime)),
+      accessed: null,
       audit: null,
       // OneDrive: o dono da conta (no SharePoint, quem criou o arquivo fica em cloud.createdBy).
       owner: drive.owner || null,
@@ -459,12 +486,80 @@ export class Scanner {
         aliases: drive.aliases || [],
         library: drive.library,
         lastModifiedBy: person(item.lastModifiedBy),
-        createdBy,
+        createdBy: person(item.createdBy),
       },
-      occurrences,
-      terms: [...new Set(matches.map((m) => m.term))],
-      matches,
+      ...fields,
     };
+  }
+
+  /** Campos de um item expirado (retenção), sem termos. */
+  expiredFields(when) {
+    return {
+      contentType: null,
+      contentStatus: 'not-requested',
+      contentNote: null,
+      metadata: {},
+      occurrences: 0,
+      terms: [],
+      matches: [],
+      retention: { criterion: this.retention.criterion, date: iso(new Date(when)), ageDays: ageDays(when) },
+    };
+  }
+
+  /** Retenção: arquivo de pasta do Windows expirado (listado e, com exclusão, excluído). */
+  async processExpiredFile(repo, entry, st) {
+    const r = this.retention;
+    if (!r.matchName(entry.name)) return;
+    const when = fileDate(st, r.criterion);
+    if (when === null) {
+      this.stats.retentionUnknown++; // sem a data do critério: nunca é excluído
+      return;
+    }
+    if (when >= r.cutoffMs) return;
+    this.stats.filesMatched++;
+    this.stats.bytesExpired += st.size;
+    const record = {
+      id: ++this.seq,
+      repositoryId: repo.id,
+      repositoryName: repo.name,
+      path: entry.path,
+      relativePath: entry.relativePath,
+      name: entry.name,
+      extension: path.extname(entry.name).toLowerCase(),
+      size: st.size,
+      created: iso(st.birthtime),
+      modified: iso(st.mtime),
+      accessed: iso(st.atime),
+      audit: null,
+      owner: null,
+      ownerError: null,
+      lastUser: null,
+      lastUserSource: null,
+      ...this.expiredFields(when),
+    };
+    if (this.options.resolveOwner) {
+      this.pendingOwners.push(record);
+      if (this.pendingOwners.length >= 200) await this.flushOwners();
+    } else {
+      this.finishRecords([record]);
+      await this.deleteRecords([record]);
+    }
+  }
+
+  /** Retenção: arquivo do OneDrive/SharePoint expirado (sem baixar o conteúdo). */
+  async processExpiredCloudFile(repo, drive, entry) {
+    const r = this.retention;
+    const { item } = entry;
+    if (!r.matchName(item.name)) return;
+    const when = cloudDate(item, r.criterion);
+    if (when === null) {
+      this.stats.retentionUnknown++;
+      return;
+    }
+    if (when >= r.cutoffMs) return;
+    this.stats.filesMatched++;
+    this.stats.bytesExpired += Number(item.size) || 0;
+    const record = this.cloudRecord(repo, drive, entry, this.expiredFields(when));
     this.finishRecords([record]);
     await this.deleteRecords([record]);
   }
@@ -511,6 +606,7 @@ export class Scanner {
       this.stats.filesSkippedByDate++;
       return;
     }
+    if (this.retention) return this.processExpiredFile(repo, entry, st);
     const { options, matcher } = this;
     let content = null;
     if (options.checkContent) {
@@ -634,6 +730,17 @@ export class Scanner {
     for (const record of records) {
       if (this.cancelled) break;
       const repo = this.repoById.get(record.repositoryId);
+      // Retenção: limite de exclusões por execução (proteção contra uma idade máxima errada).
+      const limit = this.retention?.maxDeletions || 0;
+      if (limit && this.deleteAttempts >= limit) {
+        this.stats.deleteSkipped++;
+        if (!this.limitLogged) {
+          this.limitLogged = true;
+          this.log('warn', `Limite de ${limit} exclusões desta execução atingido: os demais arquivos expirados foram apenas listados. Confira o relatório e, se estiver certo, aumente o limite na política.`);
+        }
+        continue;
+      }
+      if (repo?.allowDelete) this.deleteAttempts++;
       const cloud = Boolean(record.cloud);
       const method = cloud ? (repo?.deleteMode === 'permanent' ? 'permanent' : 'trash') : 'file';
       let result;
@@ -654,7 +761,7 @@ export class Scanner {
       }
       countDeletion(this.stats, result.status);
       if (result.status === 'failed') this.error(record.path, `Falha ao excluir: ${result.error}`);
-      this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: 'auto', method, by: this.deletedBy, item: record.path })] });
+      this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: this.retention ? 'retention' : 'auto', method, by: this.deletedBy, item: record.path })] });
     }
   }
 
