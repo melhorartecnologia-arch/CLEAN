@@ -239,7 +239,8 @@ export class Scanner {
     this.flushErrors();
     this.current = null;
     const seconds = Math.round((Date.now() - started) / 1000);
-    this.log('info', `${this.cancelled ? 'Análise cancelada' : 'Análise concluída'} em ${seconds}s: ${this.stats.filesSeen} arquivo(s) verificados, ${this.stats.filesMatched} com ocorrências.`);
+    const found = this.retention ? 'expirado(s)' : 'com ocorrências';
+    this.log('info', `${this.cancelled ? 'Análise cancelada' : 'Análise concluída'} em ${seconds}s: ${this.stats.filesSeen} arquivo(s) verificados, ${this.stats.filesMatched} ${found}.`);
     this.emit({ type: 'done', stats: { ...this.stats }, cancelled: this.cancelled });
     return this.stats;
   }

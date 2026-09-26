@@ -12,6 +12,7 @@ import {
   MAIL_FILTER_KEYS,
   applyDeletions,
   deletionTotals,
+  summarizeRetention,
   DELETION_LABELS,
   MAIL_DELETION_LABELS,
 } from '../report/model.js';
@@ -24,6 +25,7 @@ import { friendlyError } from '../scan/errors.js';
 import { PROJECT_ROOT } from '../config.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
 import { exportMailXlsx, exportMailCsv, exportMailHtml } from '../report/mail-exports.js';
+import { RETENTION_EXPORTS } from '../report/retention-exports.js';
 
 const byName = (a, b) => a.localeCompare(b, 'pt-BR');
 
@@ -66,6 +68,9 @@ const MODELS = {
 };
 
 const modelOf = (scan) => (scan.kind === 'mail' ? MODELS.mail : MODELS.files);
+
+/** Exportações: as das políticas de retenção têm uma linha por item expirado (sem termos). */
+const exportsOf = (scan) => (scan.retention ? RETENTION_EXPORTS : modelOf(scan));
 
 const listFields = (scan) => {
   const { log, ...rest } = scan;
@@ -411,7 +416,11 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     const filters = filtersOf(scan, req.query);
     const { records, deletions, list } = await filtered(scan, filters);
     const { page, pageSize, sort, dir, ...criteria } = filters;
-    const summary = memo.get(`${scan.id}|${records.length}|${deletions.length}|s|${JSON.stringify(criteria)}`, () => model.summarize(list));
+    const summary = memo.get(`${scan.id}|${records.length}|${deletions.length}|s|${JSON.stringify(criteria)}`, () => ({
+      ...model.summarize(list),
+      // Retenção: itens expirados por faixa de idade.
+      ...(scan.retention ? { retention: summarizeRetention(list) } : {}),
+    }));
     const options = memo.get(`${scan.id}|${records.length}|o`, () => model.options(records));
     res.json({ ...summary, options, deletions: deletionTotals(records) });
   });
@@ -428,20 +437,20 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     const { records, deletions, list } = await filtered(scan, filtersOf(scan, req.query));
     const errors = await store.readErrors(scan.id);
     await stream(res, downloadName(scan, 'xlsx'), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', (out) =>
-      modelOf(scan).xlsx(scan, list, errors, out, { deletions, records }),
+      exportsOf(scan).xlsx(scan, list, errors, out, { deletions, records }),
     );
   });
 
   router.get('/:id/export.csv', async (req, res) => {
     const scan = getScan(req);
     const { list } = await filtered(scan, filtersOf(scan, req.query));
-    await stream(res, downloadName(scan, 'csv'), 'text/csv; charset=utf-8', (out) => modelOf(scan).csv(list, out));
+    await stream(res, downloadName(scan, 'csv'), 'text/csv; charset=utf-8', (out) => exportsOf(scan).csv(list, out, scan));
   });
 
   router.get('/:id/export.html', async (req, res) => {
     const scan = getScan(req);
     const { list } = await filtered(scan, filtersOf(scan, req.query));
-    await stream(res, downloadName(scan, 'html'), 'text/html; charset=utf-8', (out) => modelOf(scan).html(scan, list, out));
+    await stream(res, downloadName(scan, 'html'), 'text/html; charset=utf-8', (out) => exportsOf(scan).html(scan, list, out));
   });
 
   router.get('/:id/export.json', async (req, res) => {

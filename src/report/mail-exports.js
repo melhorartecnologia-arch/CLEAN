@@ -103,7 +103,8 @@ function matchRows(r) {
   ]);
 }
 
-function sourceText(s) {
+/** Conexão de e-mail no resumo: "Nome (tipo, N caixa(s))". */
+export function sourceText(s) {
   const scope = s.scope === 'all' ? 'todas as caixas' : `${s.mailboxCount ?? 0} caixa(s)`;
   return `${s.name} (${MAIL_TYPE_LABELS[s.type] || s.type}, ${scope})`;
 }

@@ -24,6 +24,8 @@ import { createApp } from '../src/app.js';
 import { startMockApis } from './helpers/mock-apis.js';
 import { startFakeImap } from './helpers/fake-imap.js';
 import { withGraph, repo as cloudRepo, file, folder } from './helpers/cloud-world.js';
+import { exportRetentionCsv, exportRetentionHtml } from '../src/report/retention-exports.js';
+import { PassThrough } from 'node:stream';
 
 let root;
 const stores = [];
@@ -204,6 +206,16 @@ test('OneDrive e SharePoint: pela data do Microsoft 365, sem baixar o conteúdo,
 const mime = (subject, from = 'Ana Souza <ana@contoso.com>') =>
   Buffer.from([`From: ${from}`, 'To: rh@contoso.com', `Subject: ${subject}`, 'Date: Tue, 10 Mar 2015 10:00:00 -0300', `Message-ID: <${crypto.randomUUID()}@contoso.com>`, '', 'corpo', ''].join('\r\n'));
 
+/** Texto gravado por uma exportação. */
+async function collect(write) {
+  const chunks = [];
+  const out = new PassThrough();
+  out.on('data', (c) => chunks.push(c));
+  await write(out);
+  out.end();
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 async function runMail(sources, retention, endpoints, { deleteMatches = false } = {}) {
   const policy = sanitizeRetention(retention, 'mail');
   const messages = [];
@@ -296,6 +308,27 @@ test('e-mail: Microsoft 365, Gmail e IMAP — só os cabeçalhos das mensagens a
     assert.equal(velha.retention.criterion, 'received');
     assert.ok(velha.internetMessageId);
     assert.ok(!mocks.calls.some((c) => c.endsWith('/$value')), 'nenhuma mensagem baixada');
+    // Exportações: uma linha por mensagem expirada, com a data de recebimento e a idade.
+    const policy = sanitizeRetention({ amount: 5, includeJunk: false }, 'mail');
+    const mailScan = {
+      kind: 'mail',
+      name: 'E-mails antigos',
+      status: 'completed',
+      retention: { ...policy, cutoff: cutoffDate(policy).toISOString() },
+      options: { deleteMatches: false },
+      stats: run.stats,
+      summary: { sources: [{ name: 'Microsoft 365', type: 'graph', scope: 'list', mailboxCount: 1 }] },
+    };
+    const csvText = await collect((out) => exportRetentionCsv(run.records, out, mailScan));
+    assert.ok(csvText.startsWith('\uFEFF'), 'BOM para o Excel');
+    const csv = csvText.trim().split('\r\n');
+    assert.equal(csv.length, 3);
+    assert.match(csv[0], /^Conexão;Caixa;Pasta;Recebida em;Idade \(dias\);Faixa de idade;Remetente;Assunto/);
+    assert.match(csv.find((l) => l.includes('Balanço 2014')), /ana@contoso\.com;Caixa de Entrada;10\/03\/2015 \d\d:00:00;\d{4};Mais de 10 anos;Ana Souza <ana@contoso\.com>;Balanço 2014/);
+    const html = await collect((out) => exportRetentionHtml(mailScan, run.records, out));
+    assert.match(html, /Mensagens recebidas há mais de 5 anos \(inclusive a Lixeira; sem o Lixo Eletrônico\)/);
+    assert.match(html, /Somente listar os itens expirados \(simulação\)/);
+    assert.match(html, /Mensagens expiradas \(2\)/);
     // Exclusão definitiva.
     run = await runMail([m365], { amount: 5 }, mocks.endpoints, { deleteMatches: true });
     assert.equal(run.stats.deleted, 3);
@@ -425,6 +458,29 @@ test('API das políticas de retenção', async () => {
     assert.ok(fs.existsSync(path.join(dir, 'Temp/aberto-ontem.tmp')));
     const deletions = fs.readFileSync(path.join(store.dataDir, 'exclusoes.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     assert.ok(deletions.every((d) => d.mode === 'retention'));
+
+    // Relatório: faixas de idade, filtro por idade e exportações com uma linha por item expirado.
+    const summary = (await api('GET', `/api/scans/${scan.id}/summary`)).data;
+    assert.deepEqual(summary.retention.byAge.map((b) => [b.key, b.count]), [['mais-de-10-anos', 3]]);
+    assert.equal((await api('GET', `/api/scans/${scan.id}/results?age=mais-de-10-anos`)).data.total, 3);
+    assert.equal((await api('GET', `/api/scans/${scan.id}/results?age=ate-1-ano`)).data.total, 0);
+    const oldest = (await api('GET', `/api/scans/${scan.id}/results?sort=oldest`)).data.items;
+    assert.ok(oldest.every((r) => r.retention.criterion === 'accessed' && r.retention.ageDays > 3650));
+    const csv = await (await fetch(`${base}/api/scans/${scan.id}/export.csv`)).text();
+    const lines = csv.trim().split('\r\n');
+    assert.equal(lines.length, 4, 'cabeçalho e três arquivos (sem termos)');
+    assert.match(lines[0], /Data considerada;Idade \(dias\);Faixa de idade/);
+    assert.match(lines[1], /Mais de 10 anos/);
+    assert.match(lines[1], /Excluído em .* exclusão pela política de retenção/);
+    const html = await (await fetch(`${base}/api/scans/${scan.id}/export.html`)).text();
+    assert.match(html, /Relatório CLEAN – retenção/);
+    assert.match(html, /Arquivos sem acesso há mais de 5 anos/);
+    assert.match(html, /Data de corte \(expiram os anteriores\)/);
+    assert.match(html, /Arquivos expirados \(3\)/);
+    assert.match(html, /Excluir os itens expirados \(definitivamente\)/);
+    const xlsx = await fetch(`${base}/api/scans/${scan.id}/export.xlsx`);
+    assert.equal(xlsx.status, 200);
+    assert.ok((await xlsx.arrayBuffer()).byteLength > 1000);
 
     // Agendada (regra de recorrência) e o repositório em uso não pode ser excluído.
     const scheduled = await api('PUT', `/api/schedules/${id}`, { ...withDelete, rule: { frequency: 'weekly', startDate: '2026-09-01', time: '03:00', weekdays: [0] } });

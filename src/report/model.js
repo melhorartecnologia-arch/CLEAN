@@ -1,5 +1,6 @@
 // Rótulos, filtros e agregações dos resultados (usados pela API e pelas exportações).
 import { foldText } from '../scan/matcher.js';
+import { ageBucket, AGE_BUCKETS } from '../retention/policy.js';
 
 export const SOURCE_LABELS = {
   audit: 'Log de auditoria',
@@ -136,7 +137,11 @@ function haystack(record) {
   return record._search;
 }
 
+/** Retenção: data do critério (os mais antigos primeiro). */
+const byRetention = (a, b) => String(a.retention?.date || '').localeCompare(String(b.retention?.date || ''));
+
 const SORTERS = {
+  oldest: byRetention,
   path: (a, b) => a.path.localeCompare(b.path, 'pt-BR'),
   name: (a, b) => a.name.localeCompare(b.name, 'pt-BR'),
   modified: (a, b) => String(a.modified).localeCompare(String(b.modified)),
@@ -147,7 +152,10 @@ const SORTERS = {
 };
 
 /** Parâmetros de filtro aceitos pela API (os demais são ignorados). */
-export const FILTER_KEYS = ['q', 'term', 'user', 'repository', 'location', 'extension', 'status', 'deletion', 'sort', 'dir', 'page'];
+export const FILTER_KEYS = ['q', 'term', 'user', 'repository', 'location', 'extension', 'status', 'deletion', 'age', 'sort', 'dir', 'page'];
+
+/** Faixa de idade (retenção) do item. */
+const inAge = (r, key) => Boolean(r.retention) && ageBucket(r.retention.ageDays).key === key;
 
 /**
  * Filtra e ordena os registros.
@@ -163,6 +171,7 @@ export function filterRecords(records, filters = {}) {
     if (filters.extension && r.extension !== filters.extension) return false;
     if (filters.status && r.contentStatus !== filters.status) return false;
     if (filters.deletion && !matchesDeletion(r, filters.deletion)) return false;
+    if (filters.age && !inAge(r, filters.age)) return false;
     if (q && !haystack(r).includes(q)) return false;
     return true;
   });
@@ -276,6 +285,7 @@ function mailHaystack(record) {
 const byDate = (a, b) => String(a.date || '').localeCompare(String(b.date || ''));
 
 const MAIL_SORTERS = {
+  oldest: byRetention,
   date: byDate,
   mailbox: (a, b) => a.mailbox.localeCompare(b.mailbox, 'pt-BR') || byDate(a, b),
   sender: (a, b) => String(a.from || '').localeCompare(String(b.from || ''), 'pt-BR') || byDate(a, b),
@@ -285,7 +295,7 @@ const MAIL_SORTERS = {
   size: (a, b) => a.size - b.size,
 };
 
-export const MAIL_FILTER_KEYS = ['q', 'term', 'mailbox', 'sender', 'location', 'source', 'deletion', 'sort', 'dir', 'page'];
+export const MAIL_FILTER_KEYS = ['q', 'term', 'mailbox', 'sender', 'location', 'source', 'deletion', 'age', 'sort', 'dir', 'page'];
 
 /** Anexos "de verdade" (sem as imagens embutidas no corpo, como logotipos de assinatura). */
 export function realAttachments(record) {
@@ -305,6 +315,7 @@ export function filterMailRecords(records, filters = {}) {
     if (filters.location && !r.matches.some((m) => m.location === filters.location)) return false;
     if (filters.source && r.sourceId !== filters.source) return false;
     if (filters.deletion && !matchesDeletion(r, filters.deletion)) return false;
+    if (filters.age && !inAge(r, filters.age)) return false;
     if (q && !mailHaystack(r).includes(q)) return false;
     return true;
   });
@@ -370,4 +381,21 @@ export function summarizeMail(records) {
     byLocation: locations,
     byStatus: Object.fromEntries(countBy(records, (r) => r.contentStatus || 'none')),
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Retenção
+
+/** Itens expirados por faixa de idade (quantidade e tamanho), para o gráfico do relatório. */
+export function summarizeRetention(records) {
+  const buckets = new Map(AGE_BUCKETS.map((b) => [b.key, { key: b.key, label: b.label, count: 0, bytes: 0 }]));
+  let bytes = 0;
+  for (const r of records) {
+    if (!r.retention) continue;
+    const b = buckets.get(ageBucket(r.retention.ageDays).key);
+    b.count++;
+    b.bytes += Number(r.size) || 0;
+    bytes += Number(r.size) || 0;
+  }
+  return { byAge: [...buckets.values()].filter((b) => b.count > 0), bytes };
 }

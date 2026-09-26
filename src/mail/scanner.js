@@ -168,7 +168,7 @@ export class MailScanner {
     const seconds = Math.round((Date.now() - started) / 1000);
     this.log(
       'info',
-      `${this.cancelled ? 'Análise cancelada' : 'Análise concluída'} em ${seconds}s: ${s.messagesSeen} mensagem(ns) verificadas em ${s.mailboxesDone} caixa(s), ${s.messagesMatched} com ocorrências.`,
+      `${this.cancelled ? 'Análise cancelada' : 'Análise concluída'} em ${seconds}s: ${s.messagesSeen} mensagem(ns) verificadas em ${s.mailboxesDone} caixa(s), ${s.messagesMatched} ${this.retention ? 'expirada(s)' : 'com ocorrências'}.`,
     );
     this.emit({ type: 'done', stats: { ...s }, cancelled: this.cancelled });
     return s;
