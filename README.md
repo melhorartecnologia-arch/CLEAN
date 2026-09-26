@@ -32,6 +32,10 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   ("analisar e excluir") ou item a item pelo relatório, com registro de cada exclusão.
 - **Agendamentos**: análises executadas sozinhas, uma vez ou com repetição (a cada algumas horas,
   diária, semanal ou mensal), com análise incremental, histórico e retenção dos relatórios.
+- **Políticas de retenção**: eliminam os arquivos e as mensagens mais antigos que uma idade máxima
+  (ex.: arquivos sem uso há mais de 5 anos, e-mails recebidos há mais de 10 anos), pela data da
+  última modificação, do último acesso, da criação ou do recebimento — com simulação, limite de
+  exclusões por execução e execução manual ou agendada.
 - Sem banco de dados e sem etapa de compilação: basta instalar o Node.js e executar.
 
 ## Sumário
@@ -49,11 +53,12 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
    - [Servidores IMAP](#servidores-imap)
 9. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
 10. [Agendamentos](#agendamentos)
-11. [Executando como serviço](#executando-como-serviço)
-12. [Configuração](#configuração)
-13. [Segurança](#segurança)
-14. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
-15. [Desenvolvimento](#desenvolvimento)
+11. [Políticas de retenção](#políticas-de-retenção)
+12. [Executando como serviço](#executando-como-serviço)
+13. [Configuração](#configuração)
+14. [Segurança](#segurança)
+15. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
+16. [Desenvolvimento](#desenvolvimento)
 
 ## Requisitos
 
@@ -562,11 +567,107 @@ Como funcionam:
   `agendamento "Limpeza semanal" (exclusão automática confirmada por acesso local em 25/09/2026 10:00)`);
 - *Executar agora* num agendamento com exclusão pede uma confirmação.
 
+## Políticas de retenção
+
+Em **Automação › Retenção**, crie políticas que eliminam os arquivos e as mensagens de e-mail **mais
+antigos que uma idade máxima** — por exemplo, *arquivos sem uso há mais de 5 anos* ou *e-mails
+recebidos há mais de 10 anos*. Aqui não há listas de referência: vale só a data do item.
+
+**Critério de data dos arquivos:**
+
+| Critério | Data considerada | Quando usar |
+|---|---|---|
+| **Sem uso** (padrão) | A mais recente entre a última modificação, o último acesso e a criação | O mais seguro: o arquivo só expira se **nenhuma** dessas datas for recente. |
+| **Última modificação** | Quando o conteúdo foi alterado pela última vez | Confiável em qualquer servidor. Não considera os arquivos que só foram abertos (lidos). |
+| **Último acesso (abertura)** | Quando o arquivo foi aberto pela última vez | Só se o servidor de arquivos registrar o último acesso (veja abaixo). Não existe no OneDrive e no SharePoint. |
+| **Criação** | Quando o arquivo foi criado **ou copiado** para o repositório | Pastas de passagem: digitalizações, exportações, arquivos temporários. |
+
+Nas mensagens de e-mail, vale a **data de recebimento** (nos Itens Enviados, a data do envio).
+
+**Último acesso no Windows.** O NTFS só atualiza a data do último acesso se esse registro estiver
+ligado — em muitos servidores ele fica desligado para economizar gravações em disco. Para conferir,
+rode no servidor de arquivos, num prompt de comando como administrador:
+
+```bat
+fsutil behavior query disablelastaccess
+```
+
+`0` ou `2`: o último acesso é registrado; `1` ou `3`: não é (para ligar,
+`fsutil behavior set disablelastaccess 0`; a mudança pode exigir reiniciar o servidor). Sem o
+registro, a data fica parada — em geral na criação ou na cópia do arquivo — e um arquivo aberto
+todos os dias parece antigo: pelo critério *Último acesso*, ele seria excluído. No sentido oposto,
+programas que leem todos os arquivos (antivírus, backup, indexação e as **análises de conteúdo do
+próprio CLEAN**) podem atualizar o último acesso de tudo, e aí nada expira pelos critérios *Último
+acesso* e *Sem uso*; nos repositórios analisados com frequência, prefira *Última modificação*. Depois
+de uma migração de servidor, a data de criação costuma ser a da cópia: com *Sem uso* ou *Criação*,
+nada expira até essa data ficar antiga.
+
+**Idade máxima:** em dias, meses ou anos (meses e anos pelo calendário). A **data de corte** é
+calculada no início de cada execução — expiram os itens com a data do critério **anterior** a ela —
+e fica registrada no relatório; o formulário mostra a data de corte se a política fosse executada
+hoje. Arquivos sem a data do critério (um sistema de arquivos sem data de criação, por exemplo)
+nunca expiram e são contados à parte.
+
+**Demais opções:**
+
+- arquivos: **somente os nomes** que combinam com padrões (`*.tmp`, `*.bak`, `~$*` — um por linha, só
+  o nome, sem pastas); em branco, todos os arquivos. Pastas e arquivos ignorados no cadastro do
+  repositório continuam ignorados;
+- e-mail: incluir ou não a **Lixeira** (Itens Excluídos) e o **Lixo Eletrônico**; as pastas
+  ignoradas no cadastro da conexão continuam ignoradas;
+- **o que fazer**: *Somente listar (simulação)* ou *Excluir os itens expirados*. A exclusão exige
+  **Permitir exclusão** nos locais escolhidos e a confirmação **EXCLUIR** a cada vez que a política é
+  salva, e é conferida em cada execução como nos [agendamentos com exclusão](#agendamentos): se um
+  local deixar de permitir a exclusão ou mudar de caminho, contas, sites ou caixas, a execução não é
+  iniciada até a política ser salva e confirmada de novo; uma execução que esperou na fila não exclui
+  se, nesse intervalo, a política foi alterada, pausada ou excluída;
+- **forma de exclusão**: *Definitiva* (padrão) ou *Para a lixeira*. Vale para o e-mail, o OneDrive e o
+  SharePoint (a forma da política, e não a do cadastro); nas pastas do Windows a exclusão é sempre
+  definitiva;
+- **limite de exclusões por execução** (1.000 por padrão; 0 = sem limite): um freio contra uma
+  regra errada. Ao atingi-lo, a execução para de excluir e avisa; os demais itens expirados ficam só
+  no relatório e são excluídos nas execuções seguintes. As exclusões seguem a ordem da varredura
+  (não necessariamente dos mais antigos para os mais novos);
+- **quando executar**: *Manualmente* (pelos botões da lista) ou *Agendar*, com as mesmas regras de
+  recorrência, horários perdidos, histórico e relatórios guardados dos agendamentos.
+
+**Na lista de políticas:** **Simular agora** executa a política sem excluir nada — o relatório mostra
+exatamente o que seria excluído (faça isso antes de ligar a exclusão); **Executar e excluir agora**
+(nas políticas com exclusão) pede uma confirmação; também há pausar e retomar (agendadas), histórico,
+editar e excluir. As políticas agendadas aparecem no painel, em *Próximas execuções agendadas*.
+
+**Relatório de cada execução:** os itens expirados com a data considerada e a idade, os mais antigos
+primeiro; gráficos por faixa de idade (clique para filtrar), espaço por extensão e por repositório,
+últimos usuários, caixas, pastas e remetentes; a regra, a data de corte e a forma de exclusão no
+cabeçalho. O Excel (abas *Resumo*, *Arquivos expirados* ou *Mensagens expiradas*, *Exclusões* e
+*Erros*), o CSV e o HTML têm uma linha por item, com a data considerada, a idade e a faixa de idade.
+As execuções também aparecem em *Análises de arquivos* e *Análises de e-mail*, marcadas como
+*retenção*.
+
+**Como os itens são lidos e excluídos:**
+
+- pastas do Windows: só as datas de cada arquivo (o conteúdo não é lido); o arquivo expirado é
+  excluído logo depois de registrado no relatório (com o proprietário, se a opção estiver marcada),
+  com as mesmas conferências da exclusão automática — tamanho e data de modificação iguais aos da
+  listagem, dentro do repositório e fora dos locais protegidos;
+- OneDrive e SharePoint: as datas vêm do Microsoft 365, sem baixar os arquivos; a exclusão confere a
+  versão do arquivo;
+- e-mail: só os cabeçalhos das mensagens anteriores à data de corte são lidos (no Microsoft 365 e no
+  Gmail, o próprio servidor filtra pela data); o corpo e os anexos não são baixados;
+- as exclusões ficam registradas no relatório, na aba *Exclusões* do Excel e em
+  `data\exclusoes.ndjson` como **Política de retenção**, com o nome da política e quem confirmou a
+  exclusão (ex.: `política de retenção "Temporários" (exclusão confirmada por acesso local em
+  26/09/2026 10:00)`).
+
+Antes de ligar a exclusão, confirme com as áreas responsáveis os **prazos legais de guarda** dos
+documentos (fiscais, trabalhistas, contábeis). Retenções e bloqueios de litígio do Microsoft Purview
+e do Google Vault continuam valendo sobre o que o CLEAN excluir.
+
 ## Executando como serviço
 
 Para que o CLEAN inicie com o Windows, sem sessão aberta — necessário para os
-[agendamentos](#agendamentos) —, use o Agendador de Tarefas (nativo). Em um PowerShell como
-administrador:
+[agendamentos](#agendamentos) e as [políticas de retenção](#políticas-de-retenção) agendadas —, use
+o Agendador de Tarefas (nativo). Em um PowerShell como administrador:
 
 ```powershell
 $acao = New-ScheduledTaskAction -Execute 'C:\Program Files\nodejs\node.exe' -Argument 'src\server.js' -WorkingDirectory 'C:\CLEAN'
