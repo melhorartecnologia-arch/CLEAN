@@ -123,7 +123,8 @@ de exemplo. Depois é só iniciar uma análise.
 As análises rodam em segundo plano (é possível fechar o navegador) e podem ser canceladas a qualquer
 momento; o que já foi encontrado é mantido. Para repetir uma análise automaticamente (toda noite,
 toda semana...), use **Quando executar › Agendar** ou o menu **Automação › Agendamentos** — veja
-[Agendamentos](#agendamentos).
+[Agendamentos](#agendamentos). Para eliminar os arquivos e os e-mails antigos (por exemplo, sem uso
+há mais de 5 anos), use **Automação › Retenção** — veja [Políticas de retenção](#políticas-de-retenção).
 
 Para as caixas de e-mail, use o grupo **E-mail** do menu: *Caixas de e-mail* (conexões) e *Análises
 de e-mail* — veja [Análise de caixas de e-mail](#análise-de-caixas-de-e-mail).
