@@ -1,6 +1,7 @@
 // Rótulos, filtros e agregações dos resultados (usados pela API e pelas exportações).
 import { foldText } from '../scan/matcher.js';
 import { ageBucket, AGE_BUCKETS } from '../retention/policy.js';
+import { CATEGORIES, categoryLabel } from '../types/catalog.js';
 
 export const SOURCE_LABELS = {
   audit: 'Log de auditoria',
@@ -153,7 +154,7 @@ const SORTERS = {
 };
 
 /** Parâmetros de filtro aceitos pela API (os demais são ignorados). */
-export const FILTER_KEYS = ['q', 'term', 'user', 'repository', 'location', 'extension', 'status', 'deletion', 'age', 'sort', 'dir', 'page'];
+export const FILTER_KEYS = ['q', 'term', 'user', 'repository', 'location', 'extension', 'status', 'deletion', 'age', 'type', 'found', 'sort', 'dir', 'page'];
 
 /** Faixa de idade (retenção) do item. */
 const inAge = (r, key) => Boolean(r.retention) && ageBucket(r.retention.ageDays).key === key;
@@ -173,6 +174,9 @@ export function filterRecords(records, filters = {}) {
     if (filters.status && r.contentStatus !== filters.status) return false;
     if (filters.deletion && !matchesDeletion(r, filters.deletion)) return false;
     if (filters.age && !inAge(r, filters.age)) return false;
+    // Busca por tipo: a categoria e como o arquivo foi encontrado (extensão ou conteúdo).
+    if (filters.type && r.typeMatch?.category !== filters.type) return false;
+    if (filters.found && r.typeMatch?.by !== filters.found) return false;
     if (q && !haystack(r).includes(q)) return false;
     return true;
   });
@@ -432,5 +436,51 @@ export function summarizeRetention(records, kind = 'files') {
     ...(mail
       ? { byMailbox: top(groups.byMailbox), byFolder: top(groups.byFolder) }
       : { byExtension: top(groups.byExtension, 'bytes'), byUser: top(groups.byUser), byRepository: top(groups.byRepository, 'bytes') }),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Busca por tipo
+
+/**
+ * Arquivos encontrados por tipo (categoria), extensão, último usuário e repositório, com o tamanho
+ * de cada grupo; byContent: encontrados pelo tipo real (conteúdo) com outra extensão.
+ */
+export function summarizeTypes(records) {
+  const groups = { byType: new Map(), byExtension: new Map(), byUser: new Map(), byRepository: new Map() };
+  const add = (map, key, extra, size) => {
+    let g = map.get(key);
+    if (!g) {
+      g = { key, ...extra, count: 0, bytes: 0 };
+      map.set(key, g);
+    }
+    g.count++;
+    g.bytes += size;
+  };
+  let count = 0;
+  let bytes = 0;
+  let byContent = 0;
+  for (const r of records) {
+    if (!r.typeMatch) continue;
+    const size = Number(r.size) || 0;
+    count++;
+    bytes += size;
+    if (r.typeMatch.by === 'content') byContent++;
+    add(groups.byType, r.typeMatch.category, { label: categoryLabel(r.typeMatch.category) }, size);
+    add(groups.byExtension, r.extension || '', {}, size);
+    add(groups.byUser, r.lastUser || '', { identified: Boolean(r.lastUser) }, size);
+    add(groups.byRepository, r.repositoryId, { name: r.repositoryName }, size);
+  }
+  // Os tipos na ordem do catálogo; os demais grupos, os maiores primeiro.
+  const order = [...Object.keys(CATEGORIES), 'custom'];
+  const top = (map, by = 'count') => [...map.values()].sort((a, b) => b[by] - a[by] || b.count - a.count).slice(0, 500);
+  return {
+    count,
+    bytes,
+    byContent,
+    byType: [...groups.byType.values()].sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key)),
+    byExtension: top(groups.byExtension, 'bytes'),
+    byUser: top(groups.byUser),
+    byRepository: top(groups.byRepository, 'bytes'),
   };
 }

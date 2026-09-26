@@ -5,6 +5,7 @@ import { newMailStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
 import { cleanPaths, keptPaths, isCloudRepo, deletionScope, mailDeletionScope } from './delete.js';
 import { keptCloud } from '../cloud/drives.js';
 import { sanitizeRetention, cutoffDate } from '../retention/policy.js';
+import { sanitizeFileTypes } from '../types/catalog.js';
 import { PROJECT_ROOT } from '../config.js';
 
 export class ScanError extends Error {
@@ -93,6 +94,27 @@ function retentionOptions(input, retention, mail) {
   return { ...DEFAULT_OPTIONS, ...base, checkContent: false, resolveOwner: i.resolveOwner !== false, modifiedAfter: null };
 }
 
+/** Opções de uma busca por tipo (sem termos: o nome e o conteúdo não são analisados). */
+function typeOptions(input) {
+  const i = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const concurrency = Number(i.concurrency);
+  const o = {
+    ...DEFAULT_OPTIONS,
+    checkName: false,
+    checkContent: false,
+    deleteMatches: i.deleteMatches === true,
+    concurrency: Number.isInteger(concurrency) && concurrency > 0 ? Math.min(concurrency, 16) : 4,
+    resolveOwner: i.resolveOwner !== false,
+    modifiedAfter: null,
+  };
+  if (i.modifiedAfter) {
+    const d = new Date(i.modifiedAfter);
+    if (Number.isNaN(d.getTime())) throw new ScanError('Data "modificados a partir de" inválida.');
+    o.modifiedAfter = d.toISOString();
+  }
+  return o;
+}
+
 export class ScanManager {
   /** mailEndpoints: endereços alternativos das APIs de e-mail (usado nos testes). */
   constructor(store, { maxConcurrent = 1, workerUrl = new URL('./worker.js', import.meta.url), mailEndpoints = {} } = {}) {
@@ -144,6 +166,7 @@ export class ScanManager {
       ...(schedule?.simulated ? { simulated: true } : {}),
     };
     if (body?.retention) return this.#startRetention(body, origin);
+    if (body?.fileTypes) return this.#startTypes(body, origin);
     if (body?.kind === 'mail') return this.#startMail(body, origin);
     const { name, repositoryIds, listIds, options } = body || {};
     const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
@@ -248,6 +271,45 @@ export class ScanManager {
     // A forma de exclusão registrada em cada local é a da política.
     const snapshots = targets.map((t) => ({ ...(mail ? mailSnapshot(t) : repoSnapshot(t)), ...(mail || isCloudRepo(t) ? { deleteMode: policy.deleteMode } : {}) }));
     await this.store.writeScanConfig(scan.id, mail ? { kind: 'mail', sources: snapshots, terms: [], options: opts, retention: policy } : { repositories: snapshots, terms: [], options: opts, retention: policy });
+    this.queue.push(scan.id);
+    this.#pump();
+    return scan;
+  }
+
+  /**
+   * Busca por tipo: lista (e, com exclusão automática, exclui) os arquivos das categorias e extensões
+   * escolhidas — pela extensão e, se pedido, pelo tipo real no início do arquivo. Sem listas de
+   * referência.
+   */
+  async #startTypes(body, origin) {
+    if (body.kind === 'mail') throw new ScanError('A busca por tipo vale para arquivos (repositórios), e não para e-mails.');
+    const targets = ids(body.repositoryIds).map((id) => this.store.getRepository(id));
+    if (targets.length === 0 || targets.some((t) => !t)) throw new ScanError('Selecione repositórios válidos.');
+    let fileTypes;
+    try {
+      fileTypes = sanitizeFileTypes(body.fileTypes);
+    } catch (err) {
+      throw new ScanError(err.message);
+    }
+    const opts = typeOptions(body.options);
+    checkDeletion(opts, body, targets, 'do repositório');
+    const scan = this.store.createScan({
+      kind: 'files',
+      name: this.#scanName(body.name, 'Busca por tipo'),
+      status: 'queued',
+      repositoryIds: targets.map((t) => t.id),
+      listIds: [],
+      options: opts,
+      fileTypes,
+      ...origin,
+      summary: { repositories: targets.map((r) => ({ id: r.id, name: r.name, path: r.path, type: r.type || 'local' })), lists: [], termCount: 0 },
+      stats: newStats(targets.length),
+      current: null,
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+    });
+    await this.store.writeScanConfig(scan.id, { repositories: targets.map(repoSnapshot), terms: [], options: opts, fileTypes });
     this.queue.push(scan.id);
     this.#pump();
     return scan;

@@ -121,11 +121,16 @@ export function deletionsSheet(deletions, records, columns, label, labels = DELE
  * políticas de retenção ({ mode: forma da exclusão por extenso, extra: [[rótulo, valor]] });
  * blocked / revoked: motivo de a exclusão ter sido desativada antes do início ou interrompida.
  */
-export function deletionInfoRows(opts, s, { noun = 'Excluídos', gone = 'Já não existiam', changed = 'Alterados depois da análise (mantidos)', skipped = 'Não excluídos (limite da execução)', retention = null, blocked = '', revoked = '' } = {}) {
-  const action = retention ? 'Excluir os itens expirados' : 'Analisar e excluir automaticamente';
+export function deletionInfoRows(
+  opts,
+  s,
+  { noun = 'Excluídos', gone = 'Já não existiam', changed = 'Alterados depois da análise (mantidos)', skipped = 'Não excluídos (limite da execução)', retention = null, blocked = '', revoked = '', labels = null } = {},
+) {
+  // labels: textos da ação em outros tipos de análise ({ action, listOnly, extra }), ex.: busca por tipo.
+  const action = labels?.action || (retention ? 'Excluir os itens expirados' : 'Analisar e excluir automaticamente');
   if (!opts.deleteMatches) {
     if (blocked) return [['Ação', `${action} — exclusão desativada nesta execução: ${blocked}`]];
-    return [['Ação', retention ? 'Somente listar os itens expirados (simulação)' : 'Somente analisar']];
+    return [['Ação', labels?.listOnly || (retention ? 'Somente listar os itens expirados (simulação)' : 'Somente analisar')]];
   }
   return [
     ['Ação', retention ? `${action} (${retention.mode})` : action],
@@ -134,7 +139,7 @@ export function deletionInfoRows(opts, s, { noun = 'Excluídos', gone = 'Já nã
     [gone, s.deleteMissing ?? 0],
     [changed, s.deleteChanged ?? 0],
     ['Falhas na exclusão', s.deleteErrors ?? 0],
-    ...(retention ? [[skipped, s.deleteSkipped ?? 0], ...(retention.extra || [])] : []),
+    ...(retention ? [[skipped, s.deleteSkipped ?? 0], ...(retention.extra || [])] : labels?.extra || []),
   ];
 }
 

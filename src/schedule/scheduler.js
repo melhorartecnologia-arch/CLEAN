@@ -18,6 +18,7 @@ import { ScanError, sanitizeOptions, sanitizeMailOptions } from '../scan/manager
 import { deletionScope, mailDeletionScope, isCloudRepo, keptPaths } from '../scan/delete.js';
 import { keptCloud } from '../cloud/drives.js';
 import { sanitizeRetention } from '../retention/policy.js';
+import { sanitizeFileTypes } from '../types/catalog.js';
 
 const TICK_MS = 15000;
 // Atraso tolerado (servidor ocupado): acima disso, o horário conta como perdido.
@@ -96,7 +97,7 @@ const termKey = (t) => JSON.stringify([t.type, t.value, Boolean(t.wholeWord), t.
  * contas, sites, caixas e pastas de e-mail) e os locais protegidos por repositórios que não
  * permitem exclusão. Registrado ao confirmar a exclusão automática.
  */
-export function deletionCriteria(store, { kind, targetIds = [], listIds = [] }) {
+export function deletionCriteria(store, { kind, targetIds = [], listIds = [], fileTypes = null }) {
   const all = store.listRepositories();
   const terms = listIds.flatMap((id) => (store.getList(id)?.terms || []).map(termKey)).sort();
   const places = [...targetIds].sort().map((id) => {
@@ -108,7 +109,8 @@ export function deletionCriteria(store, { kind, targetIds = [], listIds = [] }) 
     const kept = [Boolean(keep.all), keep.accounts.map((k) => k.value).sort(), keep.sites.map((k) => k.value).sort()];
     return [id, t.exclude || [], t.cloud?.exclude || [], kept];
   });
-  return hash([kind, terms, places]);
+  // Busca por tipo: os tipos e extensões confirmados também (sem eles, o valor dos agendamentos antigos não muda).
+  return hash([kind, terms, places, ...(fileTypes ? [fileTypes] : [])]);
 }
 
 /** Quantas execuções ainda faltam no término "depois de N execuções" (sem esse término: infinitas). */
@@ -154,6 +156,13 @@ export function scheduleProblems(store, schedule) {
       sanitizeRetention(schedule.retention, schedule.kind, { cloud: targets.some(isCloudRepo) });
     } catch (err) {
       problems.push(`${err.message} Edite a política.`);
+    }
+  }
+  if (schedule.purpose === 'types') {
+    try {
+      sanitizeFileTypes(schedule.fileTypes);
+    } catch (err) {
+      problems.push(`${err.message} Edite o agendamento.`);
     }
   }
   if (schedule.action === 'delete') {
@@ -222,7 +231,7 @@ export function coverageSignature(store, schedule) {
   const { concurrency, deleteMatches, modifiedAfter, receivedAfter, ...options } = schedule.options || {};
   // A ação entra: ao passar a excluir, a primeira execução é completa (exclui também o que as
   // execuções anteriores, só de análise, encontraram).
-  return hash([kind, schedule.action, targets, terms, Object.entries(options).sort(([a], [b]) => a.localeCompare(b))]);
+  return hash([kind, schedule.action, targets, terms, Object.entries(options).sort(([a], [b]) => a.localeCompare(b)), ...(schedule.fileTypes ? [schedule.fileTypes] : [])]);
 }
 
 const sameIds = (a = [], b = []) => a.length === b.length && [...a].sort().join('|') === [...b].sort().join('|');
@@ -416,9 +425,12 @@ export class Scheduler {
         : retention
           ? `${what} "${schedule.name}", ${simulate ? 'simulada' : 'executada'} agora por ${by}${confirmation}`
           : `${by} (Executar agora, ${origin})`;
+      const from = period.from ? period.from.toISOString() : null;
       const request = retention
         ? { retention: schedule.retention, options: { ...schedule.options, deleteMatches: deleting } }
-        : { listIds: schedule.listIds, options: { ...schedule.options, deleteMatches: deleting, [mail ? 'receivedAfter' : 'modifiedAfter']: period.from ? period.from.toISOString() : null } };
+        : schedule.purpose === 'types'
+          ? { fileTypes: schedule.fileTypes, options: { ...schedule.options, deleteMatches: deleting, modifiedAfter: from } }
+          : { listIds: schedule.listIds, options: { ...schedule.options, deleteMatches: deleting, [mail ? 'receivedAfter' : 'modifiedAfter']: from } };
       scan = await this.manager.start(
         {
           kind: schedule.kind,
@@ -597,6 +609,12 @@ export class Scheduler {
     const targets = scan.kind === 'mail' ? scan.sourceIds : scan.repositoryIds;
     if (!sameIds(targets, schedule.targetIds) || !sameIds(scan.listIds, schedule.listIds)) {
       return schedule.purpose === 'retention' ? 'os locais da política foram alterados' : 'os locais ou as listas do agendamento foram alterados';
+    }
+    if (schedule.purpose === 'types') {
+      // Os tipos, as extensões, o tamanho mínimo e o limite precisam ser os mesmos.
+      if (JSON.stringify(scan.fileTypes || null) !== JSON.stringify(schedule.fileTypes || null)) return 'os tipos de arquivo do agendamento foram alterados';
+      const problems = scheduleProblems(this.store, schedule);
+      return problems.length ? problems[0] : null;
     }
     if (schedule.purpose === 'retention') {
       // A política (critério, idade máxima, nomes, limite e forma de exclusão) precisa ser a mesma.

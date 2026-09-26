@@ -12,6 +12,8 @@ import { friendlyError, withTimeout } from './errors.js';
 import { deleteFile, deletionEvent, isWithin, isCloudRepo, guardFor } from './delete.js';
 import { DrivesConnector, person, keptCloudTarget, cloudTarget } from '../cloud/drives.js';
 import { fileDate, cloudDate, ageDays, patternMatcher, limitWarning } from '../retention/policy.js';
+import { typeMatcher, describeFileTypes } from '../types/catalog.js';
+import { detectType, HEADER_BYTES } from '../types/signature.js';
 
 // Tempo máximo para ler um arquivo (o que passar disso é registrado como erro e a análise segue).
 const FILE_TIMEOUT = 5 * 60 * 1000;
@@ -116,7 +118,10 @@ export function newStats(repositoriesTotal = 0) {
     bytesExpired: 0, // retenção: tamanho dos arquivos expirados
     retentionUnknown: 0, // retenção: arquivos sem a data do critério (não expiram)
     deleteSkipped: 0, // retenção: expirados não excluídos por causa do limite da execução
-    deleteProtected: 0, // retenção: expirados em locais protegidos (não são excluídos)
+    deleteProtected: 0, // retenção e busca por tipo: itens em locais protegidos (não são excluídos)
+    bytesFound: 0, // busca por tipo: tamanho dos arquivos encontrados
+    typesByContent: 0, // busca por tipo: encontrados pelo tipo real (conteúdo), com outra extensão
+    filesSkippedBySize: 0, // busca por tipo: abaixo do tamanho mínimo
     deleted: 0, // excluídos na análise ("analisar e excluir")
     deleteMissing: 0, // já não existiam na hora da exclusão
     deleteChanged: 0, // alterados depois de analisados: mantidos
@@ -166,6 +171,15 @@ export class Scanner {
     // (sem termos: o conteúdo não é lido).
     const r = config.retention || null;
     this.retention = r ? { ...r, cutoffMs: Date.parse(r.cutoff), matchName: patternMatcher(r.patterns || []) } : null;
+    // Busca por tipo: arquivos pela extensão (e, se pedido, pelo tipo real no início do arquivo).
+    const t = config.fileTypes || null;
+    this.typeSearch = t ? { ...t, match: typeMatcher(t), minBytes: Math.round((t.minSizeMB || 0) * 1048576) } : null;
+    // Retenção e busca por tipo: exclusão com limite por execução (e o texto dos avisos).
+    this.selection = this.retention
+      ? { mode: 'retention', limit: this.retention.maxDeletions || 0, found: 'expirado', where: 'na política' }
+      : this.typeSearch
+        ? { mode: 'auto', limit: this.typeSearch.maxDeletions || 0, found: 'encontrado', where: 'nas opções da busca' }
+        : null;
     // Limite de exclusões da execução: vagas em uso (exclusões feitas ou em andamento) e falhas.
     this.deleteAttempts = 0;
     this.deleteFailures = 0;
@@ -224,6 +238,11 @@ export class Scanner {
     if (this.retention) {
       const cutoff = new Date(this.retention.cutoffMs).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
       this.log('info', `Retenção iniciada em ${this.repositories.length} repositório(s): arquivos com a data do critério anterior a ${cutoff}.`);
+    } else if (this.typeSearch) {
+      this.log('info', `Busca por tipo iniciada em ${this.repositories.length} repositório(s): ${describeFileTypes(this.typeSearch)}.`);
+      if (this.typeSearch.checkContent && this.repositories.some(isCloudRepo)) {
+        this.log('info', 'No OneDrive e no SharePoint vale só a extensão: o tipo real pelo conteúdo é conferido nas pastas do Windows.');
+      }
     } else {
       for (const { term, error } of this.matcher.invalid) this.log('warn', `Termo ignorado "${term.value}": ${error}`);
       if (this.matcher.size === 0) this.log('warn', 'Nenhum termo válido nas listas selecionadas.');
@@ -242,12 +261,13 @@ export class Scanner {
     this.flushErrors();
     this.current = null;
     const seconds = Math.round((Date.now() - started) / 1000);
-    const found = this.retention ? 'expirado(s)' : 'com ocorrências';
+    const sel = this.selection;
+    const found = sel ? `${sel.found}(s)` : 'com ocorrências';
     // Aviso do limite pelos números finais (as exclusões em andamento podiam falhar).
-    const warning = this.retention ? limitWarning({ limit: this.retention.maxDeletions, deleted: this.stats.deleted, failures: this.deleteFailures, skipped: this.stats.deleteSkipped }) : null;
+    const warning = sel ? limitWarning({ limit: sel.limit, deleted: this.stats.deleted, failures: this.deleteFailures, skipped: this.stats.deleteSkipped }, 'files', sel) : null;
     if (warning) this.log('warn', warning);
     if (this.stats.deleteProtected) {
-      this.log('info', `${this.stats.deleteProtected} arquivo(s) expirado(s) em locais protegidos (repositórios sem "Permitir exclusão" dentro dos analisados, contas ou sites protegidos, pastas do CLEAN) não foram excluídos.`);
+      this.log('info', `${this.stats.deleteProtected} arquivo(s) ${found} em locais protegidos (repositórios sem "Permitir exclusão" dentro dos analisados, contas ou sites protegidos, pastas do CLEAN) não foram excluídos.`);
     }
     this.log('info', `${this.cancelled ? 'Análise cancelada' : 'Análise concluída'} em ${seconds}s: ${this.stats.filesSeen} arquivo(s) verificados, ${this.stats.filesMatched} ${found}.`);
     this.emit({ type: 'done', stats: { ...this.stats }, cancelled: this.cancelled });
@@ -421,6 +441,7 @@ export class Scanner {
       return;
     }
     if (this.retention) return this.processExpiredCloudFile(repo, drive, entry);
+    if (this.typeSearch) return this.processTypedCloudFile(repo, drive, entry);
     const size = Number(item.size) || 0;
     const { options, matcher } = this;
     let content = null;
@@ -574,6 +595,107 @@ export class Scanner {
     await this.deleteRecords([record]);
   }
 
+  /** Busca por tipo: campos do registro, sem termos (o conteúdo não é analisado). */
+  typedFields(found, detected) {
+    return {
+      contentType: null,
+      contentStatus: 'not-requested',
+      contentNote: null,
+      metadata: {},
+      occurrences: 0,
+      terms: [],
+      matches: [],
+      typeMatch: { category: found.category, extension: found.extension, by: detected ? 'content' : 'extension', format: detected?.format || null },
+    };
+  }
+
+  /** Busca por tipo: arquivo de pasta do Windows, pela extensão ou (se pedido) pelo tipo real. */
+  async processTypedFile(repo, entry, st, auditIndex) {
+    const t = this.typeSearch;
+    const small = t.minBytes && st.size < t.minBytes;
+    let found = t.match(entry.name);
+    if (found && small) {
+      this.stats.filesSkippedBySize++; // do tipo procurado, mas abaixo do tamanho mínimo
+      return;
+    }
+    let detected = null;
+    if (!found && !small && t.checkContent && st.size > 0) {
+      const real = await this.readType(entry.path, st.size);
+      if (real?.category && t.categories.includes(real.category)) {
+        detected = real;
+        found = { category: real.category, extension: path.extname(entry.name).toLowerCase() };
+      }
+    }
+    if (!found) return;
+    this.stats.filesMatched++;
+    this.stats.bytesFound += st.size;
+    if (detected) this.stats.typesByContent++;
+    const record = {
+      id: ++this.seq,
+      repositoryId: repo.id,
+      repositoryName: repo.name,
+      path: entry.path,
+      relativePath: entry.relativePath,
+      name: entry.name,
+      extension: path.extname(entry.name).toLowerCase(),
+      size: st.size,
+      created: iso(st.birthtime),
+      modified: iso(st.mtime),
+      accessed: iso(st.atime),
+      audit: auditIndex ? auditIndex.lookup(repo.path, entry.relativePath, repo.audit?.localPath || '') : null,
+      owner: null,
+      ownerError: null,
+      lastUser: null,
+      lastUserSource: null,
+      ...this.typedFields(found, detected),
+    };
+    if (this.options.resolveOwner) {
+      this.pendingOwners.push(record);
+      if (this.pendingOwners.length >= 200) await this.flushOwners();
+    } else {
+      this.finishRecords([record]);
+      await this.deleteRecords([record]);
+    }
+  }
+
+  /** Busca por tipo: arquivo do OneDrive/SharePoint (só pela extensão, sem baixar o conteúdo). */
+  async processTypedCloudFile(repo, drive, entry) {
+    const t = this.typeSearch;
+    const { item } = entry;
+    const size = Number(item.size) || 0;
+    const found = t.match(item.name);
+    if (!found) return;
+    if (t.minBytes && size < t.minBytes) {
+      this.stats.filesSkippedBySize++; // do tipo procurado, mas abaixo do tamanho mínimo
+      return;
+    }
+    this.stats.filesMatched++;
+    this.stats.bytesFound += size;
+    const record = this.cloudRecord(repo, drive, entry, this.typedFields(found, null));
+    this.finishRecords([record]);
+    await this.deleteRecords([record]);
+  }
+
+  /** Tipo real pelo início do arquivo (null se não for reconhecido ou não puder ser lido). */
+  async readType(file, size) {
+    const job = (async () => {
+      const handle = await fs.open(file, 'r');
+      try {
+        const buf = Buffer.alloc(Math.min(HEADER_BYTES, size));
+        const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+        return buf.subarray(0, bytesRead);
+      } finally {
+        await handle.close().catch(() => {});
+      }
+    })();
+    try {
+      return detectType(await withTimeout(job, this.fileTimeoutMs, 'Tempo esgotado ao ler o início do arquivo.'), size);
+    } catch (err) {
+      this.error(file, `Não foi possível conferir o tipo real (início do arquivo): ${friendlyError(err)}`);
+      return null;
+    }
+  }
+
   async loadAudit(repo) {
     const cfg = repo.audit || {};
     if (!cfg.enabled) return null;
@@ -617,6 +739,7 @@ export class Scanner {
       return;
     }
     if (this.retention) return this.processExpiredFile(repo, entry, st);
+    if (this.typeSearch) return this.processTypedFile(repo, entry, st, auditIndex);
     const { options, matcher } = this;
     let content = null;
     if (options.checkContent) {
@@ -742,8 +865,8 @@ export class Scanner {
       const repo = this.repoById.get(record.repositoryId);
       const cloud = Boolean(record.cloud);
       const method = cloud ? (repo?.deleteMode === 'permanent' ? 'permanent' : 'trash') : 'file';
-      if (this.retention) {
-        await this.deleteExpired(record, repo, method);
+      if (this.selection) {
+        await this.deleteSelected(record, repo, method);
         continue;
       }
       let result;
@@ -769,14 +892,14 @@ export class Scanner {
   }
 
   /**
-   * Retenção: exclui um item expirado. Com a exclusão desligada no repositório (o aviso é registrado
-   * uma vez) ou num local protegido, nada é tentado nem registrado como falha. O limite da execução
-   * conta as exclusões feitas: a vaga fica reservada enquanto a exclusão está em andamento e volta se
-   * ela não acontecer (com as vagas ocupadas, espera as exclusões em andamento terminarem). As falhas
-   * têm o mesmo limite, para a mesma falha não se repetir milhares de vezes (permissão, rótulo de
-   * retenção...).
+   * Retenção e busca por tipo: exclui um item encontrado. Com a exclusão desligada no repositório (o
+   * aviso é registrado uma vez) ou num local protegido, nada é tentado nem registrado como falha. O
+   * limite da execução conta as exclusões feitas: a vaga fica reservada enquanto a exclusão está em
+   * andamento e volta se ela não acontecer (com as vagas ocupadas, espera as exclusões em andamento
+   * terminarem). As falhas têm o mesmo limite, para a mesma falha não se repetir milhares de vezes
+   * (permissão, rótulo de retenção...). Na retenção, o arquivo precisa continuar expirado.
    */
-  async deleteExpired(record, repo, method) {
+  async deleteSelected(record, repo, method) {
     if (!repo?.allowDelete) return;
     const cloud = Boolean(record.cloud);
     const connector = cloud ? this.cloudConnector(repo) : null;
@@ -798,7 +921,7 @@ export class Scanner {
       this.stats.deleteProtected++;
       return;
     }
-    const limit = this.retention.maxDeletions || 0;
+    const limit = this.selection.limit;
     while (limit && this.deleteAttempts >= limit && this.deleteFailures < limit && this.deletesInFlight.size) {
       await Promise.race(this.deletesInFlight);
     }
@@ -815,7 +938,7 @@ export class Scanner {
           root: repo.path,
           expected: { size: record.size, modified: record.modified },
           protect: [...this.protect, ...(repo.keep || [])],
-          check: (st) => this.stillExpired(st),
+          check: this.retention ? (st) => this.stillExpired(st) : null,
         });
       } catch (err) {
         return { status: 'failed', error: friendlyError(err) };
@@ -832,7 +955,7 @@ export class Scanner {
     if (result.status === 'failed') this.deleteFailures++;
     countDeletion(this.stats, result.status);
     if (result.status === 'failed') this.error(record.path, `Falha ao excluir: ${result.error}`);
-    this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: 'retention', method, by: this.deletedBy, item: record.path })] });
+    this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: this.selection.mode, method, by: this.deletedBy, item: record.path })] });
   }
 
   /**

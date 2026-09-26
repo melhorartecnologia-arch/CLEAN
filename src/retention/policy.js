@@ -150,14 +150,14 @@ export function ageBucket(days) {
  * Aviso do limite de exclusões da execução, pelos números finais (null: nada deixou de ser
  * excluído por causa do limite). kind: 'files' | 'mail'.
  */
-export function limitWarning({ limit, deleted, failures, skipped }, kind = 'files') {
+export function limitWarning({ limit, deleted, failures, skipped }, kind = 'files', { found = 'expirado', where = 'na política' } = {}) {
   if (!limit || !skipped) return null;
-  const items = kind === 'mail' ? `${skipped} mensagem(ns) expirada(s)` : `${skipped} arquivo(s) expirado(s)`;
+  const items = kind === 'mail' ? `${skipped} mensagem(ns) ${found.replace(/o$/, 'a')}(s)` : `${skipped} arquivo(s) ${found}(s)`;
   if (failures >= limit) {
     return `${limit === 1 ? 'Uma falha' : `${limit} falhas`} de exclusão nesta execução (o limite da política): as exclusões foram interrompidas e ${items} só foram listados. Confira a aba Erros (permissões, itens em uso, rótulos de retenção...).`;
   }
   if (deleted >= limit) {
-    return `Limite de ${limit} ${limit === 1 ? 'exclusão' : 'exclusões'} desta execução atingido: ${items} só foram listados. Confira o relatório e, se estiver certo, aumente o limite na política.`;
+    return `Limite de ${limit} ${limit === 1 ? 'exclusão' : 'exclusões'} desta execução atingido: ${items} só foram listados. Confira o relatório e, se estiver certo, aumente o limite ${where}.`;
   }
   return `${items} não foram excluídos nesta execução: as vagas do limite ficaram reservadas para exclusões que falharam. Eles serão excluídos nas próximas execuções.`;
 }

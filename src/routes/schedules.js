@@ -6,6 +6,7 @@ import { ScanError, sanitizeOptions, sanitizeMailOptions } from '../scan/manager
 import { validateRule, RuleError, describeRule, upcoming, lastOccurrence, nextOccurrence } from '../schedule/recurrence.js';
 import { targetOf, deletionPins, deletionCriteria, scheduleProblems, remainingOf } from '../schedule/scheduler.js';
 import { sanitizeRetention, RetentionError, describeRetention } from '../retention/policy.js';
+import { sanitizeFileTypes, FileTypesError, describeFileTypes } from '../types/catalog.js';
 import { isCloudRepo } from '../scan/delete.js';
 
 const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
@@ -49,10 +50,15 @@ function parsePeriod(input) {
 function parseSchedule(body = {}, { store, existing = null, by }) {
   // Política de retenção: agendamento que exclui (ou lista) os itens mais antigos que a idade
   // máxima, sem listas de referência; pode ser executada só manualmente (sem regra).
-  const purpose = body.purpose === 'retention' ? 'retention' : 'terms';
+  // Busca por tipo ('types'): arquivos das categorias e extensões escolhidas, sem listas.
+  const purpose = body.purpose === 'retention' ? 'retention' : body.purpose === 'types' ? 'types' : 'terms';
   const policy = purpose === 'retention';
+  const byType = purpose === 'types';
   const kind = body.kind === 'mail' ? 'mail' : 'files';
-  if (existing && (existing.purpose || 'terms') !== purpose) throw bad('Não é possível transformar um agendamento em política de retenção (ou o contrário).');
+  if (byType && kind === 'mail') throw bad('A busca por tipo vale para arquivos (repositórios), e não para e-mails.');
+  // Termos e tipos de arquivo são análises (um agendamento pode trocar um pelo outro); a política de
+  // retenção é outra coisa.
+  if (existing && ((existing.purpose || 'terms') === 'retention') !== policy) throw bad('Não é possível transformar um agendamento em política de retenção (ou o contrário).');
   if (existing && existing.kind !== kind) throw bad(`Não é possível trocar o tipo ${policy ? 'da política' : 'do agendamento'} (arquivos ou e-mail).`);
   const name = text(body.name, policy ? 'o nome da política' : 'o nome do agendamento', { required: true, max: 120 });
   const targetIds = ids(kind === 'mail' ? body.sourceIds : body.repositoryIds);
@@ -62,8 +68,19 @@ function parseSchedule(body = {}, { store, existing = null, by }) {
   let lists = [];
   let options;
   let retention = null;
+  let fileTypes = null;
   let deleting;
-  if (policy) {
+  if (byType) {
+    try {
+      fileTypes = sanitizeFileTypes(body.fileTypes);
+    } catch (err) {
+      if (err instanceof FileTypesError) throw bad(err.message);
+      throw err;
+    }
+    const concurrency = Number(body.options?.concurrency);
+    options = { resolveOwner: body.options?.resolveOwner !== false, concurrency: Number.isInteger(concurrency) && concurrency > 0 ? Math.min(concurrency, 16) : 4 };
+    deleting = body.options?.deleteMatches === true;
+  } else if (policy) {
     try {
       retention = sanitizeRetention(body.retention, kind, { cloud: kind === 'files' && targets.some(isCloudRepo) });
     } catch (err) {
@@ -97,6 +114,7 @@ function parseSchedule(body = {}, { store, existing = null, by }) {
     listIds,
     options,
     retention,
+    fileTypes,
     action: deleting ? 'delete' : 'analyze',
     rule: policy && body.rule === null ? null : parseRule(body.rule),
     period: policy ? { type: 'all' } : parsePeriod(body.period),
@@ -109,7 +127,7 @@ function parseSchedule(body = {}, { store, existing = null, by }) {
   if (deleting) {
     const blocked = targets.filter((t) => !t.allowDelete).map((t) => `"${t.name}"`);
     const where = kind === 'mail' ? 'da conexão de e-mail' : 'do repositório';
-    if (blocked.length) throw bad(`A exclusão não está permitida em ${blocked.join(', ')}. Ative "Permitir exclusão" no cadastro ${where} ou escolha "${policy ? 'Somente listar (simulação)' : 'Somente analisar'}".`);
+    if (blocked.length) throw bad(`A exclusão não está permitida em ${blocked.join(', ')}. Ative "Permitir exclusão" no cadastro ${where} ou escolha "${policy ? 'Somente listar (simulação)' : byType ? 'Somente procurar' : 'Somente analisar'}".`);
     if (String(body.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') {
       throw bad(policy ? 'Para salvar a política com exclusão, digite EXCLUIR na confirmação.' : 'Para agendar a análise com exclusão automática, digite EXCLUIR na confirmação.');
     }
@@ -161,6 +179,7 @@ export function schedulesRouter({ store, manager, scheduler }) {
       endsAt: end ? end.toISOString() : null,
       state: !schedule.rule && schedule.purpose === 'retention' ? 'manual' : !schedule.enabled ? 'paused' : schedule.nextRunAt ? 'active' : 'finished',
       ...(schedule.retention ? { retentionText: describeRetention(schedule.retention, schedule.kind) } : {}),
+      ...(schedule.fileTypes ? { typesText: describeFileTypes(schedule.fileTypes) } : {}),
       running: store.listScans().some((s) => s.scheduleId === schedule.id && manager.isActive(s.id)),
       lastRun: withScan(all[0]),
       problems: scheduleProblems(store, schedule),
@@ -177,11 +196,11 @@ export function schedulesRouter({ store, manager, scheduler }) {
   router.get('/', (req, res) => {
     scheduler.collectOutcomes();
     const kind = req.query.kind === 'mail' || req.query.kind === 'files' ? req.query.kind : '';
-    // Agendamentos de análise (padrão) ou políticas de retenção (?purpose=retention).
-    const purpose = req.query.purpose === 'retention' ? 'retention' : 'terms';
+    // Agendamentos de análise, por termos ou por tipo (padrão), ou políticas de retenção (?purpose=retention).
+    const policies = req.query.purpose === 'retention';
     const list = store
       .listSchedules()
-      .filter((s) => (s.purpose || 'terms') === purpose && (!kind || s.kind === kind))
+      .filter((s) => (s.purpose === 'retention') === policies && (!kind || s.kind === kind))
       .map((s) => view(s))
       .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
     res.json(list);

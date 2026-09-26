@@ -13,10 +13,11 @@ import {
   applyDeletions,
   deletionTotals,
   summarizeRetention,
+  summarizeTypes,
   DELETION_LABELS,
   MAIL_DELETION_LABELS,
 } from '../report/model.js';
-import { deleteFile, deletionEvent, cleanPaths, keptPaths, isCloudRepo } from '../scan/delete.js';
+import { deleteFile, deletionEvent, cleanPaths, keptPaths, isCloudRepo, guardFor } from '../scan/delete.js';
 import { DrivesConnector, keptCloud, keptCloudTarget, coveredByRepo, cloudTarget } from '../cloud/drives.js';
 import { compileExclusions, DEFAULT_EXCLUDES } from '../scan/walker.js';
 import { createConnector } from '../mail/connectors.js';
@@ -26,6 +27,7 @@ import { PROJECT_ROOT } from '../config.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
 import { exportMailXlsx, exportMailCsv, exportMailHtml } from '../report/mail-exports.js';
 import { RETENTION_EXPORTS } from '../report/retention-exports.js';
+import { TYPE_EXPORTS } from '../report/type-exports.js';
 import { fileDate } from '../retention/policy.js';
 
 const byName = (a, b) => a.localeCompare(b, 'pt-BR');
@@ -77,8 +79,8 @@ function expiredCheck(retention, st) {
   return 'O arquivo não está mais expirado pela política: a data do critério mudou depois da análise (por exemplo, ele foi aberto).';
 }
 
-/** Exportações: as das políticas de retenção têm uma linha por item expirado (sem termos). */
-const exportsOf = (scan) => (scan.retention ? RETENTION_EXPORTS : modelOf(scan));
+/** Exportações: as das políticas de retenção e das buscas por tipo têm uma linha por item (sem termos). */
+const exportsOf = (scan) => (scan.retention ? RETENTION_EXPORTS : scan.fileTypes ? TYPE_EXPORTS : modelOf(scan));
 
 const listFields = (scan) => {
   const { log, ...rest } = scan;
@@ -233,8 +235,12 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   };
   const filtersOf = (scan, query) => {
     const filters = readFilters(query, modelOf(scan).keys);
-    // Retenção: os itens mais antigos primeiro.
+    // Retenção: os itens mais antigos primeiro; busca por tipo: os maiores primeiro.
     if (scan.retention && !filters.sort) filters.sort = 'oldest';
+    if (scan.fileTypes && !filters.sort) {
+      filters.sort = 'size';
+      filters.dir = 'desc';
+    }
     return filters;
   };
 
@@ -324,6 +330,57 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     }
   });
 
+  /**
+   * Exclusão manual de um arquivo (pasta do Windows, OneDrive ou SharePoint), conferindo o cadastro.
+   * Lança HttpError quando não é possível tentar (repositório removido ou alterado, exclusão não
+   * permitida, pasta ignorada, forma de exclusão diferente da mostrada na confirmação). Devolve
+   * { result, method }. cache: conectores e proteções da nuvem reaproveitados (exclusão em lote).
+   */
+  async function removeFile(scan, record, { force = false, expectMethod, signal = null, cache = null } = {}) {
+    const repo = store.getRepository(record.repositoryId);
+    if (!repo) throw new HttpError(409, 'O repositório deste arquivo foi excluído do cadastro.');
+    if (cloudChanged(record, repo)) {
+      throw new HttpError(
+        409,
+        record.cloud
+          ? `O cadastro do repositório "${repo.name}" mudou depois da análise (tipo, locatário, contas ou sites): faça uma nova análise para excluir.`
+          : `O cadastro do repositório "${repo.name}" mudou depois da análise (agora é ${repo.type === 'sharepoint' ? 'SharePoint' : 'OneDrive'}): faça uma nova análise para excluir.`,
+      );
+    }
+    if (!repo.allowDelete) throw new HttpError(403, `A exclusão não está permitida no repositório "${repo.name}". Ative "Permitir exclusão" em Repositórios.`);
+    if (excludedNow(repo, record)) throw new HttpError(409, EXCLUDED_NOW(repo));
+    const method = record.cloud ? (repo.deleteMode === 'permanent' ? 'permanent' : 'trash') : 'file';
+    // O modo mostrado na confirmação precisa ser o que vai ser usado (o cadastro pode ter mudado).
+    if (expectMethod !== undefined && expectMethod !== method) {
+      throw new HttpError(409, `A forma de exclusão mudou no cadastro (agora: ${METHOD_TEXT[method]}). Confira e confirme de novo.`, 'method-changed');
+    }
+    if (record.cloud) {
+      let entry = cache?.get(repo.id);
+      if (!entry) {
+        let secrets;
+        try {
+          secrets = store.openRepositorySecrets(repo);
+        } catch (err) {
+          throw new HttpError(409, err.message);
+        }
+        const connector = new DrivesConnector({ ...repo, secrets }, { signal, endpoints });
+        entry = { connector, kept: await connector.resolveKept(keptCloud(repo, store.listRepositories())) };
+        cache?.set(repo.id, entry);
+      }
+      const kept = keptCloudTarget(record.cloud, entry.kept);
+      return { result: kept ? { status: 'failed', error: kept.error } : await entry.connector.deleteItem(cloudTarget(record), method, { force }), method };
+    }
+    const result = await deleteFile(record.path, {
+      root: repo.path,
+      expected: { size: record.size, modified: record.modified },
+      force,
+      protect: [...cleanPaths({ dataDir: store.dataDir, appDir: PROJECT_ROOT }), ...keptPaths(repo, store.listRepositories())],
+      // Relatório de retenção: o arquivo ainda está expirado pela política (ex.: não foi aberto depois)?
+      check: scan.retention ? (st) => expiredCheck(scan.retention, st) : null,
+    });
+    return { result, method };
+  }
+
   async function deleteItem(req, res, scan, rid) {
     const [records, deletions] = await Promise.all([store.readResults(scan.id), store.readDeletions(scan.id)]);
     applyDeletions(records, deletions);
@@ -367,46 +424,10 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       } finally {
         await connector.close?.();
       }
-    } else if (record.cloud) {
-      const repo = store.getRepository(record.repositoryId);
-      if (!repo) throw new HttpError(409, 'O repositório deste arquivo foi excluído do cadastro.');
-      if (cloudChanged(record, repo)) {
-        throw new HttpError(409, `O cadastro do repositório "${repo.name}" mudou depois da análise (tipo, locatário, contas ou sites): faça uma nova análise para excluir.`);
-      }
-      if (!repo.allowDelete) throw new HttpError(403, `A exclusão não está permitida no repositório "${repo.name}". Ative "Permitir exclusão" em Repositórios.`);
-      if (excludedNow(repo, record)) throw new HttpError(409, EXCLUDED_NOW(repo));
-      method = repo.deleteMode === 'permanent' ? 'permanent' : 'trash';
-      checkMethod(method);
-      label = `do arquivo ${record.path}`;
-      item = record.path;
-      let secrets;
-      try {
-        secrets = store.openRepositorySecrets(repo);
-      } catch (err) {
-        throw new HttpError(409, err.message);
-      }
-      const connector = new DrivesConnector({ ...repo, secrets }, { signal: AbortSignal.timeout(120000), endpoints });
-      const kept = keptCloudTarget(record.cloud, await connector.resolveKept(keptCloud(repo, store.listRepositories())));
-      result = kept ? { status: 'failed', error: kept.error } : await connector.deleteItem(cloudTarget(record), method, { force: req.body?.force === true });
-      if (result.status === 'changed') return res.status(409).json({ error: `${result.error} Confirme para excluir mesmo assim.`, code: 'changed' });
     } else {
-      const repo = store.getRepository(record.repositoryId);
-      if (!repo) throw new HttpError(409, 'O repositório deste arquivo foi excluído do cadastro.');
-      if (cloudChanged(record, repo)) throw new HttpError(409, `O cadastro do repositório "${repo.name}" mudou depois da análise (agora é ${repo.type === 'sharepoint' ? 'SharePoint' : 'OneDrive'}): faça uma nova análise para excluir.`);
-      if (!repo.allowDelete) throw new HttpError(403, `A exclusão não está permitida no repositório "${repo.name}". Ative "Permitir exclusão" em Repositórios.`);
-      if (excludedNow(repo, record)) throw new HttpError(409, EXCLUDED_NOW(repo));
-      method = 'file';
-      checkMethod(method);
+      ({ result, method } = await removeFile(scan, record, { force: req.body?.force === true, expectMethod: req.body?.method, signal: AbortSignal.timeout(120000) }));
       label = `do arquivo ${record.path}`;
       item = record.path;
-      result = await deleteFile(record.path, {
-        root: repo.path,
-        expected: { size: record.size, modified: record.modified },
-        force: req.body?.force === true,
-        protect: [...cleanPaths({ dataDir: store.dataDir, appDir: PROJECT_ROOT }), ...keptPaths(repo, store.listRepositories())],
-        // Relatório de retenção: o arquivo ainda está expirado pela política (ex.: não foi aberto depois)?
-        check: scan.retention ? (st) => expiredCheck(scan.retention, st) : null,
-      });
       if (result.status === 'changed') return res.status(409).json({ error: `${result.error} Confirme para excluir mesmo assim.`, code: 'changed' });
     }
     const event = deletionEvent(record.id, result, { mode: 'manual', method, by, item });
@@ -424,6 +445,187 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     res.json({ deletion: event });
   }
 
+  // ---------- Exclusão em lote (relatórios de arquivos) ----------
+  //
+  // Depois da revisão, a pessoa exclui os arquivos selecionados (ou todos os do filtro atual) de uma
+  // vez: a exclusão roda em segundo plano, um arquivo por vez, com as mesmas conferências da exclusão
+  // item a item; o relatório acompanha o progresso e pode cancelar. Uma por relatório.
+  const bulkJobs = new Map(); // análise -> { total, done, deleted, missing, changed, failed, skipped, running... }
+  const BULK_MAX = 100000;
+  const BULK_KEY = (scanId) => `${scanId}:lote`;
+  const publicJob = (job) => {
+    if (!job) return null;
+    // eslint-disable-next-line no-unused-vars
+    const { abort, ...rest } = job;
+    return rest;
+  };
+
+  /** Os arquivos do pedido: os selecionados (ids) ou todos os do filtro (all + filters). */
+  async function bulkTargets(scan, body) {
+    if (scan.kind === 'mail') throw new HttpError(400, 'A exclusão em lote vale para os relatórios de arquivos.');
+    const [records, deletions] = await Promise.all([store.readResults(scan.id), store.readDeletions(scan.id)]);
+    applyDeletions(records, deletions);
+    let list;
+    if (Array.isArray(body?.ids)) {
+      const wanted = new Set(body.ids.map(Number).filter(Number.isInteger));
+      list = records.filter((r) => wanted.has(r.id));
+    } else if (body?.all === true) {
+      const filters = readFilters(body.filters && typeof body.filters === 'object' ? body.filters : {}, modelOf(scan).keys);
+      if (scan.retention && !filters.sort) filters.sort = 'oldest';
+      const { page, pageSize, ...criteria } = filters;
+      list = modelOf(scan).filter(records, criteria);
+    } else {
+      throw new HttpError(400, 'Escolha os arquivos a excluir (selecionados ou todos os do filtro).');
+    }
+    // Os que já saíram (excluídos ou não encontrados) não entram.
+    return list.filter((r) => r.deletion?.status !== 'deleted' && r.deletion?.status !== 'missing');
+  }
+
+  /** Arquivos que podem ser tentados e, por repositório, a forma de exclusão e os que não podem. */
+  function bulkPlan(scan, targets) {
+    const repos = new Map();
+    const ready = [];
+    const blocked = { removed: 0, changed: 0, excluded: 0, 'not-allowed': 0, protected: 0 };
+    const all = store.listRepositories();
+    const clean = cleanPaths({ dataDir: store.dataDir, appDir: PROJECT_ROOT });
+    for (const r of targets) {
+      const target = deletionTarget(scan, r);
+      const repo = store.getRepository(r.repositoryId);
+      let reason = target.blocked || null;
+      // Pastas protegidas (repositório sem "Permitir exclusão" dentro deste, pastas do CLEAN).
+      if (!reason && !r.cloud && guardFor([...clean, ...keptPaths(repo, all)], r.path)) reason = 'protected';
+      if (reason) {
+        blocked[reason] = (blocked[reason] || 0) + 1;
+        continue;
+      }
+      ready.push(r);
+      const g = repos.get(repo.id) || { id: repo.id, name: repo.name, type: repo.type || 'local', method: target.method, count: 0 };
+      g.count++;
+      repos.set(repo.id, g);
+    }
+    return { ready, repositories: [...repos.values()], blocked };
+  }
+
+  // Prévia: quantos arquivos serão excluídos, como (por repositório) e quantos não podem ser.
+  router.post('/:id/bulk-delete/preview', async (req, res) => {
+    const scan = getScan(req);
+    const targets = await bulkTargets(scan, req.body);
+    const { ready, repositories, blocked } = bulkPlan(scan, targets);
+    res.json({ total: targets.length, ready: ready.length, repositories, blocked, max: BULK_MAX });
+  });
+
+  router.post('/:id/bulk-delete', async (req, res) => {
+    const scan = getScan(req);
+    if (manager.isActive(scan.id)) throw new HttpError(409, 'Aguarde o fim da análise para excluir itens pelo relatório.');
+    if (bulkJobs.get(scan.id)?.running) throw new HttpError(409, 'Já há uma exclusão em lote em andamento neste relatório.');
+    if (String(req.body?.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') throw new HttpError(400, 'Digite EXCLUIR para confirmar a exclusão em lote.');
+    const targets = await bulkTargets(scan, req.body);
+    const { ready, repositories } = bulkPlan(scan, targets);
+    if (!ready.length) throw new HttpError(400, 'Nenhum dos arquivos escolhidos pode ser excluído (já excluídos, sem "Permitir exclusão" ou protegidos).');
+    if (ready.length > BULK_MAX) throw new HttpError(400, `Exclua no máximo ${BULK_MAX.toLocaleString('pt-BR')} arquivos por vez (filtre o relatório).`);
+    // A forma de exclusão mostrada na confirmação precisa ser a que vai ser usada em cada repositório.
+    const shown = req.body?.methods && typeof req.body.methods === 'object' ? req.body.methods : null;
+    const changed = shown ? repositories.find((g) => shown[g.id] !== g.method) : null;
+    if (changed) throw new HttpError(409, `A forma de exclusão de "${changed.name}" mudou no cadastro (agora: ${METHOD_TEXT[changed.method]}). Confira e confirme de novo.`, 'method-changed');
+    const by = actor(req);
+    const job = {
+      total: ready.length,
+      done: 0,
+      deleted: 0,
+      missing: 0,
+      changed: 0,
+      failed: 0,
+      skipped: 0,
+      running: true,
+      cancelled: false,
+      by,
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      abort: new AbortController(),
+    };
+    bulkJobs.set(scan.id, job);
+    // Enquanto houver exclusão em lote, o relatório não pode ser excluído (nem pela limpeza dos agendamentos).
+    deleting.add(BULK_KEY(scan.id));
+    store.appendLog(scan.id, { level: 'info', message: `Exclusão em lote iniciada por ${by}: ${ready.length} arquivo(s).` });
+    runBulk(scan, ready, job).catch((err) => console.error('[CLEAN] Falha na exclusão em lote:', err));
+    res.status(202).json(publicJob(job));
+  });
+
+  router.get('/:id/bulk-delete', (req, res) => {
+    const scan = getScan(req);
+    res.json(publicJob(bulkJobs.get(scan.id)));
+  });
+
+  router.post('/:id/bulk-delete/cancel', (req, res) => {
+    const scan = getScan(req);
+    const job = bulkJobs.get(scan.id);
+    if (!job?.running) throw new HttpError(409, 'Não há exclusão em lote em andamento neste relatório.');
+    job.cancelled = true; // a exclusão em andamento termina (e é registrada); as demais não começam
+    res.json(publicJob(job));
+  });
+
+  /** Exclui os arquivos um a um, gravando cada resultado (em lotes) no registro da análise. */
+  async function runBulk(scan, records, job) {
+    const cache = new Map(); // conectores do OneDrive/SharePoint e proteções, por repositório
+    let pending = [];
+    const flush = async () => {
+      if (!pending.length) return;
+      const events = pending;
+      pending = [];
+      memo.forget(scan.id);
+      try {
+        await store.appendDeletions(scan.id, events);
+      } catch (err) {
+        console.error('[CLEAN] Falha ao gravar o registro de exclusões:', err.message);
+        store.appendLog(scan.id, { level: 'error', message: `Exclusão em lote: falha ao gravar o registro de ${events.length} exclusão(ões): ${err.message}` });
+      }
+    };
+    try {
+      for (const record of records) {
+        if (job.cancelled) break;
+        const key = `${scan.id}:${record.id}`;
+        // O mesmo arquivo sendo excluído pelo relatório, item a item, neste momento: fica de fora.
+        if (deleting.has(key)) {
+          job.skipped++;
+          job.done++;
+          continue;
+        }
+        deleting.add(key);
+        let result;
+        let method = record.cloud ? 'trash' : 'file';
+        try {
+          ({ result, method } = await removeFile(scan, record, { signal: job.abort.signal, cache }));
+        } catch (err) {
+          // O cadastro mudou durante o lote (ex.: "Permitir exclusão" desligada): falha com o motivo.
+          result = { status: 'failed', error: err instanceof HttpError ? err.message : friendlyError(err) };
+        } finally {
+          deleting.delete(key);
+        }
+        job[result.status === 'deleted' ? 'deleted' : result.status === 'missing' ? 'missing' : result.status === 'changed' ? 'changed' : 'failed']++;
+        job.done++;
+        pending.push(deletionEvent(record.id, result, { mode: 'manual', method, by: `${job.by} (exclusão em lote)`, item: record.path }));
+        if (pending.length >= 50) await flush();
+      }
+    } finally {
+      await flush();
+      job.abort.abort();
+      job.running = false;
+      job.finishedAt = new Date().toISOString();
+      deleting.delete(BULK_KEY(scan.id));
+      const parts = [
+        `${job.deleted} excluído(s)`,
+        job.missing ? `${job.missing} já não existia(m)` : '',
+        job.changed ? `${job.changed} mantido(s) por terem mudado depois da análise` : '',
+        job.failed ? `${job.failed} falha(s)` : '',
+        job.skipped ? `${job.skipped} em exclusão item a item` : '',
+      ].filter(Boolean);
+      store.appendLog(scan.id, {
+        level: job.failed ? 'warn' : 'info',
+        message: `Exclusão em lote por ${job.by} ${job.cancelled ? `cancelada depois de ${job.done} de ${job.total}` : 'concluída'}: ${parts.join(', ')}.`,
+      });
+    }
+  }
+
   // Resumo do recorte filtrado (gráficos) e opções de filtro calculadas sobre todos os resultados.
   router.get('/:id/summary', async (req, res) => {
     const scan = getScan(req);
@@ -435,6 +637,8 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       ...model.summarize(list),
       // Retenção: itens expirados por faixa de idade.
       ...(scan.retention ? { retention: summarizeRetention(list, scan.kind === 'mail' ? 'mail' : 'files') } : {}),
+      // Busca por tipo: arquivos por tipo, extensão, usuário e repositório.
+      ...(scan.fileTypes ? { types: summarizeTypes(list) } : {}),
     }));
     const options = memo.get(`${scan.id}|${records.length}|o`, () => model.options(records));
     res.json({ ...summary, options, deletions: deletionTotals(records) });
