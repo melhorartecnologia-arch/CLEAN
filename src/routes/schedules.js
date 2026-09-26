@@ -3,11 +3,12 @@ import { Router } from 'express';
 import { HttpError, bad, text } from './validate.js';
 import { actor } from './scans.js';
 import { ScanError, sanitizeOptions, sanitizeMailOptions } from '../scan/manager.js';
-import { validateRule, RuleError, describeRule, upcoming, endOf, nextOccurrence } from '../schedule/recurrence.js';
-import { targetOf, deletionPins, scheduleProblems } from '../schedule/scheduler.js';
+import { validateRule, RuleError, describeRule, upcoming, lastOccurrence, nextOccurrence } from '../schedule/recurrence.js';
+import { targetOf, deletionPins, deletionCriteria, scheduleProblems, remainingOf } from '../schedule/scheduler.js';
 
 const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
 const KEEP_MAX = 500;
+const NEVER = 'Pela regra informada, o agendamento nunca seria executado (a data e a hora já passaram). Confira a data de início, o horário e o término.';
 
 function parseRule(input) {
   try {
@@ -27,10 +28,10 @@ function parsePeriod(input) {
     return { type: 'days', days };
   }
   if (p.type === 'since-last') {
+    // A análise completa periódica é obrigatória: ela pega o que as incrementais não veem (itens
+    // com erro de leitura, pastas movidas inteiras, mensagens movidas entre pastas).
     const fullEvery = p.fullEvery === undefined || p.fullEvery === null || p.fullEvery === '' ? 7 : Number(p.fullEvery);
-    if (!Number.isInteger(fullEvery) || fullEvery === 1 || fullEvery < 0 || fullEvery > 50) {
-      throw bad('A análise completa periódica deve ser a cada 2 a 50 execuções (ou 0, para nunca).');
-    }
+    if (!Number.isInteger(fullEvery) || fullEvery < 2 || fullEvery > 50) throw bad('A análise completa periódica deve ser a cada 2 a 50 execuções.');
     return { type: 'since-last', fullEvery };
   }
   return { type: 'all' };
@@ -84,7 +85,9 @@ function parseSchedule(body = {}, { store, existing = null, by }) {
     const where = kind === 'mail' ? 'da conexão de e-mail' : 'do repositório';
     if (blocked.length) throw bad(`A exclusão não está permitida em ${blocked.join(', ')}. Ative "Permitir exclusão" no cadastro ${where} ou escolha "Somente analisar".`);
     if (String(body.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') throw bad('Para agendar a análise com exclusão automática, digite EXCLUIR na confirmação.');
-    data.deleteConfirmation = { by, at: new Date().toISOString(), targets: deletionPins(kind, targets) };
+    // Registra o alcance e a forma de exclusão de cada local e os critérios (termos, exclusões e
+    // locais protegidos) no momento da confirmação: se algo disso mudar, a exclusão fica suspensa.
+    data.deleteConfirmation = { by, at: new Date().toISOString(), targets: deletionPins(kind, targets), criteria: deletionCriteria(store, data) };
   }
   return data;
 }
@@ -110,22 +113,31 @@ export function schedulesRouter({ store, manager, scheduler }) {
   const view = (schedule, { history = false } = {}) => {
     const { deleteConfirmation, names, history: all = [], ...rest } = schedule;
     const named = (id, item) => ({ id, name: item?.name || names?.[id] || id, missing: !item });
-    const started = all.find((h) => h.status === 'started');
-    const end = schedule.rule ? endOf(schedule.rule) : null;
+    const remaining = remainingOf(schedule);
+    let description = '';
+    let end = null;
+    try {
+      description = describeRule(schedule.rule);
+      end = schedule.enabled && schedule.nextRunAt ? lastOccurrence(schedule.rule, { after: now(), remaining }) : null;
+    } catch {
+      // regra inválida (dados corrompidos): aparece em "problems"
+    }
     return {
       ...rest,
-      targets: schedule.targetIds.map((id) => named(id, targetOf(store, schedule.kind, id))),
-      lists: schedule.listIds.map((id) => named(id, store.getList(id))),
+      targets: (schedule.targetIds || []).map((id) => named(id, targetOf(store, schedule.kind, id))),
+      lists: (schedule.listIds || []).map((id) => named(id, store.getList(id))),
       deleteConfirmation: deleteConfirmation ? { by: deleteConfirmation.by, at: deleteConfirmation.at } : null,
-      description: describeRule(schedule.rule),
+      description,
+      remaining: Number.isFinite(remaining) ? remaining : null,
       endsAt: end ? end.toISOString() : null,
       state: !schedule.enabled ? 'paused' : schedule.nextRunAt ? 'active' : 'finished',
-      running: Boolean(started && manager.isActive(started.scanId)),
+      running: store.listScans().some((s) => s.scheduleId === schedule.id && manager.isActive(s.id)),
       lastRun: withScan(all[0]),
       problems: scheduleProblems(store, schedule),
       ...(history ? { history: all.map(withScan) } : {}),
     };
   };
+  const sameRule = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
   const translate = (err) => {
     if (err instanceof ScanError) return new HttpError(err.status || 400, err.message);
@@ -143,21 +155,23 @@ export function schedulesRouter({ store, manager, scheduler }) {
     res.json(list);
   });
 
-  // Descrição da regra e as próximas execuções (prévia no formulário, antes de salvar).
+  // Descrição da regra e as próximas execuções (prévia no formulário, antes de salvar). Na edição
+  // (scheduleId) com a mesma regra, "depois de N execuções" desconta as já feitas.
   router.post('/preview', (req, res) => {
     const rule = parseRule(req.body?.rule);
     const from = now();
-    const next = upcoming(rule, from, 5).map((d) => d.toISOString());
-    const end = endOf(rule);
-    res.json({ rule, description: describeRule(rule), next, endsAt: end ? end.toISOString() : null });
+    const existing = typeof req.body?.scheduleId === 'string' ? store.getSchedule(req.body.scheduleId) : null;
+    const remaining = remainingOf({ rule, countDone: existing && sameRule(existing.rule, rule) ? existing.countDone : 0 });
+    const next = upcoming(rule, from, 5, { remaining }).map((d) => d.toISOString());
+    const end = lastOccurrence(rule, { after: from, remaining });
+    res.json({ rule, description: describeRule(rule), next, endsAt: end ? end.toISOString() : null, remaining: Number.isFinite(remaining) ? remaining : null });
   });
 
   router.post('/', (req, res) => {
     const by = actor(req);
     const data = parseSchedule(req.body || {}, { store, by });
-    const first = nextOccurrence(data.rule, now());
-    if (!first) throw bad('Pela regra informada, o agendamento nunca seria executado (a data e a hora já passaram). Confira a data de início, o horário e o término.');
-    const schedule = store.createSchedule({ ...data, enabled: req.body?.enabled !== false, createdBy: by, updatedBy: by, runCount: 0, history: [], nextRunAt: null });
+    if (!nextOccurrence(data.rule, now(), { remaining: remainingOf({ rule: data.rule }) })) throw bad(NEVER);
+    const schedule = store.createSchedule({ ...data, enabled: req.body?.enabled !== false, createdBy: by, updatedBy: by, runCount: 0, countDone: 0, history: [], nextRunAt: null });
     store.updateScheduleState(schedule.id, { nextRunAt: scheduler.plan(schedule) });
     res.status(201).json(view(schedule));
   });
@@ -171,14 +185,26 @@ export function schedulesRouter({ store, manager, scheduler }) {
     const existing = find(req.params.id);
     const by = actor(req);
     const data = parseSchedule(req.body || {}, { store, existing, by });
-    const schedule = store.updateSchedule(existing.id, { ...data, updatedBy: by });
-    store.updateScheduleState(schedule.id, { nextRunAt: scheduler.plan(schedule) });
+    const same = sameRule(existing.rule, data.rule);
+    const countDone = same ? existing.countDone || 0 : 0; // regra nova: a contagem recomeça
+    const planned = scheduler.plan({ ...existing, ...data, countDone });
+    // Regra alterada que nunca mais executaria: recusada (com a mesma regra, um agendamento já
+    // encerrado pode ser renomeado ou ajustado).
+    if (existing.enabled && !same && !planned) throw bad(NEVER);
+    // Horário que acabou de chegar e ainda não foi executado: continua valendo (o agendador o
+    // executa na próxima verificação).
+    const due = same && existing.enabled && existing.nextRunAt && Date.parse(existing.nextRunAt) <= +now();
+    const schedule = store.updateSchedule(existing.id, { ...data, countDone, updatedBy: by });
+    store.updateScheduleState(schedule.id, { nextRunAt: due ? existing.nextRunAt : planned });
+    scheduler.reviewRuns(schedule.id);
     res.json(view(schedule));
   });
 
   router.post('/:id/pause', (req, res) => {
     const schedule = find(req.params.id);
     store.updateSchedule(schedule.id, { enabled: false, nextRunAt: null, updatedBy: actor(req) });
+    // Uma execução com exclusão em andamento deixa de excluir; na fila, começa sem excluir.
+    scheduler.reviewRuns(schedule.id);
     res.json(view(schedule));
   });
 
@@ -204,6 +230,7 @@ export function schedulesRouter({ store, manager, scheduler }) {
   router.delete('/:id', (req, res) => {
     const schedule = find(req.params.id);
     store.deleteSchedule(schedule.id);
+    scheduler.reviewRuns(schedule.id);
     res.status(204).end();
   });
 

@@ -1370,6 +1370,9 @@ dialog::backdrop {
 .toast.error {
   border-left-color: var(--critical);
 }
+.toast.warn {
+  border-left-color: var(--warn);
+}
 .toast.success {
   border-left-color: var(--good);
 }

@@ -16,7 +16,7 @@ function periodText(s) {
   const p = s.period || {};
   const items = s.kind === 'mail' ? 'mensagens recebidas' : 'arquivos alterados';
   if (p.type === 'days') return `Somente ${items} nos últimos ${fmtNum(p.days)} dias`;
-  if (p.type === 'since-last') return `Incremental (${items} desde a execução anterior)${p.fullEvery ? `; completa a cada ${fmtNum(p.fullEvery)} execuções` : ''}`;
+  if (p.type === 'since-last') return `Incremental (${items} desde a execução anterior); completa a cada ${fmtNum(p.fullEvery || 7)} execuções`;
   return s.kind === 'mail' ? 'Todas as mensagens' : 'Todos os arquivos';
 }
 
@@ -57,6 +57,7 @@ export async function render(root, { ctx }) {
       </td>
       <td>
         ${s.description}
+        ${s.remaining !== null && s.state === 'active' ? html`<div class="muted small">${s.remaining === 1 ? 'Falta 1 execução' : `Faltam ${fmtNum(s.remaining)} execuções`}</div>` : ''}
         <div class="muted small">${periodText(s)}</div>
       </td>
       <td class="nowrap">

@@ -72,18 +72,19 @@ function iso(date) {
 }
 
 /**
- * Data usada no filtro "a partir de": a mais recente entre a modificação, a criação (um arquivo
- * copiado para o repositório mantém a data de modificação original) e a alteração do registro do
- * arquivo (movido ou renomeado). Assim, as análises incrementais dos agendamentos não deixam de
- * ver arquivos que chegaram ao repositório com uma data de modificação antiga.
+ * Data usada no filtro "a partir de": a mais recente entre a modificação e a criação (um arquivo
+ * copiado para o repositório mantém a data de modificação original, mas a criação é a da cópia).
+ * Assim, as análises incrementais dos agendamentos não deixam de ver arquivos copiados com uma
+ * data de modificação antiga. Mudanças só de permissões ou atributos não contam.
  */
 export function changedAt(st) {
-  return Math.max(st.mtimeMs || 0, st.birthtimeMs || 0, st.ctimeMs || 0);
+  return Math.max(st.mtimeMs || 0, st.birthtimeMs || 0);
 }
 
-/** O mesmo para os arquivos do OneDrive/SharePoint (modificação ou envio para a biblioteca). */
+/** O mesmo para os arquivos do OneDrive/SharePoint; sem nenhuma data válida, conta como alterado. */
 export function cloudChangedAt(item) {
-  return Math.max(Date.parse(item.lastModifiedDateTime) || 0, Date.parse(item.createdDateTime) || 0);
+  const time = Math.max(Date.parse(item.lastModifiedDateTime) || 0, Date.parse(item.createdDateTime) || 0);
+  return time || Infinity;
 }
 
 function uncHost(p) {
@@ -110,6 +111,7 @@ export function newStats(repositoriesTotal = 0) {
     errors: 0,
     libraries: 0, // bibliotecas do OneDrive/SharePoint analisadas
     accountsSkipped: 0, // contas sem OneDrive
+    gaps: 0, // repositórios, contas ou sites que não puderam ser lidos (a análise ficou incompleta)
     deleted: 0, // excluídos na análise ("analisar e excluir")
     deleteMissing: 0, // já não existiam na hora da exclusão
     deleteChanged: 0, // alterados depois de analisados: mantidos
@@ -169,7 +171,13 @@ export class Scanner {
   }
 
   /** A exclusão foi desligada no cadastro durante a análise: nada mais é excluído daquele repositório. */
-  revokeDeletion({ kind, id, reason }) {
+  revokeDeletion({ kind, id, reason, all = false }) {
+    if (all) {
+      const active = this.repositories.filter((r) => r.allowDelete);
+      for (const repo of active) repo.allowDelete = false;
+      if (active.length && this.options.deleteMatches) this.log('warn', `Exclusão automática desativada: ${reason}. A análise continua sem excluir.`);
+      return;
+    }
     const repo = kind === 'repository' ? this.repoById.get(id) : null;
     if (!repo?.allowDelete) return;
     repo.allowDelete = false;
@@ -229,6 +237,7 @@ export class Scanner {
       if (!st.isDirectory()) throw Object.assign(new Error('O caminho não é uma pasta'), { code: 'ENOTDIR' });
     } catch (err) {
       this.error(repo.path, err);
+      this.stats.gaps++;
       this.log('error', `Repositório "${repo.name}" inacessível: ${friendlyError(err)}`);
       return;
     }
@@ -299,6 +308,7 @@ export class Scanner {
         }
         if (drive.error) {
           this.error(drive.account, drive.error);
+          this.stats.gaps++;
           this.log('warn', `${drive.account} inacessível: ${friendlyError(drive.error)}`);
           continue;
         }
@@ -311,6 +321,7 @@ export class Scanner {
     } catch (err) {
       if (this.cancelled) return;
       this.error(repo.name, err);
+      this.stats.gaps++;
       this.log('error', `Repositório "${repo.name}" inacessível: ${friendlyError(err)}`);
     }
     if (skipped > 20) this.log('info', `${skipped} conta(s) sem OneDrive foram ignoradas.`);

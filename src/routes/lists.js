@@ -1,6 +1,7 @@
 // Rotas /api/lists: listas de referência (termos procurados no nome e no conteúdo dos arquivos).
 import { Router } from 'express';
 import { HttpError, parseList, parseTerms, assertUnused } from './validate.js';
+import { checkDeleteSchedules } from '../schedule/scheduler.js';
 import { Worker } from 'node:worker_threads';
 
 /** Roda o teste em uma worker thread com tempo limite. */
@@ -51,7 +52,10 @@ export function listsRouter({ store }) {
 
   router.put('/:id', (req, res) => {
     if (!store.getList(req.params.id)) throw new HttpError(404, 'Lista não encontrada.');
-    res.json(store.updateList(req.params.id, parseList(req.body)));
+    const data = parseList(req.body);
+    // Termos novos ou alterados suspendem a exclusão automática dos agendamentos que usam a lista.
+    const { result, warning } = checkDeleteSchedules(store, () => store.updateList(req.params.id, data));
+    res.json({ ...result, ...(warning ? { scheduleWarning: warning } : {}) });
   });
 
   router.delete('/:id', (req, res) => {

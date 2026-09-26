@@ -4,11 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store } from '../src/store.js';
-import { ScanManager } from '../src/scan/manager.js';
+import { ScanManager, sanitizeOptions } from '../src/scan/manager.js';
 import { createApp } from '../src/app.js';
-import { Scheduler, INCREMENTAL_MARGIN_MS } from '../src/schedule/scheduler.js';
+import { Scheduler, INCREMENTAL_MARGIN_MS, deletionPins, deletionCriteria } from '../src/schedule/scheduler.js';
 import { validateRule } from '../src/schedule/recurrence.js';
-import { deletionPins } from '../src/schedule/scheduler.js';
 
 let root;
 const stores = [];
@@ -45,9 +44,9 @@ function stubManager(store) {
       active.add(scan.id);
       return scan;
     },
-    finish(id, { status = 'completed', startedAt, errors = 0 } = {}) {
+    finish(id, { status = 'completed', startedAt, errors = 0, gaps = 0 } = {}) {
       active.delete(id);
-      store.updateScan(id, { status, startedAt: startedAt.toISOString(), finishedAt: startedAt.toISOString(), stats: { filesMatched: 2, errors } });
+      store.updateScan(id, { status, startedAt: startedAt.toISOString(), finishedAt: startedAt.toISOString(), stats: { filesMatched: 2, errors, gaps } });
     },
   };
 }
@@ -67,24 +66,30 @@ async function world({ period = { type: 'all' }, rule, catchUp = true, keepLast 
     enabled: true,
     targetIds: [repo.id],
     listIds: [list.id],
-    options: { checkName: true, checkContent: true, nameTarget: 'file', deleteMatches: false },
+    options: sanitizeOptions({ checkName: true, checkContent: true, nameTarget: 'file' }),
     action,
     rule: validateRule(rule || { frequency: 'daily', startDate: '2026-09-25', time: '02:00' }),
     period,
     catchUp,
     keepLast,
     names: { [repo.id]: repo.name, [list.id]: list.name },
-    deleteConfirmation: action === 'delete' ? { by: 'acesso local', at: clock.now.toISOString(), targets: deletionPins('files', [repo]) } : null,
+    deleteConfirmation: null,
     history: [],
     runCount: 0,
+    countDone: 0,
   });
+  const confirm = () =>
+    store.updateSchedule(schedule.id, {
+      deleteConfirmation: { by: 'acesso local', at: clock.now.toISOString(), targets: deletionPins('files', schedule.targetIds.map((id) => store.getRepository(id))), criteria: deletionCriteria(store, schedule) },
+    });
+  if (action === 'delete') confirm();
   store.updateScheduleState(schedule.id, { nextRunAt: scheduler.plan(schedule) });
   const run = async (date) => {
     clock.now = date;
     await scheduler.tick();
     return store.getSchedule(schedule.id);
   };
-  return { store, repo, list, manager, clock, scheduler, schedule, run };
+  return { store, repo, list, manager, clock, scheduler, schedule, run, confirm };
 }
 
 test('execução no horário, próxima execução e registro no histórico', async () => {
@@ -207,7 +212,24 @@ test('período: últimos N dias e incremental com análise completa periódica',
   store.updateList(list.id, { terms: [...list.terms, { id: 't2', type: 'text', value: 'CPF' }] });
   s = await run(at(2026, 10, 2, 2, 0, 5));
   assert.equal(from(6), null);
-  assert.match(s.history[0].message, /não há execução anterior concluída com os mesmos locais, termos e opções/);
+  assert.match(s.history[0].message, /não há execução anterior concluída, sem falhas de acesso, com os mesmos locais, termos e opções/);
+
+  // Execução concluída mas sem conseguir ler um repositório inteiro: não serve de base.
+  manager.finish(store.getSchedule(inc.schedule.id).history[0].scanId, { startedAt: at(2026, 10, 2, 2, 0, 6) });
+  await run(at(2026, 10, 3, 2, 0, 5));
+  assert.equal(from(7), new Date(+at(2026, 10, 2, 2, 0, 6) - INCREMENTAL_MARGIN_MS).toISOString());
+  manager.finish(store.getSchedule(inc.schedule.id).history[0].scanId, { startedAt: at(2026, 10, 3, 2, 0, 6), errors: 1, gaps: 1 });
+  await run(at(2026, 10, 4, 2, 0, 5));
+  assert.equal(from(8), new Date(+at(2026, 10, 2, 2, 0, 6) - INCREMENTAL_MARGIN_MS).toISOString(), 'a base continua a execução de 02/10');
+
+  // Passar a excluir: a primeira execução é completa (exclui também o que já tinha sido encontrado).
+  manager.finish(store.getSchedule(inc.schedule.id).history[0].scanId, { startedAt: at(2026, 10, 4, 2, 0, 6) });
+  store.updateRepository(inc.repo.id, { allowDelete: true });
+  store.updateSchedule(inc.schedule.id, { action: 'delete' });
+  inc.confirm();
+  await run(at(2026, 10, 5, 2, 0, 5));
+  assert.equal(manager.calls[9].body.options.deleteMatches, true);
+  assert.equal(from(9), null);
 });
 
 test('exclusão automática só com o que foi confirmado ao salvar', async () => {
@@ -236,7 +258,7 @@ test('exclusão automática só com o que foi confirmado ao salvar', async () =>
   // Repositório na nuvem que passou da lixeira para a exclusão definitiva.
   const cloud = { type: 'sharepoint', name: 'SP', path: 'SharePoint: todos os sites', graph: { tenantId: 'contoso.onmicrosoft.com' }, cloud: { scope: 'all', accounts: [], sites: [], exclude: [] }, deleteMode: 'trash', allowDelete: true };
   w.store.updateRepository(w.repo.id, cloud);
-  w.store.updateSchedule(w.schedule.id, { deleteConfirmation: { by: 'x', at: new Date().toISOString(), targets: deletionPins('files', [w.store.getRepository(w.repo.id)]) } });
+  w.confirm();
   w.store.updateRepository(w.repo.id, { deleteMode: 'permanent' });
   s = await w.run(at(2026, 9, 29, 2, 0, 5));
   assert.match(s.history[0].message, /passou a ser definitiva/);
@@ -251,7 +273,172 @@ test('exclusão automática só com o que foi confirmado ao salvar', async () =>
   assert.match(s.history[0].message, /O repositório "Arquivos" foi excluído do cadastro/);
 });
 
-test('guarda só os últimos relatórios do agendamento', async () => {
+test('exclusão automática: termos, pastas ignoradas e locais protegidos também são confirmados', async () => {
+  const w = await world({ action: 'delete' });
+  const { store, repo, list } = w;
+  const problems = () => new Scheduler({ store, manager: w.manager }).deletionGuard({ scheduleId: w.schedule.id, kind: 'files', repositoryIds: [repo.id], listIds: [list.id], options: store.getSchedule(w.schedule.id).options });
+  assert.equal(problems(), null);
+
+  // Um termo novo na lista (ex.: "." numa expressão regular) ampliaria o que é excluído.
+  store.updateList(list.id, { terms: [...list.terms, { id: 't9', type: 'regex', value: '.' }] });
+  let s = await w.run(at(2026, 9, 26, 2, 0, 5));
+  assert.equal(w.manager.calls.length, 0);
+  assert.equal(s.history[0].status, 'failed');
+  assert.match(s.history[0].message, /Os termos das listas de referência, as pastas ignoradas ou os locais protegidos .* mudaram depois que a exclusão automática foi confirmada/);
+  w.confirm();
+  s = await w.run(at(2026, 9, 27, 2, 0, 5));
+  assert.equal(s.history[0].status, 'started', 'confirmada de novo, volta a executar');
+  w.manager.active.clear();
+
+  // Pasta que deixou de ser ignorada.
+  store.updateRepository(repo.id, { exclude: ['Juridico'] });
+  w.confirm();
+  store.updateRepository(repo.id, { exclude: [] });
+  s = await w.run(at(2026, 9, 28, 2, 0, 5));
+  assert.equal(s.history[0].status, 'failed');
+  w.confirm();
+
+  // Repositório sem exclusão dentro do agendado (protege a pasta dele) removido do cadastro.
+  const inner = store.createRepository({ type: 'local', name: 'Diretoria', path: path.join(repo.path, 'Diretoria'), exclude: [], allowDelete: false });
+  w.confirm();
+  assert.equal(problems(), null);
+  store.deleteRepository(inner.id);
+  assert.match(problems(), /locais protegidos/);
+});
+
+test('execução agendada com exclusão que esperou na fila é conferida quando começa', async () => {
+  const store = await newStore();
+  const dir = path.join(root, `fila-${Math.random().toString(36).slice(2)}`);
+  fs.mkdirSync(dir);
+  const repo = store.createRepository({ type: 'local', name: 'Arquivos', path: dir, exclude: [], allowDelete: true });
+  const list = store.createList({ name: 'Sensíveis', terms: [{ id: 't1', type: 'text', value: 'salário' }] });
+  const manager = new ScanManager(store);
+  const clock = { now: at(2026, 9, 25, 10) };
+  const scheduler = new Scheduler({ store, manager, now: () => new Date(clock.now) });
+  const schedule = store.createSchedule({
+    name: 'Limpeza',
+    kind: 'files',
+    enabled: true,
+    targetIds: [repo.id],
+    listIds: [list.id],
+    options: { checkName: true, checkContent: true, nameTarget: 'file', deleteMatches: false },
+    action: 'delete',
+    rule: validateRule({ frequency: 'daily', startDate: '2026-09-25', time: '02:00' }),
+    period: { type: 'all' },
+    catchUp: true,
+    keepLast: 0,
+    names: {},
+    history: [],
+  });
+  store.updateSchedule(schedule.id, { deleteConfirmation: { by: 'acesso local', at: clock.now.toISOString(), targets: deletionPins('files', [repo]), criteria: deletionCriteria(store, schedule) } });
+  // Vaga ocupada por outra análise: a execução agendada fica na fila.
+  manager.running.set('ocupada', { worker: null, done: false });
+  const scan = await scheduler.runNow(schedule.id, 'acesso local');
+  assert.equal(manager.isActive(scan.id), true);
+  let config = await manager.workerConfig(scan.id);
+  assert.equal(config.options.deleteMatches, true, 'sem mudanças, exclui');
+  assert.equal(config.repositories[0].allowDelete, true);
+
+  // Pausado enquanto esperava: começa sem excluir.
+  store.updateSchedule(schedule.id, { enabled: false });
+  config = await manager.workerConfig(scan.id);
+  assert.equal(config.options.deleteMatches, false);
+  assert.equal(config.repositories[0].allowDelete, false);
+  assert.equal(store.getScan(scan.id).options.deleteMatches, false, 'o relatório mostra que não houve exclusão automática');
+  assert.match(store.getScan(scan.id).log.map((l) => l.message).join(' '), /Exclusão automática desativada nesta execução: o agendamento foi pausado/);
+  manager.queue.length = 0;
+  manager.running.delete('ocupada');
+});
+
+test('conexão de e-mail alterada enquanto a análise com exclusão esperava na fila', async () => {
+  const store = await newStore();
+  const list = store.createList({ name: 'Sensíveis', terms: [{ id: 't1', type: 'text', value: 'salário' }] });
+  const source = store.createMailSource({
+    name: 'M365',
+    type: 'graph',
+    scope: 'list',
+    mailboxes: [{ address: 'financeiro@contoso.com' }],
+    excludeMailboxes: [],
+    excludeFolders: [],
+    graph: { tenantId: 'contoso.onmicrosoft.com', clientId: '11111111-2222-3333-4444-555555555555' },
+    secrets: { clientSecret: store.secrets.seal('segredo') },
+    allowDelete: true,
+    deleteMode: 'trash',
+  });
+  const manager = new ScanManager(store);
+  manager.running.set('ocupada', { worker: null, done: false });
+  const scan = await manager.start({ kind: 'mail', sourceIds: [source.id], listIds: [list.id], options: { checkSubject: true, deleteMatches: true }, confirmDelete: 'EXCLUIR' });
+  let config = await manager.workerConfig(scan.id);
+  assert.equal(config.sources[0].allowDelete, true);
+  store.updateMailSource(source.id, { mailboxes: [{ address: 'ceo@contoso.com' }, { address: 'juridico@contoso.com' }] });
+  config = await manager.workerConfig(scan.id);
+  assert.equal(config.sources[0].allowDelete, false, 'outras caixas: não exclui');
+  assert.match(store.getScan(scan.id).log.map((l) => l.message).join(' '), /a conta, o servidor ou as caixas da conexão foram alterados/);
+  manager.queue.length = 0;
+  manager.running.delete('ocupada');
+});
+
+test('duas execuções do mesmo agendamento não começam juntas', async () => {
+  const w = await world();
+  const results = await Promise.allSettled([w.scheduler.runNow(w.schedule.id, 'a'), w.scheduler.runNow(w.schedule.id, 'b')]);
+  assert.deepEqual(results.map((r) => r.status).sort(), ['fulfilled', 'rejected']);
+  assert.equal(results.find((r) => r.status === 'rejected').reason.status, 409);
+  assert.equal(w.manager.calls.length, 1);
+  // No horário, com a execução manual ainda em andamento: pulada.
+  const s = await w.run(at(2026, 9, 26, 2, 0, 5));
+  assert.equal(w.manager.calls.length, 1);
+  assert.equal(s.history[0].status, 'skipped');
+});
+
+test('"depois de N execuções" conta as execuções de fato iniciadas', async () => {
+  const w = await world({ rule: { frequency: 'daily', startDate: '2026-09-01', time: '02:00', end: 'count', count: 2 } });
+  assert.equal(w.schedule.nextRunAt, at(2026, 9, 26, 2).toISOString(), 'os dias antes de salvar não contam');
+  let s = await w.run(at(2026, 9, 26, 2, 0, 5));
+  assert.equal(s.countDone, 1);
+  // Pulada (a anterior ainda em andamento): não conta.
+  s = await w.run(at(2026, 9, 27, 2, 0, 5));
+  assert.equal(s.history[0].status, 'skipped');
+  assert.equal(s.countDone, 1);
+  assert.equal(s.nextRunAt, at(2026, 9, 28, 2).toISOString());
+  // "Executar agora" não conta.
+  w.manager.active.clear();
+  await w.scheduler.runNow(w.schedule.id, 'acesso local');
+  w.manager.active.clear();
+  s = await w.run(at(2026, 9, 28, 2, 0, 5));
+  assert.equal(s.countDone, 2);
+  assert.equal(s.nextRunAt, null, 'a segunda execução termina o agendamento');
+});
+
+test('relógio corrigido para trás e agendamento com dados inválidos', async () => {
+  const w = await world();
+  let s = await w.run(at(2026, 9, 26, 2, 0, 5));
+  assert.equal(s.nextRunAt, at(2026, 9, 27, 2).toISOString());
+  w.manager.active.clear();
+  // O relógio estava adiantado e voltou: a próxima execução é recalculada (a regra começa em 25/09).
+  s = await w.run(at(2026, 9, 20, 12));
+  assert.equal(s.nextRunAt, at(2026, 9, 25, 2).toISOString());
+  s = await w.run(at(2026, 9, 25, 2, 0, 5));
+  assert.equal(w.manager.calls.length, 2);
+
+  // Um agendamento com a regra corrompida (db.json editado), antes do outro na lista, não impede
+  // que o outro execute.
+  // eslint-disable-next-line no-unused-vars
+  const { id: _id, ...copy } = w.store.getSchedule(w.schedule.id);
+  const broken = w.store.createSchedule({ ...copy, name: 'Quebrado', history: [], rule: { frequency: 'weekly', startDate: '2026-09-01', time: '03:00', interval: 1, end: 'never' }, nextRunAt: at(2026, 9, 26, 1).toISOString() });
+  const order = w.store.listSchedules();
+  order.splice(order.indexOf(broken), 1);
+  order.unshift(broken);
+  w.manager.active.clear();
+  s = await w.run(at(2026, 9, 26, 2, 0, 5));
+  const b = w.store.getSchedule(broken.id);
+  assert.equal(b.nextRunAt, null);
+  assert.equal(b.history[0].status, 'failed');
+  assert.match(b.history[0].message, /Falha no agendador/);
+  assert.equal(w.manager.calls.length, 3, 'o outro agendamento continua executando');
+  assert.equal(s.history[0].status, 'started');
+});
+
+test('guarda os últimos relatórios concluídos e o da última análise completa', async () => {
   const w = await world({ keepLast: 2 });
   const ids = [];
   for (let day = 26; day <= 29; day++) {
@@ -259,12 +446,51 @@ test('guarda só os últimos relatórios do agendamento', async () => {
     ids.push(s.history[0].scanId);
     w.manager.finish(s.history[0].scanId, { startedAt: at(2026, 9, day, 2, 0, 6) });
   }
+  await w.run(at(2026, 9, 29, 12)); // o resultado da última execução é anotado e a limpeza acontece
   const own = w.store.listScans().filter((x) => x.scheduleId === w.schedule.id).map((x) => x.id);
   assert.deepEqual(own.sort(), ids.slice(-2).sort(), 'os dois mais recentes ficam');
   const s = w.store.getSchedule(w.schedule.id);
-  const first = s.history.find((h) => h.scanId === ids[0]);
-  assert.equal(first.outcome.status, 'completed', 'o resultado continua no histórico');
+  assert.equal(s.history.find((h) => h.scanId === ids[0]).outcome.status, 'completed', 'o resultado continua no histórico');
   assert.match(w.store.getScan(ids[3]).log.map((l) => l.message).join(' '), /1 relatório\(s\) antigo\(s\) excluído\(s\)/);
+
+  // Guardar 1: uma execução nova que falha não leva o último relatório concluído.
+  const one = await world({ keepLast: 1 });
+  let r = await one.run(at(2026, 9, 26, 2, 0, 5));
+  const good = r.history[0].scanId;
+  one.manager.finish(good, { startedAt: at(2026, 9, 26, 2, 0, 6) });
+  r = await one.run(at(2026, 9, 27, 2, 0, 5));
+  assert.ok(one.store.getScan(good), 'na fila, a nova não apaga a anterior');
+  one.manager.finish(r.history[0].scanId, { status: 'failed', startedAt: at(2026, 9, 27, 2, 0, 6) });
+  await one.run(at(2026, 9, 27, 12));
+  assert.ok(one.store.getScan(good), 'o último concluído fica');
+
+  // Incremental: o relatório da última análise completa não é excluído.
+  const inc = await world({ keepLast: 1, period: { type: 'since-last', fullEvery: 10 } });
+  r = await inc.run(at(2026, 9, 26, 2, 0, 5));
+  const full = r.history[0].scanId;
+  inc.manager.finish(full, { startedAt: at(2026, 9, 26, 2, 0, 6) });
+  for (let day = 27; day <= 29; day++) {
+    r = await inc.run(at(2026, 9, day, 2, 0, 5));
+    assert.equal(r.history[0].full, false);
+    inc.manager.finish(r.history[0].scanId, { startedAt: at(2026, 9, day, 2, 0, 6) });
+  }
+  await inc.run(at(2026, 9, 29, 12));
+  const kept = inc.store.listScans().filter((x) => x.scheduleId === inc.schedule.id).map((x) => x.id);
+  assert.deepEqual(kept.sort(), [full, r.history[0].scanId].sort());
+
+  // Falha ao excluir um relatório antigo (arquivo bloqueado): nada muda na execução.
+  const lock = await world({ keepLast: 1 });
+  const original = lock.store.deleteScan.bind(lock.store);
+  lock.store.deleteScan = async () => {
+    throw Object.assign(new Error('EBUSY: arquivo em uso'), { code: 'EBUSY' });
+  };
+  r = await lock.run(at(2026, 9, 26, 2, 0, 5));
+  lock.manager.finish(r.history[0].scanId, { startedAt: at(2026, 9, 26, 2, 0, 6) });
+  r = await lock.run(at(2026, 9, 27, 2, 0, 5));
+  lock.manager.finish(r.history[0].scanId, { startedAt: at(2026, 9, 27, 2, 0, 6) });
+  r = await lock.run(at(2026, 9, 27, 12));
+  assert.deepEqual(r.history.map((h) => h.status), ['started', 'started']);
+  lock.store.deleteScan = original;
 });
 
 // ------------------------------------------------------------------------------------------------
@@ -305,7 +531,7 @@ test('API dos agendamentos', async () => {
     const repo = (await api('POST', '/api/repositories', { name: 'Arquivos', path: dir })).data;
     const list = (await api('POST', '/api/lists', { name: 'Sensíveis', terms: [{ type: 'text', value: 'salário' }] })).data;
     const rule = { frequency: 'daily', startDate: '2026-09-25', time: '02:00' };
-    const body = { kind: 'files', name: 'Noturna', repositoryIds: [repo.id], listIds: [list.id], options: { checkName: true, checkContent: true }, rule, period: { type: 'since-last', fullEvery: 0 } };
+    const body = { kind: 'files', name: 'Noturna', repositoryIds: [repo.id], listIds: [list.id], options: { checkName: true, checkContent: true }, rule, period: { type: 'since-last', fullEvery: 2 } };
 
     const info = await api('GET', '/api/info');
     assert.ok(typeof info.data.timeZone === 'string');
@@ -394,6 +620,17 @@ test('API dos agendamentos', async () => {
     assert.equal(saved.data.deleteConfirmation.targets, undefined, 'o alcance registrado não vai para a interface');
     assert.equal((await api('POST', `/api/schedules/${id}/run`, {})).status, 400, 'executar agora com exclusão pede confirmação');
 
+    // Um termo novo na lista usada pelo agendamento com exclusão: a lista avisa e o agendamento
+    // fica suspenso até ser confirmado de novo.
+    const listed = await api('PUT', `/api/lists/${list.id}`, { name: 'Sensíveis', terms: [{ type: 'text', value: 'salário' }, { type: 'text', value: 'CPF' }] });
+    assert.match(listed.data.scheduleWarning, /A exclusão automática do agendamento "Noturna" ficou suspensa com esta alteração/);
+    s = (await api('GET', `/api/schedules/${id}`)).data;
+    assert.match(s.problems[0], /Os termos das listas de referência/);
+    assert.equal((await api('PUT', `/api/schedules/${id}`, { ...withDelete, confirmDelete: 'EXCLUIR' })).status, 200);
+    assert.deepEqual((await api('GET', `/api/schedules/${id}`)).data.problems, []);
+    const quiet = await api('PUT', `/api/lists/${list.id}`, { name: 'Sensíveis (RH)', terms: [{ type: 'text', value: 'salário' }, { type: 'text', value: 'CPF' }] });
+    assert.equal(quiet.data.scheduleWarning, undefined, 'renomear a lista não muda o que é excluído');
+
     // O repositório mudou de pasta: a exclusão confirmada não vale mais.
     const other = path.join(root, `api-outra-${Math.random().toString(36).slice(2)}`);
     fs.mkdirSync(other);
@@ -406,6 +643,28 @@ test('API dos agendamentos', async () => {
     assert.match(refused.data.error, /confirme a exclusão de novo/);
     s = (await api('GET', `/api/schedules/${id}`)).data;
     assert.equal(s.history[0].status, 'failed');
+
+    // Edição no minuto do horário (antes de o agendador executá-lo): o horário continua valendo.
+    const again = await api('PUT', `/api/schedules/${id}`, body);
+    assert.equal(again.status, 200);
+    clock.now = at(2026, 9, 30, 2, 0, 3);
+    const renamed = await api('PUT', `/api/schedules/${id}`, { ...body, name: 'Noturna (renomeada)' });
+    assert.equal(renamed.data.nextRunAt, at(2026, 9, 30, 2).toISOString());
+    await scheduler.tick();
+    s = (await api('GET', `/api/schedules/${id}`)).data;
+    assert.equal(s.history[0].status, 'started');
+    assert.equal(s.history[0].plannedFor, at(2026, 9, 30, 2).toISOString());
+    await waitScan(api, s.history[0].scanId);
+    // Regra alterada para uma que nunca mais executaria: recusada.
+    const never = await api('PUT', `/api/schedules/${id}`, { ...body, rule: { frequency: 'once', startDate: '2026-09-29', time: '10:00' } });
+    assert.equal(never.status, 400);
+    assert.match(never.data.error, /nunca seria executado/);
+    // "Depois de N execuções": a prévia e a lista mostram quantas faltam.
+    const counted = await api('POST', '/api/schedules/preview', { rule: { ...rule, end: 'count', count: 3 } });
+    assert.equal(counted.data.remaining, 3);
+    assert.equal(counted.data.next.length, 3);
+    assert.equal(counted.data.endsAt, at(2026, 10, 3, 2).toISOString());
+    assert.equal((await api('POST', '/api/schedules/preview', { rule: { ...rule, frequency: 'daily', workdaysOnly: true, interval: 0 } })).status, 200, 'dias úteis sem intervalo');
 
     // Tipo do agendamento não muda; exclusão do agendamento libera o repositório.
     assert.match((await api('PUT', `/api/schedules/${id}`, { ...body, kind: 'mail' })).data.error, /trocar o tipo/);

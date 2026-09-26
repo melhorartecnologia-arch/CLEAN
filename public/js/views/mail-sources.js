@@ -460,6 +460,7 @@ export async function render(root) {
     });
     if (saved) {
       toast(source ? 'Conexão atualizada.' : 'Conexão cadastrada. Use "Testar conexão" para conferir o acesso.', 'success');
+      if (saved.scheduleWarning) toast(saved.scheduleWarning, 'warn');
       await refresh();
     }
   };

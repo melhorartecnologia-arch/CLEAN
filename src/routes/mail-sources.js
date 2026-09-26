@@ -6,6 +6,7 @@ import { Router } from 'express';
 import { HttpError, bad, text, lines, email, emailList, graphCredentials, assertUnused } from './validate.js';
 import { createConnector, MAIL_TYPES } from '../mail/connectors.js';
 import { friendlyError } from '../scan/errors.js';
+import { checkDeleteSchedules } from '../schedule/scheduler.js';
 
 const HOST_RE = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$|^\[?[0-9a-f:.]+\]?$/i;
 const MAX_MAILBOXES = 5000;
@@ -216,13 +217,19 @@ export function mailSourcesRouter({ store, manager = null, endpoints = {} }) {
   router.put('/:id', (req, res) => {
     const existing = find(req.params.id);
     const before = { allowDelete: existing.allowDelete, deleteMode: existing.deleteMode };
-    const updated = store.updateMailSource(existing.id, parseMailSource(req.body, existing, store.secrets));
-    syncLinkedRepositories(updated);
+    const data = parseMailSource(req.body, existing, store.secrets);
+    // Agendamentos com exclusão automática afetados (inclusive por repositórios ligados a estas
+    // credenciais) ficam suspensos, com aviso.
+    const { result: updated, warning } = checkDeleteSchedules(store, () => {
+      const saved = store.updateMailSource(existing.id, data);
+      syncLinkedRepositories(saved);
+      return saved;
+    });
     // Análises em andamento deixam de excluir se a exclusão foi desligada ou mudou de forma.
     if (before.allowDelete && (!updated.allowDelete || updated.deleteMode !== before.deleteMode)) {
       manager?.revokeDeletion('mail', existing.id, updated.allowDelete ? 'a forma de exclusão da conexão foi alterada' : 'a opção "Permitir exclusão" foi desligada');
     }
-    res.json(publicMailSource(updated));
+    res.json({ ...publicMailSource(updated), ...(warning ? { scheduleWarning: warning } : {}) });
   });
 
   router.delete('/:id', (req, res) => {

@@ -106,11 +106,13 @@ test('filtro por data e somente nomes', async () => {
   assert.equal(later.stats.filesSkippedByDate, later.stats.filesSeen);
   assert.equal(later.records.length, 0);
 
-  // A data considerada é a mais recente entre modificação, criação e alteração do registro.
+  // A data considerada é a mais recente entre modificação e criação (mudanças só de permissões ou
+  // atributos, que alteram a data de alteração do registro, não contam).
   assert.equal(changedAt({ mtimeMs: 1000, birthtimeMs: 5000, ctimeMs: 3000 }), 5000);
-  assert.equal(changedAt({ mtimeMs: 1000, birthtimeMs: 0, ctimeMs: 3000 }), 3000);
+  assert.equal(changedAt({ mtimeMs: 1000, birthtimeMs: 0, ctimeMs: 3000 }), 1000);
   assert.equal(cloudChangedAt({ lastModifiedDateTime: '2019-05-01T00:00:00Z', createdDateTime: '2026-09-01T00:00:00Z' }), Date.parse('2026-09-01T00:00:00Z'));
   assert.equal(cloudChangedAt({ lastModifiedDateTime: '2026-09-02T00:00:00Z' }), Date.parse('2026-09-02T00:00:00Z'));
+  assert.equal(cloudChangedAt({}), Infinity, 'sem data válida, o arquivo é analisado');
 });
 
 test('caminho completo como nome e sem proprietário', async () => {

@@ -49,6 +49,7 @@ export function newMailStats(sourcesTotal = 0) {
     attachmentsErrors: 0,
     bytesDownloaded: 0,
     errors: 0,
+    gaps: 0, // conexões ou caixas que não puderam ser lidas (a análise ficou incompleta)
     deleted: 0, // excluídas na análise ("analisar e excluir")
     deleteMissing: 0, // já não existiam na hora da exclusão
     deleteChanged: 0,
@@ -93,7 +94,13 @@ export class MailScanner {
   }
 
   /** A exclusão foi desligada no cadastro durante a análise: nada mais é excluído daquela conexão. */
-  revokeDeletion({ kind, id, reason }) {
+  revokeDeletion({ kind, id, reason, all = false }) {
+    if (all) {
+      const active = this.sources.filter((s) => s.allowDelete);
+      for (const source of active) source.allowDelete = false;
+      if (active.length && this.options.deleteMatches) this.log('warn', `Exclusão automática desativada: ${reason}. A análise continua sem excluir.`);
+      return;
+    }
     if (kind !== 'mail') return;
     for (const source of this.sources) {
       if (source.id !== id || !source.allowDelete) continue;
@@ -169,6 +176,7 @@ export class MailScanner {
     } catch (err) {
       if (this.cancelled) return;
       this.error(source.name, err);
+      this.stats.gaps++;
       this.log('error', `Conexão "${source.name}" indisponível: ${friendlyError(err)}`);
       return;
     }
@@ -221,6 +229,7 @@ export class MailScanner {
         return;
       }
       this.error(mailbox.address, err);
+      this.stats.gaps++;
       this.log('error', `Falha na caixa ${mailbox.address}: ${friendlyError(err)}`);
     } finally {
       // Exclusão automática ao fim de cada caixa: excluir durante a listagem deslocaria a

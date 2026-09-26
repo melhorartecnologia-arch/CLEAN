@@ -100,8 +100,8 @@ de exemplo. Depois é só iniciar uma análise.
 3. **Nova análise** — escolha repositórios e listas e o que verificar:
    - nome do arquivo (ou o caminho completo, incluindo os nomes das pastas) e/ou conteúdo;
    - somente arquivos alterados a partir de uma data (vale a data mais recente entre a modificação
-     e a chegada ao repositório: um arquivo copiado ou movido para a pasta depois da data entra na
-     análise, mesmo mantendo a data de modificação original);
+     e a criação: um arquivo copiado para a pasta depois da data entra na análise, mesmo mantendo a
+     data de modificação original; mudanças só de permissões ou atributos não contam);
    - tamanho máximo para ler o conteúdo (arquivos maiores têm apenas o nome verificado; textos
      longos, só o início);
    - quantidade de arquivos processados em paralelo.
@@ -494,8 +494,10 @@ a opção **Quando executar › Agendar** faz o mesmo.
 | **Semanalmente** | às segundas e quintas às 22:00; a cada 2 semanas, aos sábados |
 | **Mensalmente** | no dia 1; no dia 31 (nos meses mais curtos, no último dia); no último dia do mês; na primeira segunda-feira; no último sábado; a cada 3 meses |
 
-As repetições têm data de início e término (nunca, numa data ou depois de um número de execuções).
-Ao montar a regra, a tela mostra a descrição e as **próximas cinco execuções**.
+As repetições têm data de início e término: nunca, numa data ou **depois de um número de
+execuções** — contam as execuções de fato iniciadas pelo agendamento a partir de quando ele é salvo
+(horários pulados ou perdidos e *Executar agora* não contam; mudar a regra recomeça a contagem). Ao
+montar a regra, a tela mostra a descrição, as **próximas cinco execuções** e a última prevista.
 
 Como funcionam:
 
@@ -503,18 +505,21 @@ Como funcionam:
   execução nesses horários: instale-o como serviço (veja [Executando como serviço](#executando-como-serviço));
 - cada execução entra na fila como qualquer análise (`MAX_CONCURRENT_SCANS`) e gera um relatório
   comum, com o nome do agendamento e a data; a lista de análises marca as *agendadas*;
-- se a execução anterior do mesmo agendamento ainda estiver em andamento (ou na fila), a nova é
-  **pulada** e fica registrada no histórico;
+- se uma execução do mesmo agendamento ainda estiver em andamento (ou na fila), a nova é **pulada**
+  e fica registrada no histórico (duas execuções do mesmo agendamento nunca rodam juntas);
 - **horário perdido** (CLEAN parado ou computador desligado): na volta, o agendamento é executado
   **uma vez** (opção marcada por padrão) ou o horário fica só registrado como perdido — nunca uma
   execução para cada horário perdido;
 - **Executar agora** roda o agendamento na hora, sem mudar a próxima execução programada;
-  **Pausar** suspende o agendamento (os horários da pausa não são executados depois);
+  **Pausar** suspende o agendamento (os horários da pausa não são executados depois); se o relógio
+  do servidor for corrigido para trás, a próxima execução é recalculada;
 - o **Histórico** mostra as últimas 50 execuções: quando, se foi no horário, atrasada ou manual, o
   resultado (concluída, pulada, não iniciada e o motivo, perdida), quantos itens foram encontrados e
   excluídos e o link do relatório;
-- **relatórios guardados**: é possível manter só os mais recentes de cada agendamento; os antigos são
-  excluídos a cada nova execução (o registro geral `data\exclusoes.ndjson` é mantido);
+- **relatórios guardados**: é possível manter só os mais recentes de cada agendamento. Quando uma
+  execução termina, ficam os relatórios até o N-ésimo **concluído** mais recente (os que falharam
+  não contam) e sempre o da última análise completa; os mais antigos são excluídos (o registro geral
+  `data\exclusoes.ndjson` é mantido);
 - repositórios, conexões de e-mail e listas usados por um agendamento não podem ser excluídos do
   cadastro enquanto fizerem parte dele.
 
@@ -522,26 +527,37 @@ Como funcionam:
 
 - **todos** os arquivos (ou mensagens);
 - os alterados (ou recebidas) nos **últimos N dias**;
-- **incremental**: a partir da segunda execução, só os arquivos alterados — modificados, criados,
-  copiados ou movidos para o repositório — ou as mensagens recebidas desde o início da última execução
-  **concluída**, com 1 hora de margem para diferenças de relógio entre os servidores. A primeira
-  execução é completa, assim como a seguinte a qualquer mudança nos locais, nas listas de referência
-  (um termo novo precisa ser procurado em tudo) ou nas opções. Uma **análise completa periódica** (a
-  cada 7 execuções, por padrão; 0 = nunca) pega o que ficou de fora por erro de leitura (pasta sem
-  permissão, caixa indisponível, arquivo bloqueado). Cada relatório incremental mostra só o que foi
-  encontrado no seu período. Mensagens importadas (de um .pst, por exemplo) mantêm a data de
-  recebimento original e só aparecem na análise completa.
+- **incremental**: a partir da segunda execução, só os arquivos modificados, criados ou copiados para
+  o repositório — ou as mensagens recebidas — desde o início da última execução **concluída sem
+  falhas de acesso** (uma execução que não conseguiu ler um repositório, uma conta, um site, uma
+  conexão ou uma caixa inteira não serve de base), com 1 hora de margem para diferenças de relógio
+  entre os servidores. A primeira execução é completa, assim como a seguinte a qualquer mudança nos
+  locais, nas listas de referência (um termo novo precisa ser procurado em tudo), nas opções ou na
+  ação (ao passar a excluir). A **análise completa periódica** (a cada 2 a 50 execuções; 7 por
+  padrão) é obrigatória: ela pega o que as incrementais não veem — pastas movidas inteiras para o
+  repositório (os arquivos mantêm as datas), itens movidos no OneDrive e no SharePoint, mensagens
+  movidas entre pastas ou importadas (de um .pst, por exemplo), itens com erro de leitura ou de
+  exclusão. Cada relatório incremental mostra só o que foi encontrado no seu período.
 
 **Exclusão automática agendada:**
 
 - exige, a cada vez que o agendamento é salvo, **Permitir exclusão** em todos os locais e a
-  confirmação digitada (**EXCLUIR**); o CLEAN registra quem confirmou, quando, e o alcance de cada
-  local naquele momento;
+  confirmação digitada (**EXCLUIR**); o CLEAN registra quem confirmou, quando, o alcance e a forma
+  de exclusão de cada local e os **critérios** naquele momento: os termos das listas de referência,
+  as pastas, contas, sites, caixas e pastas de e-mail ignorados e os locais protegidos por
+  repositórios sem *Permitir exclusão*;
 - em cada execução, a confirmação é conferida com o cadastro atual: se um repositório ou conexão
   deixou de permitir a exclusão, mudou de caminho, de contas ou de sites (OneDrive e SharePoint), de
-  conta, servidor ou caixas (e-mail), ou passou a excluir de forma definitiva (antes, para a
-  lixeira), a execução **não é iniciada** e o motivo aparece no histórico e na lista de agendamentos
-  até o agendamento ser salvo e confirmado de novo;
+  conta, servidor ou caixas (e-mail), passou a excluir de forma definitiva (antes, para a lixeira),
+  ou se os critérios mudaram (um termo novo numa lista, uma pasta que deixou de ser ignorada, um
+  repositório protegido removido), a execução **não é iniciada** e o motivo aparece no histórico e
+  na lista de agendamentos até o agendamento ser salvo e confirmado de novo. Ao salvar uma lista,
+  um repositório ou uma conexão com uma alteração dessas, o CLEAN avisa quais agendamentos ficaram
+  suspensos;
+- a conferência também é feita quando uma execução que esperou na fila começa: se nesse intervalo
+  algo mudou (inclusive as caixas de uma conexão de e-mail) ou o agendamento foi pausado, excluído ou
+  passou a *Somente analisar*, ela analisa sem excluir. Pausar, excluir ou mudar o agendamento também
+  interrompe a exclusão de uma execução dele em andamento;
 - nas exclusões, "quem excluiu" fica registrado como o agendamento e quem confirmou (ex.:
   `agendamento "Limpeza semanal" (exclusão automática confirmada por acesso local em 25/09/2026 10:00)`);
 - *Executar agora* num agendamento com exclusão pede uma confirmação.

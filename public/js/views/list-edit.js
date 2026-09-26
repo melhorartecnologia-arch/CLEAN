@@ -248,6 +248,7 @@ export async function render(root, { params, ctx, setLeaveGuard }) {
       const saved = id ? await put(`/api/lists/${id}`, body) : await post('/api/lists', body);
       dirty = false;
       toast(`Lista salva com ${plural(saved.terms.length, 'termo', 'termos')}.`, 'success');
+      if (saved.scheduleWarning) toast(saved.scheduleWarning, 'warn');
       if (!id) {
         go(`/listas/${saved.id}`);
         return;

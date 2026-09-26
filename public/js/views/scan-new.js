@@ -102,7 +102,7 @@ export async function render(root, { ctx, props = {} }) {
               <label class="field" data-now-only>
                 <span>Somente arquivos alterados a partir de</span>
                 <input type="date" name="modifiedAfter" />
-                <small>Em branco: todos os arquivos. Vale a data mais recente entre a modificação e a chegada ao repositório (arquivo copiado ou movido para ele).</small>
+                <small>Em branco: todos os arquivos. Vale a data mais recente entre a modificação e a criação (um arquivo copiado para o repositório entra pela data da cópia).</small>
               </label>
               <label class="field">
                 <span>Tamanho máximo para ler o conteúdo (MB)</span>
@@ -171,7 +171,7 @@ export async function render(root, { ctx, props = {} }) {
     if (['action', 'nameTarget', 'checkName'].includes(event.target.name)) sync();
   };
   form.addEventListener('change', onChange);
-  const unbind = bindSchedule(form, { onModeChange: sync });
+  const unbind = bindSchedule(form, { onModeChange: sync, scheduleId: schedule?.id || null });
   const onSubmit = async (event) => {
     event.preventDefault();
     const f = new FormData(form);

@@ -245,9 +245,11 @@ export class Store {
   }
 
   async deleteScan(id) {
+    // Primeiro a pasta (com novas tentativas: no Windows, antivírus e indexação bloqueiam arquivos
+    // por instantes); se ela não puder ser removida, o relatório continua no cadastro.
+    await fs.rm(this.scanDir(id), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     const existed = this.#delete('scans', id);
     for (const key of [...this.resultCache.keys()]) if (key.startsWith(`${id}/`)) this.resultCache.delete(key);
-    await fs.rm(this.scanDir(id), { recursive: true, force: true });
     return existed;
   }
 

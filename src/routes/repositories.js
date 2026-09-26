@@ -7,6 +7,7 @@ import { HttpError, parseRepository, normalizeRepoPath, assertUnused } from './v
 import { friendlyError } from '../scan/errors.js';
 import { DrivesConnector } from '../cloud/drives.js';
 import { isCloudRepo, deletionScope } from '../scan/delete.js';
+import { checkDeleteSchedules } from '../schedule/scheduler.js';
 
 /** Repositório sem os segredos (apenas indica se o segredo do cliente está salvo). */
 export function publicRepository(repo) {
@@ -33,7 +34,9 @@ export function repositoriesRouter({ store, manager = null, endpoints = {} }) {
     const existing = store.getRepository(req.params.id);
     if (!existing) throw new HttpError(404, 'Repositório não encontrado.');
     const before = { allowDelete: existing.allowDelete, scope: deletionScope(existing), deleteMode: existing.deleteMode };
-    const updated = store.updateRepository(existing.id, parseRepository(req.body, { existing, box: store.secrets, mailSource: mailSourceOf(req.body) }));
+    const data = parseRepository(req.body, { existing, box: store.secrets, mailSource: mailSourceOf(req.body) });
+    // Agendamentos com exclusão automática afetados pela alteração ficam suspensos (com aviso).
+    const { result: updated, warning } = checkDeleteSchedules(store, () => store.updateRepository(existing.id, data));
     // Análises em andamento deixam de excluir se a exclusão foi desligada ou o alcance/forma mudou.
     if (before.allowDelete && (!updated.allowDelete || deletionScope(updated) !== before.scope || (updated.deleteMode || null) !== (before.deleteMode || null))) {
       const reason = !updated.allowDelete
@@ -45,15 +48,17 @@ export function repositoriesRouter({ store, manager = null, endpoints = {} }) {
           : 'a forma de exclusão foi alterada';
       manager?.revokeDeletion('repository', existing.id, reason);
     }
-    res.json(publicRepository(updated));
+    res.json({ ...publicRepository(updated), ...(warning ? { scheduleWarning: warning } : {}) });
   });
 
   router.delete('/:id', (req, res) => {
     const existing = store.getRepository(req.params.id);
     if (!existing) throw new HttpError(404, 'Repositório não encontrado.');
     assertUnused(store, 'files', existing.id, 'O repositório');
-    store.deleteRepository(existing.id);
+    // Um repositório sem exclusão pode proteger pastas de outro usado por um agendamento.
+    const { warning } = checkDeleteSchedules(store, () => store.deleteRepository(existing.id));
     if (existing.allowDelete) manager?.revokeDeletion('repository', existing.id, 'o repositório foi removido do cadastro');
+    if (warning) return res.json({ scheduleWarning: warning });
     res.status(204).end();
   });
 

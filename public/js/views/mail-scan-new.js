@@ -168,7 +168,7 @@ export async function render(root, { ctx, props = {} }) {
     if (event.target.name === 'action') sync();
   };
   form.addEventListener('change', onChange);
-  const unbind = bindSchedule(form, { onModeChange: sync });
+  const unbind = bindSchedule(form, { onModeChange: sync, scheduleId: schedule?.id || null });
   const onSubmit = async (event) => {
     event.preventDefault();
     const f = new FormData(form);

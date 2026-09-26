@@ -10,6 +10,9 @@
 //     workdaysOnly,                     // daily: só de segunda a sexta
 //     monthlyMode: 'day' | 'last-day' | 'weekday', monthDay, weekOfMonth (1..4 ou -1), weekday,
 //     end: 'never' | 'date' | 'count', endDate, count }
+//
+// "Depois de N execuções" conta as execuções de fato iniciadas pelo agendamento (quem executa a
+// regra informa quantas ainda faltam em `remaining`); horários pulados ou perdidos não contam.
 
 export const FREQUENCIES = ['once', 'hourly', 'daily', 'weekly', 'monthly'];
 const MAX_INTERVAL = { hourly: 23, daily: 365, weekly: 52, monthly: 24 };
@@ -85,16 +88,31 @@ function timeField(value, field) {
   return `${pad(Number(m[1]))}:${m[2]}`;
 }
 
+/** Inteiro de um número ou de um texto com número; vazio, nulo, listas e frações não valem. */
+function toInt(value) {
+  if (typeof value === 'number') return Number.isInteger(value) ? value : NaN;
+  if (typeof value === 'string' && /^\s*-?\d+\s*$/.test(value)) return Number(value);
+  return NaN;
+}
+
 function intField(value, min, max, message) {
-  const n = Number(value);
+  const n = toInt(value);
   if (!Number.isInteger(n) || n < min || n > max) throw new RuleError(message);
   return n;
 }
 
 function weekdaysField(value) {
-  const days = [...new Set((Array.isArray(value) ? value : []).map(Number))].filter((d) => Number.isInteger(d) && d >= 0 && d <= 6);
+  const days = (Array.isArray(value) ? value : []).map(toInt);
+  if (days.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) throw new RuleError('Dia da semana inválido.');
   if (days.length === 0) throw new RuleError('Escolha ao menos um dia da semana.');
-  return days.sort((a, b) => a - b);
+  return [...new Set(days)].sort((a, b) => a - b);
+}
+
+/** Valor de uma lista de opções; ausente usa o padrão, desconhecido é recusado. */
+function choiceField(value, choices, fallback, message) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (!choices.includes(value)) throw new RuleError(message);
+  return value;
 }
 
 /** Valida e normaliza uma regra recebida da interface (lança RuleError com a explicação). */
@@ -111,7 +129,9 @@ export function validateRule(input) {
 
   const max = MAX_INTERVAL[frequency];
   const unit = { hourly: 'horas', daily: 'dias', weekly: 'semanas', monthly: 'meses' }[frequency];
-  rule.interval = intField(input.interval ?? 1, 1, max, `O intervalo deve ser de 1 a ${max} ${unit}.`);
+  const workdays = frequency === 'daily' && input.workdaysOnly === true;
+  // "Somente em dias úteis" é sempre a cada 1 dia (o intervalo informado é ignorado).
+  rule.interval = workdays ? 1 : intField(input.interval ?? 1, 1, max, `O intervalo deve ser de 1 a ${max} ${unit}.`);
 
   if (frequency === 'hourly') {
     rule.untilTime = timeField(input.untilTime || '23:59', 'o horário final');
@@ -120,21 +140,19 @@ export function validateRule(input) {
     }
     rule.weekdays = weekdaysField(input.weekdays);
   }
-  if (frequency === 'daily') {
-    rule.workdaysOnly = input.workdaysOnly === true;
-    if (rule.workdaysOnly) rule.interval = 1;
-  }
+  if (frequency === 'daily') rule.workdaysOnly = workdays;
   if (frequency === 'weekly') rule.weekdays = weekdaysField(input.weekdays);
   if (frequency === 'monthly') {
-    rule.monthlyMode = ['day', 'last-day', 'weekday'].includes(input.monthlyMode) ? input.monthlyMode : 'day';
+    rule.monthlyMode = choiceField(input.monthlyMode, ['day', 'last-day', 'weekday'], 'day', 'Escolha o dia do mês: um dia, o último dia ou um dia da semana.');
     if (rule.monthlyMode === 'day') rule.monthDay = intField(input.monthDay, 1, 31, 'O dia do mês deve ser de 1 a 31.');
     if (rule.monthlyMode === 'weekday') {
-      rule.weekOfMonth = [1, 2, 3, 4, -1].includes(Number(input.weekOfMonth)) ? Number(input.weekOfMonth) : 1;
+      rule.weekOfMonth = intField(input.weekOfMonth ?? 1, -1, 4, 'Escolha a semana do mês: da primeira à quarta, ou a última.');
+      if (rule.weekOfMonth === 0) throw new RuleError('Escolha a semana do mês: da primeira à quarta, ou a última.');
       rule.weekday = intField(input.weekday, 0, 6, 'Escolha o dia da semana.');
     }
   }
 
-  rule.end = ['date', 'count'].includes(input.end) ? input.end : 'never';
+  rule.end = choiceField(input.end, ['never', 'date', 'count'], 'never', 'Escolha o término: nunca, numa data ou depois de um número de execuções.');
   if (rule.end === 'date') {
     rule.endDate = dateField(input.endDate, 'a data de término');
     if (dayOfText(rule.endDate) < dayOfText(rule.startDate)) throw new RuleError('A data de término deve ser igual ou posterior à data de início.');
@@ -235,44 +253,59 @@ function* instants(rule, from) {
   }
 }
 
-/** Fim da regra (instante da última execução permitida) ou null quando não termina. */
-export function endOf(rule) {
-  if (rule.frequency === 'once' || rule.end === 'never' || !rule.end) return null;
-  if (rule.end === 'date') {
-    const { y, m, d } = fromDay(dayOfText(rule.endDate));
-    return new Date(y, m, d, 23, 59, 59, 999);
-  }
-  let i = 0;
-  let lastAt = null;
-  for (const at of instants(rule, dayOfText(rule.startDate))) {
-    lastAt = at;
-    if (++i >= rule.count) break;
-  }
-  return lastAt;
+/** Fim do último dia permitido (término por data) ou null. */
+function dateEnd(rule) {
+  if (rule.frequency === 'once' || rule.end !== 'date') return null;
+  const { y, m, d } = fromDay(dayOfText(rule.endDate));
+  return new Date(y, m, d, 23, 59, 59, 999);
 }
 
-/** As próximas `n` execuções depois de `after` (em ordem). */
-export function upcoming(rule, after = new Date(), n = 5) {
+/**
+ * As próximas `n` execuções depois de `after` (em ordem). remaining: quantas execuções ainda
+ * faltam no término por número de execuções (sem ele, todas as da regra).
+ */
+export function upcoming(rule, after = new Date(), n = 5, { remaining = Infinity } = {}) {
   const out = [];
-  const end = endOf(rule);
+  const limit = Math.min(n, rule.end === 'count' && rule.frequency !== 'once' ? remaining : Infinity);
+  if (!(limit > 0)) return out;
+  const end = dateEnd(rule);
   for (const at of instants(rule, localDay(new Date(after)))) {
     if (+at <= +after) continue;
     if (end && +at > +end) break;
     out.push(at);
-    if (out.length >= n) break;
+    if (out.length >= limit) break;
   }
   return out;
 }
 
 /** A próxima execução depois de `after`, ou null quando a regra já terminou. */
-export function nextOccurrence(rule, after = new Date()) {
-  return upcoming(rule, after, 1)[0] || null;
+export function nextOccurrence(rule, after = new Date(), options = {}) {
+  return upcoming(rule, after, 1, options)[0] || null;
 }
 
-/** Quantas execuções a regra previa no intervalo (from, to] (até `cap`). */
+/**
+ * Última execução prevista depois de `after`: a do último dia (término por data) ou a última das
+ * que faltam (término por número de execuções, sem contar horários pulados). null quando a regra
+ * não termina ou já terminou.
+ */
+export function lastOccurrence(rule, { after = new Date(), remaining = Infinity } = {}) {
+  if (rule.frequency === 'once') return nextOccurrence(rule, after);
+  if (rule.end === 'count') return upcoming(rule, after, Math.min(rule.count, remaining)).at(-1) || null;
+  const end = dateEnd(rule);
+  if (!end || +end <= +after) return null;
+  // Entre duas execuções há no máximo MAX_GAP_DAYS dias: a última fica nesse trecho antes do fim.
+  let last = null;
+  for (const at of instants(rule, Math.max(localDay(new Date(after)), localDay(end) - MAX_GAP_DAYS))) {
+    if (+at > +end) break;
+    if (+at > +after) last = at;
+  }
+  return last;
+}
+
+/** Quantos horários da regra houve no intervalo (from, to] (até `cap`). */
 export function countBetween(rule, from, to, cap = 1000) {
   let count = 0;
-  const end = endOf(rule);
+  const end = dateEnd(rule);
   for (const at of instants(rule, localDay(new Date(from)))) {
     if (+at <= +from) continue;
     if (+at > +to || (end && +at > +end)) break;

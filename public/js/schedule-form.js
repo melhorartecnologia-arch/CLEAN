@@ -194,13 +194,14 @@ export function scheduleSection({ kind, schedule = null, fixed = false, info }) 
           </div>
           <div class="option-row indent" data-for-period="since-last">
             <span>Análise completa a cada</span>
-            <input type="number" name="fullEvery" min="0" max="50" value="${p.fullEvery ?? 7}" aria-label="Análise completa a cada quantas execuções" />
-            <span>execuções (0 = nunca)</span>
+            <input type="number" name="fullEvery" min="2" max="50" value="${p.fullEvery || 7}" aria-label="Análise completa a cada quantas execuções" />
+            <span>execuções</span>
           </div>
           <small data-for-period="since-last">
-            A partir da segunda execução, entram só ${mail ? 'as mensagens recebidas' : `os ${items} modificados, criados, copiados ou movidos`} desde o início da última execução
-            concluída (com 1 hora de margem); cada relatório mostra só o que foi encontrado nesse período. Mudanças nos locais, nas listas ou nas
-            opções tornam a próxima execução completa. A análise completa periódica também pega o que ficou de fora por erro de leitura.
+            A partir da segunda execução, entram só ${mail ? 'as mensagens recebidas' : `os ${items} modificados, criados ou copiados para o repositório`} desde o início da última execução
+            concluída (com 1 hora de margem); cada relatório mostra só o que foi encontrado nesse período. Mudanças nos locais, nas listas, nas
+            opções ou na ação tornam a próxima execução completa. A análise completa periódica pega o que as incrementais não veem:
+            ${mail ? 'mensagens movidas entre pastas ou importadas' : 'pastas movidas inteiras para o repositório'} e itens com erro de leitura.
           </small>
         </fieldset>
         <label class="check full">
@@ -254,7 +255,7 @@ export const scheduling = (form) => form.elements.when?.value === 'schedule';
  * Liga a seção ao formulário: mostra só os campos da repetição escolhida, atualiza a prévia e
  * avisa a tela quando o modo (agora/agendar) muda. Devolve a função de limpeza.
  */
-export function bindSchedule(form, { onModeChange = () => {} } = {}) {
+export function bindSchedule(form, { onModeChange = () => {}, scheduleId = null } = {}) {
   const fields = form.querySelector('[data-schedule-fields]');
   const preview = form.querySelector('[data-preview]');
   let touchedDays = false;
@@ -307,7 +308,7 @@ export function bindSchedule(form, { onModeChange = () => {} } = {}) {
     const token = ++request;
     try {
       const { rule } = readSchedule(form);
-      const result = await post('/api/schedules/preview', { rule });
+      const result = await post('/api/schedules/preview', { rule, scheduleId });
       if (token !== request) return;
       const next = result.next || [];
       paint(
@@ -316,7 +317,7 @@ export function bindSchedule(form, { onModeChange = () => {} } = {}) {
           ${next.length
             ? html`<div class="muted small">${next.length === 1 ? 'Execução' : 'Próximas execuções'}:</div>
                 <ol class="next-runs">${next.map((iso) => html`<li>${fmtServerDateTime(iso)}</li>`)}</ol>
-                ${result.endsAt ? html`<div class="muted small">Última execução: ${fmtServerDateTime(result.endsAt)}.</div>` : ''}`
+                ${result.endsAt ? html`<div class="muted small">Última execução${rule.end === 'count' ? ' prevista' : ''}: ${fmtServerDateTime(result.endsAt)}${rule.end === 'count' ? ` (${result.remaining === 1 ? 'falta 1 execução' : `faltam ${result.remaining} execuções`}; horários pulados ou perdidos não contam)` : ''}.</div>` : ''}`
             : html`<div class="danger-text small">Nenhuma execução futura: pela regra, a data e o horário já passaram.</div>`}`,
       );
     } catch (err) {

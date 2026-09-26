@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateRule, nextOccurrence, upcoming, endOf, countBetween, describeRule, dateBr, RuleError } from '../src/schedule/recurrence.js';
+import { validateRule, nextOccurrence, upcoming, lastOccurrence, countBetween, describeRule, dateBr, RuleError } from '../src/schedule/recurrence.js';
 
 // As regras valem na hora local: as datas esperadas também são montadas na hora local.
 const at = (y, m, d, h = 0, min = 0) => new Date(y, m - 1, d, h, min, 0, 0);
@@ -22,9 +22,20 @@ test('validação das regras', () => {
   fails({ frequency: 'monthly', startDate: '2026-09-25', time: '08:00', monthDay: 32 }, /de 1 a 31/);
   fails({ frequency: 'daily', startDate: '2026-09-25', time: '08:00', end: 'date', endDate: '2026-09-24' }, /igual ou posterior/);
   fails({ frequency: 'daily', startDate: '2026-09-25', time: '08:00', end: 'count', count: 1001 }, /de 1 a 1000/);
+  // Valores inválidos são recusados (e não trocados por outro dia ou outra opção).
+  fails({ frequency: 'weekly', startDate: '2026-09-25', time: '08:00', weekdays: [1, 9] }, /Dia da semana inválido/);
+  fails({ frequency: 'weekly', startDate: '2026-09-25', time: '08:00', weekdays: [null, ''] }, /Dia da semana inválido/);
+  fails({ frequency: 'monthly', startDate: '2026-09-25', time: '08:00', monthlyMode: 'weekday', weekOfMonth: 1, weekday: null }, /Escolha o dia da semana/);
+  fails({ frequency: 'monthly', startDate: '2026-09-25', time: '08:00', monthlyMode: 'weekday', weekOfMonth: 1, weekday: [] }, /Escolha o dia da semana/);
+  fails({ frequency: 'monthly', startDate: '2026-09-25', time: '08:00', monthlyMode: 'weekday', weekOfMonth: 5, weekday: 1 }, /semana do mês/);
+  fails({ frequency: 'monthly', startDate: '2026-09-25', time: '08:00', monthlyMode: 'weekday', weekOfMonth: 0, weekday: 1 }, /semana do mês/);
+  fails({ frequency: 'monthly', startDate: '2026-09-25', time: '08:00', monthlyMode: 'x', monthDay: 1 }, /Escolha o dia do mês/);
+  fails({ frequency: 'daily', startDate: '2026-09-25', time: '08:00', end: 'Count', count: 5 }, /Escolha o término/);
+  fails({ frequency: 'daily', startDate: '2026-09-25', time: '08:00', interval: 1.5 }, /de 1 a 365 dias/);
+  fails({ frequency: 'daily', startDate: '2026-09-25', time: '08:00', interval: '' }, /de 1 a 365 dias/);
 
   // Normalização: hora com um dígito, dias repetidos e em ordem, dias úteis sempre a cada 1 dia.
-  assert.deepEqual(rule({ frequency: 'weekly', startDate: '2026-09-25', time: '8:05', weekdays: [5, 1, 1, '3', 9] }), {
+  assert.deepEqual(rule({ frequency: 'weekly', startDate: '2026-09-25', time: '8:05', weekdays: [5, 1, 1, '3'] }), {
     frequency: 'weekly',
     startDate: '2026-09-25',
     time: '08:05',
@@ -33,6 +44,9 @@ test('validação das regras', () => {
     end: 'never',
   });
   assert.equal(rule({ frequency: 'daily', startDate: '2026-09-25', time: '08:00', interval: 3, workdaysOnly: true }).interval, 1);
+  // Em dias úteis o intervalo não é usado (a tela o desabilita e pode enviar 0).
+  assert.equal(rule({ frequency: 'daily', startDate: '2026-09-25', time: '08:00', interval: 0, workdaysOnly: true }).interval, 1);
+  assert.equal(rule({ frequency: 'monthly', startDate: '2026-09-25', time: '08:00', monthlyMode: 'weekday', weekOfMonth: '-1', weekday: '6' }).weekday, 6);
   assert.deepEqual(rule({ frequency: 'once', startDate: '2026-09-25', time: '08:00', interval: 5, end: 'count', count: 2 }), {
     frequency: 'once',
     startDate: '2026-09-25',
@@ -46,7 +60,8 @@ test('uma vez', () => {
   assert.equal(+nextOccurrence(r, at(2026, 10, 1, 14, 29)), +at(2026, 10, 1, 14, 30));
   assert.equal(nextOccurrence(r, at(2026, 10, 1, 14, 30)), null, 'o horário exato já conta como passado');
   assert.equal(upcoming(r, at(2026, 9, 1), 5).length, 1);
-  assert.equal(endOf(r), null);
+  assert.equal(+lastOccurrence(r, { after: at(2026, 9, 1) }), +at(2026, 10, 1, 14, 30));
+  assert.equal(lastOccurrence(r, { after: at(2026, 10, 2) }), null);
 });
 
 test('a cada N horas, numa janela do dia e em dias escolhidos', () => {
@@ -111,11 +126,26 @@ test('término por data e por número de execuções', () => {
   const byDate = rule({ frequency: 'daily', startDate: '2026-09-25', time: '02:00', end: 'date', endDate: '2026-09-27' });
   assert.deepEqual(list(byDate, at(2026, 9, 1), 5), times(at(2026, 9, 25, 2), at(2026, 9, 26, 2), at(2026, 9, 27, 2)), 'o último dia entra');
   assert.equal(nextOccurrence(byDate, at(2026, 9, 27, 2)), null);
+  assert.equal(+lastOccurrence(byDate, { after: at(2026, 9, 1) }), +at(2026, 9, 27, 2));
+  // Última execução de verdade (e não o fim do dia do término): segunda às 2h, término numa quarta.
+  const mondays = rule({ frequency: 'weekly', startDate: '2026-09-25', time: '02:00', weekdays: [1], end: 'date', endDate: '2026-10-14' });
+  assert.equal(+lastOccurrence(mondays, { after: at(2026, 9, 25) }), +at(2026, 10, 12, 2));
+  assert.equal(lastOccurrence(mondays, { after: at(2026, 10, 12, 2) }), null);
+  const hourlyEnd = rule({ frequency: 'hourly', interval: 3, startDate: '2026-01-01', time: '00:00', untilTime: '23:59', weekdays: [0, 1, 2, 3, 4, 5, 6], end: 'date', endDate: '2099-12-31' });
+  assert.equal(+lastOccurrence(hourlyEnd, { after: at(2026, 9, 25) }), +at(2099, 12, 31, 21), 'término distante: sem percorrer todos os dias');
+
+  // "Depois de N execuções": quem executa informa quantas faltam (execuções puladas não contam).
   const byCount = rule({ frequency: 'weekly', startDate: '2026-09-25', time: '02:00', weekdays: [1, 5], end: 'count', count: 3 });
-  assert.equal(+endOf(byCount), +at(2026, 10, 2, 2), 'as execuções contam a partir do início, não de agora');
-  assert.deepEqual(list(byCount, at(2026, 9, 28, 12), 5), times(at(2026, 10, 2, 2)));
-  assert.equal(nextOccurrence(byCount, at(2026, 10, 2, 2)), null);
-  assert.equal(countBetween(byCount, at(2026, 9, 1), at(2027, 1, 1)), 3);
+  assert.deepEqual(list(byCount, at(2026, 9, 28, 12), 5).length, 5, 'sem o número de execuções que faltam, a regra continua');
+  assert.deepEqual(
+    upcoming(byCount, at(2026, 9, 28, 12), 5, { remaining: 2 }).map(Number),
+    times(at(2026, 10, 2, 2), at(2026, 10, 5, 2)),
+  );
+  assert.equal(nextOccurrence(byCount, at(2026, 9, 28, 12), { remaining: 0 }), null);
+  assert.equal(+lastOccurrence(byCount, { after: at(2026, 9, 25, 10) }), +at(2026, 10, 5, 2), 'as 3 próximas depois de agora: 28/09, 02/10 e 05/10');
+  assert.equal(+lastOccurrence(byCount, { after: at(2026, 9, 25, 10), remaining: 1 }), +at(2026, 9, 28, 2));
+  // Horários perdidos: conta o calendário (o término por número de execuções não se aplica).
+  assert.equal(countBetween(byCount, at(2026, 9, 25), at(2026, 10, 3)), 3);
 });
 
 test('descrição em português', () => {

@@ -366,6 +366,7 @@ export async function render(root, { ctx }) {
     });
     if (saved) {
       toast(repo ? 'Repositório atualizado.' : 'Repositório cadastrado.', 'success');
+      if (saved.scheduleWarning) toast(saved.scheduleWarning, 'warn');
       await refresh();
     }
   };
@@ -380,8 +381,9 @@ export async function render(root, { ctx }) {
       const ok = await confirmDialog(`Excluir o repositório "${repo.name}"? As análises já feitas continuam disponíveis.`, { confirmLabel: 'Excluir' });
       if (!ok) return;
       try {
-        await del(`/api/repositories/${repo.id}`);
+        const result = await del(`/api/repositories/${repo.id}`);
         toast('Repositório excluído.', 'success');
+        if (result?.scheduleWarning) toast(result.scheduleWarning, 'warn');
         await refresh();
       } catch (err) {
         toast(err.message, 'error');

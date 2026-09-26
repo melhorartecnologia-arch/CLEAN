@@ -2,7 +2,7 @@
 import { Worker } from 'node:worker_threads';
 import { newStats, DEFAULT_OPTIONS } from './scanner.js';
 import { newMailStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
-import { cleanPaths, keptPaths, isCloudRepo, deletionScope } from './delete.js';
+import { cleanPaths, keptPaths, isCloudRepo, deletionScope, mailDeletionScope } from './delete.js';
 import { keptCloud } from '../cloud/drives.js';
 import { PROJECT_ROOT } from '../config.js';
 
@@ -95,6 +95,9 @@ export class ScanManager {
     // Exclusões manuais em andamento pelo relatório ("análise:item"): o relatório não pode ser
     // excluído (nem pela limpeza dos agendamentos) enquanto houver uma.
     this.itemDeletions = new Set();
+    // Conferência das análises agendadas com exclusão (definida pelo agendador): devolve o motivo
+    // para não excluir, ou null.
+    this.deletionGuard = null;
   }
 
   hasItemDeletion(scanId) {
@@ -199,8 +202,15 @@ export class ScanManager {
   async workerConfig(id) {
     const config = await this.store.readScanConfig(id);
     const scan = this.store.getScan(id);
-    const deleting = Boolean(config.options?.deleteMatches);
+    let deleting = Boolean(config.options?.deleteMatches);
     const warn = (message) => this.store.appendLog(id, { level: 'warn', message });
+    // Execução agendada que esperou na fila: só exclui se o agendamento ainda autorizar.
+    const blocked = deleting && scan?.scheduleId && this.deletionGuard ? this.deletionGuard(scan) : null;
+    if (blocked) {
+      deleting = false;
+      warn(`Exclusão automática desativada nesta execução: ${blocked}. A análise continua sem excluir.`);
+      this.store.updateScan(id, { options: { ...scan.options, deleteMatches: false } });
+    }
     const extra = { startedBy: scan?.startedBy || null, protect: cleanPaths({ dataDir: this.store.dataDir, appDir: PROJECT_ROOT }) };
     if (config.kind !== 'mail') {
       const all = this.store.listRepositories();
@@ -231,18 +241,21 @@ export class ScanManager {
         const deleteMode = r.deleteMode === 'trash' || current.deleteMode !== 'permanent' ? 'trash' : 'permanent';
         return { ...repo, allowDelete: true, deleteMode, keep: keptCloud(current, all) };
       });
-      return { ...config, repositories, endpoints: this.mailEndpoints, ...extra };
+      return { ...config, options: { ...config.options, deleteMatches: deleting }, repositories, endpoints: this.mailEndpoints, ...extra };
     }
     const sources = config.sources.map((s) => {
       const current = this.store.getMailSource(s.id);
       if (!current) throw new ScanError(`A conexão de e-mail "${s.name}" foi excluída antes do início da análise.`);
       const live = mailSnapshot(current);
-      const allowDelete = deleting && s.allowDelete && live.allowDelete;
-      if (deleting && s.allowDelete && !live.allowDelete) warn(`Exclusão automática desativada para "${s.name}": a opção "Permitir exclusão" foi desligada depois que a análise foi criada.`);
+      // Como nos repositórios: só exclui no mesmo alcance (conta, servidor e caixas) de quando a
+      // análise foi criada.
+      const reason = !live.allowDelete ? 'a opção "Permitir exclusão" foi desligada' : mailDeletionScope(live) !== mailDeletionScope(s) ? 'a conta, o servidor ou as caixas da conexão foram alterados' : null;
+      const allowDelete = deleting && s.allowDelete && !reason;
+      if (deleting && s.allowDelete && reason) warn(`Exclusão automática desativada para "${s.name}": ${reason} depois que a análise foi criada.`);
       const deleteMode = s.deleteMode === 'trash' || live.deleteMode === 'trash' ? 'trash' : 'permanent';
       return { ...live, allowDelete, deleteMode, secrets: this.store.openMailSecrets(current) };
     });
-    return { ...config, sources, endpoints: this.mailEndpoints, ...extra };
+    return { ...config, options: { ...config.options, deleteMatches: deleting }, sources, endpoints: this.mailEndpoints, ...extra };
   }
 
   /**
@@ -251,6 +264,17 @@ export class ScanManager {
    */
   revokeDeletion(kind, id, reason) {
     for (const entry of this.running.values()) entry.worker?.postMessage({ type: 'revoke-delete', kind, id, reason });
+  }
+
+  /**
+   * Uma análise deixa de excluir em todos os locais (ex.: o agendamento que a iniciou foi pausado
+   * ou excluído). Na fila, a conferência é feita quando ela começa.
+   */
+  revokeScanDeletion(id, reason) {
+    const entry = this.running.get(id);
+    if (!entry) return;
+    entry.revokeAll = reason; // a thread ainda pode estar sendo criada
+    entry.worker?.postMessage({ type: 'revoke-delete', all: true, reason });
   }
 
   #pump() {
@@ -283,6 +307,7 @@ export class ScanManager {
     this.store.updateScan(id, { status: 'running', startedAt: new Date().toISOString() });
     const worker = new Worker(this.workerUrl, { workerData: config });
     entry.worker = worker;
+    if (entry.revokeAll) worker.postMessage({ type: 'revoke-delete', all: true, reason: entry.revokeAll });
     worker.on('message', (message) => this.#onMessage(id, entry, message));
     worker.on('error', (err) => {
       entry.fatal = err?.stack || String(err);

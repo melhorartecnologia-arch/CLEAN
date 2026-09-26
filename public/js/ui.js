@@ -160,14 +160,15 @@ export function statusBadge(status) {
 
 // ---------- Avisos, diálogos e dicas ----------
 
+/** Aviso na tela. kind: 'info', 'success', 'warn' (fica mais tempo) ou 'error'. */
 export function toast(message, kind = 'info') {
   const box = document.getElementById('toasts');
   const el = document.createElement('div');
   el.className = `toast ${kind}`;
-  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  el.setAttribute('role', kind === 'error' || kind === 'warn' ? 'alert' : 'status');
   el.textContent = message;
   box.append(el);
-  setTimeout(() => el.remove(), kind === 'error' ? 8000 : 4500);
+  setTimeout(() => el.remove(), kind === 'error' || kind === 'warn' ? 10000 : 4500);
 }
 
 /**
