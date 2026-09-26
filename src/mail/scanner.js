@@ -215,6 +215,7 @@ export class MailScanner {
         if (item.error) {
           const where = [mailbox.address, item.folder, item.id].filter(Boolean).join(' › ');
           this.error(where, item.id ? `Falha ao baixar a mensagem: ${friendlyError(item.error)}` : friendlyError(item.error));
+          if (!item.id) this.stats.gaps++; // uma pasta inteira não pôde ser lida
         } else {
           await this.processMessage(source, mailbox, item);
         }

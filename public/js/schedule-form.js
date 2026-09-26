@@ -264,6 +264,7 @@ export function bindSchedule(form, { onModeChange = () => {}, scheduleId = null 
   const dayInputs = () => [...form.querySelectorAll('[name="weekdays"]')];
   // Dias escolhidos em cada repetição (hourly/weekly): voltar a uma repetição recupera os dias dela.
   const daysByFrequency = { [lastFrequency]: dayInputs().filter((el) => el.checked).map((el) => el.value) };
+  const intervalByFrequency = { [lastFrequency]: form.elements.interval.value };
 
   const show = () => {
     const frequency = form.elements.frequency.value;
@@ -281,8 +282,12 @@ export function bindSchedule(form, { onModeChange = () => {}, scheduleId = null 
     form.elements.interval.disabled = workdays;
     fields.querySelector('[data-start-label]').textContent = frequency === 'once' ? 'Data' : 'Data de início';
     fields.querySelector('[data-time-label]').textContent = frequency === 'hourly' ? 'Primeiro horário do dia' : 'Horário';
-    // O intervalo muda de sentido com a repetição (horas, dias, semanas, meses): volta para 1.
-    if (frequency !== lastFrequency) form.elements.interval.value = '1';
+    // O intervalo muda de sentido com a repetição (horas, dias, semanas, meses): cada uma tem o seu
+    // (1, até o usuário escolher).
+    if (frequency !== lastFrequency) {
+      intervalByFrequency[lastFrequency] = form.elements.interval.value;
+      form.elements.interval.value = intervalByFrequency[frequency] || '1';
+    }
     // Dias da semana: os já escolhidos nesta repetição ou, enquanto o usuário não escolher, uma
     // sugestão diferente para "a cada algumas horas" e "semanalmente".
     if (frequency !== lastFrequency) {
@@ -307,8 +312,7 @@ export function bindSchedule(form, { onModeChange = () => {}, scheduleId = null 
     if (!scheduling(form)) return;
     const token = ++request;
     try {
-      const { rule } = readSchedule(form);
-      const result = await post('/api/schedules/preview', { rule, scheduleId });
+      const result = await post('/api/schedules/preview', { rule: readSchedule(form).rule, scheduleId });
       if (token !== request) return;
       const next = result.next || [];
       paint(
@@ -317,8 +321,8 @@ export function bindSchedule(form, { onModeChange = () => {}, scheduleId = null 
           ${next.length
             ? html`<div class="muted small">${next.length === 1 ? 'Execução' : 'Próximas execuções'}:</div>
                 <ol class="next-runs">${next.map((iso) => html`<li>${fmtServerDateTime(iso)}</li>`)}</ol>
-                ${result.endsAt ? html`<div class="muted small">Última execução${rule.end === 'count' ? ' prevista' : ''}: ${fmtServerDateTime(result.endsAt)}${rule.end === 'count' ? ` (${result.remaining === 1 ? 'falta 1 execução' : `faltam ${result.remaining} execuções`}; horários pulados ou perdidos não contam)` : ''}.</div>` : ''}`
-            : html`<div class="danger-text small">Nenhuma execução futura: pela regra, a data e o horário já passaram.</div>`}`,
+                ${result.endsAt && result.rule.frequency !== 'once' ? html`<div class="muted small">Última execução${result.rule.end === 'count' ? ' prevista' : ''}: ${fmtServerDateTime(result.endsAt)}${result.rule.end === 'count' ? ` (${result.remaining === 1 ? 'falta 1 execução' : `faltam ${result.remaining} execuções`}; horários pulados ou perdidos não contam)` : ''}.</div>` : ''}`
+            : html`<div class="danger-text small">${result.remaining === 0 ? 'Todas as execuções previstas já foram feitas: aumente o número de execuções ou mude a regra.' : 'Nenhuma execução futura: pela regra, a data e o horário já passaram.'}</div>`}`,
       );
     } catch (err) {
       if (token !== request) return;

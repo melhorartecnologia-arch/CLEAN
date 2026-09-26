@@ -240,16 +240,17 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     }
   });
 
+  // O agendamento que iniciou a análise pode ter sido excluído (o relatório continua).
+  const withSchedule = (scan) => ({ ...scan, scheduleExists: Boolean(scan.scheduleId && store.getSchedule(scan.scheduleId)) });
+
   router.get('/:id', (req, res) => {
-    const scan = getScan(req);
-    // O agendamento que iniciou a análise pode ter sido excluído (o relatório continua).
-    res.json({ ...scan, scheduleExists: Boolean(scan.scheduleId && store.getSchedule(scan.scheduleId)) });
+    res.json(withSchedule(getScan(req)));
   });
 
   router.post('/:id/cancel', (req, res) => {
     const scan = getScan(req);
     if (!manager.cancel(scan.id)) throw new HttpError(409, 'A análise não está em andamento.');
-    res.json(store.getScan(scan.id));
+    res.json(withSchedule(store.getScan(scan.id)));
   });
 
   router.delete('/:id', async (req, res) => {

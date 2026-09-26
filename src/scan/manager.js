@@ -123,11 +123,14 @@ export class ScanManager {
 
   /**
    * Inicia uma análise. body.kind = 'mail' para caixas de e-mail; senão, repositórios de arquivos.
-   * by: quem iniciou (registrado nas exclusões automáticas); schedule: { id, name } do agendamento
-   * que iniciou a análise.
+   * by: quem iniciou (registrado nas exclusões automáticas); schedule: { id, name, criteria,
+   * enabled } do agendamento que iniciou a análise (critérios da exclusão e situação no início).
    */
   async start(body = {}, { by = null, schedule = null } = {}) {
-    const origin = { startedBy: by, ...(schedule ? { scheduleId: schedule.id, scheduleName: schedule.name } : {}) };
+    const origin = {
+      startedBy: by,
+      ...(schedule ? { scheduleId: schedule.id, scheduleName: schedule.name, scheduleCriteria: schedule.criteria ?? null, scheduleEnabled: schedule.enabled !== false } : {}),
+    };
     if (body?.kind === 'mail') return this.#startMail(body, origin);
     const { name, repositoryIds, listIds, options } = body || {};
     const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
@@ -263,7 +266,12 @@ export class ScanManager {
    * deixam de excluir itens daquele repositório (kind 'repository') ou conexão (kind 'mail').
    */
   revokeDeletion(kind, id, reason) {
-    for (const entry of this.running.values()) entry.worker?.postMessage({ type: 'revoke-delete', kind, id, reason });
+    for (const [scanId, entry] of this.running) {
+      const scan = this.store.getScan(scanId);
+      const targets = kind === 'mail' ? scan?.sourceIds : scan?.repositoryIds;
+      if (scan?.options?.deleteMatches && targets?.includes(id)) this.store.updateScan(scanId, { deletionRevoked: reason });
+      entry.worker?.postMessage({ type: 'revoke-delete', kind, id, reason });
+    }
   }
 
   /**
@@ -273,6 +281,7 @@ export class ScanManager {
   revokeScanDeletion(id, reason) {
     const entry = this.running.get(id);
     if (!entry) return;
+    this.store.updateScan(id, { deletionRevoked: reason });
     entry.revokeAll = reason; // a thread ainda pode estar sendo criada
     entry.worker?.postMessage({ type: 'revoke-delete', all: true, reason });
   }

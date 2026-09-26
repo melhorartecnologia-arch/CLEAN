@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Store } from '../src/store.js';
 import { ScanManager, sanitizeOptions } from '../src/scan/manager.js';
 import { createApp } from '../src/app.js';
-import { Scheduler, INCREMENTAL_MARGIN_MS, deletionPins, deletionCriteria } from '../src/schedule/scheduler.js';
+import { Scheduler, INCREMENTAL_MARGIN_MS, deletionPins, deletionCriteria, checkDeleteSchedules } from '../src/schedule/scheduler.js';
 import { validateRule } from '../src/schedule/recurrence.js';
 
 let root;
@@ -39,7 +39,20 @@ function stubManager(store) {
     hasItemDeletion: () => false,
     isActive: (id) => active.has(id),
     async start(body, { by, schedule }) {
-      const scan = store.createScan({ kind: body.kind, name: body.name, status: 'queued', options: body.options, startedBy: by, scheduleId: schedule.id, scheduleName: schedule.name, stats: {} });
+      const scan = store.createScan({
+        kind: body.kind,
+        name: body.name,
+        status: 'queued',
+        options: body.options,
+        startedBy: by,
+        scheduleId: schedule.id,
+        scheduleName: schedule.name,
+        scheduleCriteria: schedule.criteria ?? null,
+        scheduleEnabled: schedule.enabled !== false,
+        ...(body.kind === 'mail' ? { sourceIds: body.sourceIds } : { repositoryIds: body.repositoryIds }),
+        listIds: body.listIds,
+        stats: {},
+      });
       calls.push({ body, by, schedule, scanId: scan.id });
       active.add(scan.id);
       return scan;
@@ -106,7 +119,7 @@ test('execução no horário, próxima execução e registro no histórico', asy
   assert.equal(call.body.confirmDelete, '');
   assert.match(call.body.name, /^Varredura noturna – 26\/09\/2026/);
   assert.equal(call.by, 'agendamento "Varredura noturna"');
-  assert.deepEqual(call.schedule, { id: schedule.id, name: 'Varredura noturna' });
+  assert.deepEqual(call.schedule, { id: schedule.id, name: 'Varredura noturna', criteria: null, enabled: true });
   assert.equal(s.nextRunAt, at(2026, 9, 27, 2).toISOString());
   assert.equal(s.runCount, 1);
   assert.equal(s.history[0].status, 'started');
@@ -230,6 +243,12 @@ test('período: últimos N dias e incremental com análise completa periódica',
   await run(at(2026, 10, 5, 2, 0, 5));
   assert.equal(manager.calls[9].body.options.deleteMatches, true);
   assert.equal(from(9), null);
+  // Uma execução com exclusão que foi desligada (na fila ou durante) não serve de base.
+  const off = store.getSchedule(inc.schedule.id).history[0].scanId;
+  store.updateScan(off, { options: { ...store.getScan(off).options, deleteMatches: true }, deletionRevoked: 'o agendamento foi pausado' });
+  manager.finish(off, { startedAt: at(2026, 10, 5, 2, 0, 6) });
+  await run(at(2026, 10, 6, 2, 0, 5));
+  assert.equal(from(10), null, 'a exclusão não valeu na anterior: esta é completa');
 });
 
 test('exclusão automática só com o que foi confirmado ao salvar', async () => {
@@ -276,7 +295,17 @@ test('exclusão automática só com o que foi confirmado ao salvar', async () =>
 test('exclusão automática: termos, pastas ignoradas e locais protegidos também são confirmados', async () => {
   const w = await world({ action: 'delete' });
   const { store, repo, list } = w;
-  const problems = () => new Scheduler({ store, manager: w.manager }).deletionGuard({ scheduleId: w.schedule.id, kind: 'files', repositoryIds: [repo.id], listIds: [list.id], options: store.getSchedule(w.schedule.id).options });
+  // Uma execução criada logo depois da confirmação (com os critérios confirmados).
+  const problems = () =>
+    new Scheduler({ store, manager: w.manager }).deletionGuard({
+      scheduleId: w.schedule.id,
+      kind: 'files',
+      repositoryIds: [repo.id],
+      listIds: [list.id],
+      options: store.getSchedule(w.schedule.id).options,
+      scheduleCriteria: store.getSchedule(w.schedule.id).deleteConfirmation.criteria,
+      scheduleEnabled: true,
+    });
   assert.equal(problems(), null);
 
   // Um termo novo na lista (ex.: "." numa expressão regular) ampliaria o que é excluído.
@@ -304,6 +333,36 @@ test('exclusão automática: termos, pastas ignoradas e locais protegidos també
   assert.equal(problems(), null);
   store.deleteRepository(inner.id);
   assert.match(problems(), /locais protegidos/);
+});
+
+test('execuções com exclusão em andamento: cadastro alterado, nova confirmação e pausa', async () => {
+  const w = await world({ action: 'delete' });
+  const { store, list, repo } = w;
+  const revoked = [];
+  w.manager.revokeScanDeletion = (id, reason) => revoked.push({ id, reason });
+  const s = await w.run(at(2026, 9, 26, 2, 0, 5));
+  const scanId = s.history[0].scanId;
+  const scan = store.getScan(scanId);
+  assert.equal(scan.scheduleCriteria, store.getSchedule(w.schedule.id).deleteConfirmation.criteria);
+  assert.equal(scan.scheduleEnabled, true);
+  // Em andamento: um termo novo na lista suspende o agendamento e a execução deixa de excluir.
+  store.updateScan(scanId, { options: { ...scan.options, deleteMatches: true } });
+  const { warning } = checkDeleteSchedules(store, () => store.updateList(list.id, { terms: [...list.terms, { id: 'n', type: 'text', value: 'contrato' }] }), w.scheduler);
+  assert.match(warning, /ficou suspensa/);
+  assert.equal(revoked.length, 1);
+  assert.equal(revoked[0].id, scanId);
+  assert.match(revoked[0].reason, /Os termos das listas/);
+  // Confirmada de novo com os critérios novos: a execução antiga (critérios de antes) continua sem excluir.
+  w.confirm();
+  assert.match(w.scheduler.deletionGuard(store.getScan(scanId)), /confirmada de novo com outros termos/);
+  // Execução criada com os critérios novos passa.
+  assert.equal(w.scheduler.deletionGuard({ ...store.getScan(scanId), scheduleCriteria: store.getSchedule(w.schedule.id).deleteConfirmation.criteria }), null);
+  // "Executar agora" num agendamento pausado: a pausa (anterior à execução) não a impede.
+  store.updateSchedule(w.schedule.id, { enabled: false });
+  const paused = { ...store.getScan(scanId), scheduleCriteria: store.getSchedule(w.schedule.id).deleteConfirmation.criteria };
+  assert.match(w.scheduler.deletionGuard({ ...paused, scheduleEnabled: true }), /pausado/);
+  assert.equal(w.scheduler.deletionGuard({ ...paused, scheduleEnabled: false }), null);
+  assert.ok(repo);
 });
 
 test('execução agendada com exclusão que esperou na fila é conferida quando começa', async () => {
@@ -452,6 +511,16 @@ test('guarda os últimos relatórios concluídos e o da última análise complet
   const s = w.store.getSchedule(w.schedule.id);
   assert.equal(s.history.find((h) => h.scanId === ids[0]).outcome.status, 'completed', 'o resultado continua no histórico');
   assert.match(w.store.getScan(ids[3]).log.map((l) => l.message).join(' '), /1 relatório\(s\) antigo\(s\) excluído\(s\)/);
+
+  // Relatório concluído com um local fora do ar não conta nem substitui o bom.
+  const outage = await world({ keepLast: 1 });
+  let o = await outage.run(at(2026, 9, 26, 2, 0, 5));
+  const fine = o.history[0].scanId;
+  outage.manager.finish(fine, { startedAt: at(2026, 9, 26, 2, 0, 6) });
+  o = await outage.run(at(2026, 9, 27, 2, 0, 5));
+  outage.manager.finish(o.history[0].scanId, { startedAt: at(2026, 9, 27, 2, 0, 6), errors: 1, gaps: 1 });
+  await outage.run(at(2026, 9, 27, 12));
+  assert.ok(outage.store.getScan(fine), 'o relatório bom continua');
 
   // Guardar 1: uma execução nova que falha não leva o último relatório concluído.
   const one = await world({ keepLast: 1 });

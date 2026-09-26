@@ -5,7 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { SecretBox } from './secrets.js';
 
-const EMPTY_DB = { version: 1, repositories: [], lists: [], mailSources: [], scans: [], schedules: [] };
+const EMPTY_DB = { version: 1, repositories: [], lists: [], mailSources: [], scans: [], schedules: [], pendingRemovals: [] };
 const MAX_LOG = 200;
 
 function now() {
@@ -52,7 +52,7 @@ export class Store {
       if (err.code !== 'ENOENT') throw new Error(`Não foi possível ler ${this.dbFile}: ${err.message}`);
       this.db = structuredClone(EMPTY_DB);
     }
-    for (const key of ['repositories', 'lists', 'mailSources', 'scans', 'schedules']) if (!Array.isArray(this.db[key])) this.db[key] = [];
+    for (const key of ['repositories', 'lists', 'mailSources', 'scans', 'schedules', 'pendingRemovals']) if (!Array.isArray(this.db[key])) this.db[key] = [];
     this.secrets = await SecretBox.open(this.dataDir);
     // Análises que estavam em andamento quando o servidor parou
     for (const scan of this.db.scans) {
@@ -62,6 +62,8 @@ export class Store {
         scan.current = null;
       }
     }
+    // Pastas de relatórios excluídos que não puderam ser apagadas (arquivo bloqueado): nova tentativa.
+    for (const id of this.db.pendingRemovals.splice(0)) await this.#removeScanDir(id);
     await this.saveNow();
     return this;
   }
@@ -244,13 +246,27 @@ export class Store {
     this.scheduleSave();
   }
 
+  /**
+   * Exclui o relatório: sai do cadastro na hora; a pasta é apagada em seguida (com novas tentativas:
+   * no Windows, antivírus e indexação bloqueiam arquivos por instantes). Se ainda assim não puder ser
+   * apagada, fica anotada e é tentada de novo quando o CLEAN iniciar.
+   */
   async deleteScan(id) {
-    // Primeiro a pasta (com novas tentativas: no Windows, antivírus e indexação bloqueiam arquivos
-    // por instantes); se ela não puder ser removida, o relatório continua no cadastro.
-    await fs.rm(this.scanDir(id), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    const dir = this.scanDir(id);
     const existed = this.#delete('scans', id);
     for (const key of [...this.resultCache.keys()]) if (key.startsWith(`${id}/`)) this.resultCache.delete(key);
+    await this.#removeScanDir(id, dir);
     return existed;
+  }
+
+  async #removeScanDir(id, dir = this.scanDir(id)) {
+    try {
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (err) {
+      console.error(`[CLEAN] Não foi possível apagar a pasta do relatório ${id} (nova tentativa ao iniciar): ${err.message}`);
+      if (!this.db.pendingRemovals.includes(id)) this.db.pendingRemovals.push(id);
+      this.scheduleSave();
+    }
   }
 
   // -- arquivos de cada análise ----------------------------------------------------------------

@@ -33,7 +33,7 @@ const summary = (list) => ({
   updatedAt: list.updatedAt,
 });
 
-export function listsRouter({ store }) {
+export function listsRouter({ store, scheduler = null }) {
   const router = Router();
 
   router.get('/', (req, res) => {
@@ -54,7 +54,7 @@ export function listsRouter({ store }) {
     if (!store.getList(req.params.id)) throw new HttpError(404, 'Lista não encontrada.');
     const data = parseList(req.body);
     // Termos novos ou alterados suspendem a exclusão automática dos agendamentos que usam a lista.
-    const { result, warning } = checkDeleteSchedules(store, () => store.updateList(req.params.id, data));
+    const { result, warning } = checkDeleteSchedules(store, () => store.updateList(req.params.id, data), scheduler);
     res.json({ ...result, ...(warning ? { scheduleWarning: warning } : {}) });
   });
 

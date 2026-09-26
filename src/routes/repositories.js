@@ -17,7 +17,7 @@ export function publicRepository(repo) {
   return out;
 }
 
-export function repositoriesRouter({ store, manager = null, endpoints = {} }) {
+export function repositoriesRouter({ store, manager = null, scheduler = null, endpoints = {} }) {
   const router = Router();
   const mailSourceOf = (body) => (typeof body?.credentialsFrom === 'string' && body.credentialsFrom ? store.getMailSource(body.credentialsFrom) : null);
 
@@ -27,7 +27,9 @@ export function repositoriesRouter({ store, manager = null, endpoints = {} }) {
 
   router.post('/', (req, res) => {
     const data = parseRepository(req.body, { box: store.secrets, mailSource: mailSourceOf(req.body) });
-    res.status(201).json(publicRepository(store.createRepository(data)));
+    // Um repositório novo sem exclusão pode proteger pastas, contas ou sites de um agendamento.
+    const { result, warning } = checkDeleteSchedules(store, () => store.createRepository(data), scheduler);
+    res.status(201).json({ ...publicRepository(result), ...(warning ? { scheduleWarning: warning } : {}) });
   });
 
   router.put('/:id', (req, res) => {
@@ -36,7 +38,7 @@ export function repositoriesRouter({ store, manager = null, endpoints = {} }) {
     const before = { allowDelete: existing.allowDelete, scope: deletionScope(existing), deleteMode: existing.deleteMode };
     const data = parseRepository(req.body, { existing, box: store.secrets, mailSource: mailSourceOf(req.body) });
     // Agendamentos com exclusão automática afetados pela alteração ficam suspensos (com aviso).
-    const { result: updated, warning } = checkDeleteSchedules(store, () => store.updateRepository(existing.id, data));
+    const { result: updated, warning } = checkDeleteSchedules(store, () => store.updateRepository(existing.id, data), scheduler);
     // Análises em andamento deixam de excluir se a exclusão foi desligada ou o alcance/forma mudou.
     if (before.allowDelete && (!updated.allowDelete || deletionScope(updated) !== before.scope || (updated.deleteMode || null) !== (before.deleteMode || null))) {
       const reason = !updated.allowDelete
@@ -56,7 +58,7 @@ export function repositoriesRouter({ store, manager = null, endpoints = {} }) {
     if (!existing) throw new HttpError(404, 'Repositório não encontrado.');
     assertUnused(store, 'files', existing.id, 'O repositório');
     // Um repositório sem exclusão pode proteger pastas de outro usado por um agendamento.
-    const { warning } = checkDeleteSchedules(store, () => store.deleteRepository(existing.id));
+    const { warning } = checkDeleteSchedules(store, () => store.deleteRepository(existing.id), scheduler);
     if (existing.allowDelete) manager?.revokeDeletion('repository', existing.id, 'o repositório foi removido do cadastro');
     if (warning) return res.json({ scheduleWarning: warning });
     res.status(204).end();

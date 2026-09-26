@@ -145,10 +145,12 @@ export function scheduleProblems(store, schedule) {
  * Aplica uma alteração num cadastro (repositório, conexão ou lista) e devolve { result, warning }:
  * o aviso cita os agendamentos com exclusão automática que ficaram suspensos por causa dela.
  */
-export function checkDeleteSchedules(store, apply) {
+export function checkDeleteSchedules(store, apply, scheduler = null) {
   const affected = store.listSchedules().filter((s) => s.action === 'delete');
   const fine = new Set(affected.filter((s) => scheduleProblems(store, s).length === 0).map((s) => s.id));
   const result = apply();
+  // Execuções agendadas em andamento deixam de excluir se a exclusão confirmada não vale mais.
+  scheduler?.reviewAll();
   const names = affected.filter((s) => fine.has(s.id) && store.getSchedule(s.id) && scheduleProblems(store, s).length > 0).map((s) => `"${s.name}"`);
   if (!names.length) return { result, warning: '' };
   const one = names.length === 1;
@@ -273,6 +275,7 @@ export class Scheduler {
   }
 
   async #due(schedule, due, now) {
+    const rule = JSON.stringify(schedule.rule);
     // A próxima execução é marcada antes de iniciar esta: nunca executa o mesmo horário duas vezes.
     const next = nextOccurrence(schedule.rule, now, { remaining: remainingOf(schedule) });
     this.store.updateScheduleState(schedule.id, { nextRunAt: next ? next.toISOString() : null });
@@ -290,9 +293,10 @@ export class Scheduler {
       scan = await this.#fire(schedule, { trigger: 'catch-up', plannedFor: due, note: `Execução atrasada. ${lost}` });
     }
     if (!scan) return;
-    // "Depois de N execuções": esta conta; ao chegar a N, o agendamento termina.
+    // "Depois de N execuções": esta conta; ao chegar a N, o agendamento termina. Se a regra mudou
+    // enquanto a execução era iniciada, a nova regra começa a contagem do zero.
     const current = this.store.getSchedule(schedule.id);
-    if (!current) return;
+    if (!current || JSON.stringify(current.rule) !== rule) return;
     const countDone = (current.countDone || 0) + 1;
     const ended = current.rule?.end === 'count' && current.rule.frequency !== 'once' && countDone >= current.rule.count;
     this.store.updateScheduleState(schedule.id, ended ? { countDone, nextRunAt: null } : { countDone });
@@ -347,6 +351,8 @@ export class Scheduler {
       period = this.#period(schedule, now, signature);
       const mail = schedule.kind === 'mail';
       const deleting = schedule.action === 'delete';
+      // Critérios da exclusão com que esta execução começa (iguais aos confirmados: sem problemas).
+      const criteria = deleting ? deletionCriteria(this.store, schedule) : null;
       const confirmed = schedule.deleteConfirmation;
       const origin = `agendamento "${schedule.name}"${deleting && confirmed ? ` (exclusão automática confirmada por ${confirmed.by} em ${fmt(confirmed.at)})` : ''}`;
       scan = await this.manager.start(
@@ -358,7 +364,7 @@ export class Scheduler {
           options: { ...schedule.options, deleteMatches: deleting, [mail ? 'receivedAfter' : 'modifiedAfter']: period.from ? period.from.toISOString() : null },
           confirmDelete: deleting ? 'EXCLUIR' : '',
         },
-        { by: manual ? `${by} (Executar agora, ${origin})` : origin, schedule: { id: schedule.id, name: schedule.name } },
+        { by: manual ? `${by} (Executar agora, ${origin})` : origin, schedule: { id: schedule.id, name: schedule.name, criteria, enabled: schedule.enabled } },
       );
     } catch (err) {
       const message = err instanceof ScanError ? err.message : `Falha ao iniciar a análise: ${err.message}`;
@@ -400,7 +406,7 @@ export class Scheduler {
     const runs = (schedule.history || []).filter((h) => h.status === 'started' && h.signature === signature);
     // Uma execução que não conseguiu ler um repositório, uma conta, um site ou uma caixa inteira
     // não serve de base: o que mudou antes dela ficaria de fora das próximas.
-    const complete = (h) => h.outcome?.status === 'completed' && !h.outcome.gaps && h.outcome.startedAt;
+    const complete = (h) => h.outcome?.status === 'completed' && !h.outcome.gaps && h.outcome.startedAt && (schedule.action !== 'delete' || h.outcome.deleting !== false);
     const baseline = runs.find((h) => h.base && complete(h));
     if (!baseline) {
       return { from: null, full: true, base: true, text: 'análise completa (não há execução anterior concluída, sem falhas de acesso, com os mesmos locais, termos e opções).' };
@@ -442,6 +448,8 @@ export class Scheduler {
               deleted: scan.stats?.deleted || 0,
               errors: scan.stats?.errors || 0,
               gaps: scan.stats?.gaps || 0,
+              // Com exclusão: se ela valeu até o fim (não foi desligada na fila nem durante a execução).
+              deleting: Boolean(scan.options?.deleteMatches) && !scan.deletionRevoked,
               error: scan.error || null,
             }
           : { status: 'removed' };
@@ -472,12 +480,14 @@ export class Scheduler {
       .filter(({ scan }) => scan.scheduleId === id)
       .sort((a, b) => String(b.scan.createdAt).localeCompare(String(a.scan.createdAt)) || b.index - a.index)
       .map(({ scan }) => scan);
-    const lastFull = (schedule.history || []).find((h) => h.status === 'started' && h.full && h.outcome?.status === 'completed')?.scanId;
+    // Concluído sem falhas de acesso (um relatório de quando um local estava fora do ar não conta).
+    const good = (scan) => scan.status === 'completed' && !scan.stats?.gaps;
+    const lastFull = (schedule.history || []).find((h) => h.status === 'started' && h.full && h.outcome?.status === 'completed' && !h.outcome.gaps)?.scanId;
     let completed = 0;
     let removed = 0;
     for (const scan of own) {
       const kept = completed < keep;
-      if (scan.status === 'completed') completed++;
+      if (good(scan)) completed++;
       if (kept || scan.id === lastFull || !FINISHED.has(scan.status)) continue;
       if (this.manager.isActive(scan.id) || this.manager.hasItemDeletion(scan.id)) continue;
       try {
@@ -503,8 +513,14 @@ export class Scheduler {
   deletionGuard(scan) {
     const schedule = this.store.getSchedule(scan.scheduleId);
     if (!schedule) return 'o agendamento foi excluído';
-    if (!schedule.enabled) return 'o agendamento foi pausado';
+    // Pausado depois de a execução ser criada ("Executar agora" num agendamento pausado vale).
+    if (!schedule.enabled && scan.scheduleEnabled !== false) return 'o agendamento foi pausado';
     if (schedule.action !== 'delete') return 'o agendamento passou a "Somente analisar"';
+    // Os critérios com que a execução começou (termos, pastas ignoradas, locais protegidos) precisam
+    // ser os confirmados agora: uma nova confirmação com outros critérios não vale para ela.
+    if (!scan.scheduleCriteria || scan.scheduleCriteria !== schedule.deleteConfirmation?.criteria) {
+      return 'a exclusão do agendamento foi confirmada de novo com outros termos, pastas ignoradas ou locais protegidos depois que esta execução foi criada';
+    }
     const targets = scan.kind === 'mail' ? scan.sourceIds : scan.repositoryIds;
     if (!sameIds(targets, schedule.targetIds) || !sameIds(scan.listIds, schedule.listIds)) return 'os locais ou as listas do agendamento foram alterados';
     // eslint-disable-next-line no-unused-vars
@@ -527,9 +543,15 @@ export class Scheduler {
    */
   reviewRuns(scheduleId) {
     for (const scan of this.store.listScans()) {
-      if (scan.scheduleId !== scheduleId || !scan.options?.deleteMatches || !this.manager.isActive(scan.id)) continue;
+      if (scan.scheduleId !== scheduleId || !scan.options?.deleteMatches || scan.deletionRevoked || !this.manager.isActive(scan.id)) continue;
       const reason = this.deletionGuard(scan);
       if (reason) this.manager.revokeScanDeletion(scan.id, reason);
     }
+  }
+
+  /** O mesmo para todas as execuções agendadas com exclusão (depois de alterar um cadastro). */
+  reviewAll() {
+    const ids = new Set(this.store.listScans().filter((s) => s.scheduleId && s.options?.deleteMatches && this.manager.isActive(s.id)).map((s) => s.scheduleId));
+    for (const id of ids) this.reviewRuns(id);
   }
 }

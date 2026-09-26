@@ -28,7 +28,7 @@ function runResult(s, h) {
   if (h.status === 'failed') return html`<span class="badge failed">Não iniciada</span>`;
   const status = h.scanStatus || h.outcome?.status;
   const badge = status && status !== 'removed' ? statusBadge(status) : html`<span class="badge">Iniciada</span>`;
-  return h.reportExists ? html`<a href="${reportLink(s, h.scanId)}" class="result-link" data-action="report" aria-label="Abrir o relatório">${badge}</a>` : badge;
+  return h.reportExists ? html`<a href="${reportLink(s, h.scanId)}" class="result-link" data-action="report">${badge}<span class="sr-only"> (abrir o relatório)</span></a>` : badge;
 }
 
 function outcomeText(s, h) {
@@ -107,8 +107,8 @@ export async function render(root, { ctx }) {
           ? html`<div class="empty">
               <p>Nenhum agendamento ainda. Agende uma análise para rodar sozinha, por exemplo toda noite ou uma vez por semana.</p>
               <div class="inline">
-                <a class="btn primary" href="#/agendamentos/novo">${icon('plus')} Agendar arquivos</a>
-                <a class="btn" href="#/agendamentos/novo?tipo=email">${icon('plus')} Agendar e-mails</a>
+                <a class="btn primary" href="#/agendamentos/novo" data-action="new-files">${icon('plus')} Agendar arquivos</a>
+                <a class="btn" href="#/agendamentos/novo?tipo=email" data-action="new-mail">${icon('plus')} Agendar e-mails</a>
               </div>
             </div>`
           : html`<div class="table-wrap">
@@ -197,13 +197,17 @@ export async function render(root, { ctx }) {
         location.hash = reportLink(s, scan.id);
         return;
       }
-      if (action === 'pause') {
-        await post(`/api/schedules/${s.id}/pause`);
-        toast(`Agendamento "${s.name}" pausado.`);
-      }
-      if (action === 'resume') {
-        const updated = await post(`/api/schedules/${s.id}/resume`);
-        toast(updated.nextRunAt ? `Agendamento retomado. Próxima execução: ${fmtServerDateTime(updated.nextRunAt)}.` : 'Agendamento retomado, mas a regra não tem mais execuções futuras.', updated.nextRunAt ? 'success' : 'info');
+      if (action === 'pause' || action === 'resume') {
+        if (action === 'pause') {
+          await post(`/api/schedules/${s.id}/pause`);
+          toast(`Agendamento "${s.name}" pausado.`);
+        } else {
+          const updated = await post(`/api/schedules/${s.id}/resume`);
+          toast(updated.nextRunAt ? `Agendamento retomado. Próxima execução: ${fmtServerDateTime(updated.nextRunAt)}.` : 'Agendamento retomado, mas a regra não tem mais execuções futuras.', updated.nextRunAt ? 'success' : 'info');
+        }
+        await refresh({ force: true });
+        list.querySelector(`tr[data-id="${CSS.escape(s.id)}"] [data-action="${action === 'pause' ? 'resume' : 'pause'}"]`)?.focus();
+        return;
       }
       if (action === 'delete') {
         if (!(await confirmDialog(`Excluir o agendamento "${s.name}"? Os relatórios já gerados são mantidos.`, { confirmLabel: 'Excluir' }))) return;
@@ -217,7 +221,13 @@ export async function render(root, { ctx }) {
     }
   };
 
-  await refresh({ force: true });
+  try {
+    await refresh({ force: true });
+  } catch (err) {
+    stopped = true;
+    clearTimeout(timer);
+    throw err;
+  }
   root.addEventListener('click', onClick);
   return () => {
     stopped = true;

@@ -147,7 +147,7 @@ export function publicMailSource(source) {
   return out;
 }
 
-export function mailSourcesRouter({ store, manager = null, endpoints = {} }) {
+export function mailSourcesRouter({ store, manager = null, scheduler = null, endpoints = {} }) {
   const router = Router();
 
   const find = (id) => {
@@ -224,7 +224,7 @@ export function mailSourcesRouter({ store, manager = null, endpoints = {} }) {
       const saved = store.updateMailSource(existing.id, data);
       syncLinkedRepositories(saved);
       return saved;
-    });
+    }, scheduler);
     // Análises em andamento deixam de excluir se a exclusão foi desligada ou mudou de forma.
     if (before.allowDelete && (!updated.allowDelete || updated.deleteMode !== before.deleteMode)) {
       manager?.revokeDeletion('mail', existing.id, updated.allowDelete ? 'a forma de exclusão da conexão foi alterada' : 'a opção "Permitir exclusão" foi desligada');

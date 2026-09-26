@@ -259,6 +259,7 @@ export class Scanner {
         if (done) return;
         if (entry.type === 'error') {
           this.error(entry.path, entry.error);
+          if (entry.path === repo.path) this.stats.gaps++; // a raiz do repositório não pôde ser listada
         } else if (entry.type === 'dir') {
           this.stats.directories++;
         } else {
@@ -339,6 +340,7 @@ export class Scanner {
         if (done) return;
         if (entry.type === 'error') {
           this.error(entry.path, entry.error);
+          if (entry.path === drive.label) this.stats.gaps++; // a raiz da biblioteca não pôde ser listada
         } else if (entry.type === 'dir') {
           this.stats.directories++;
         } else {

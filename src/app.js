@@ -153,9 +153,9 @@ export function createApp({ store, manager, config, scheduler = new Scheduler({ 
       mailTypes: MAIL_TYPES,
     });
   });
-  api.use('/repositories', repositoriesRouter({ store, manager, endpoints: config.mailEndpoints }));
-  api.use('/lists', listsRouter({ store }));
-  api.use('/mail-sources', mailSourcesRouter({ store, manager, endpoints: config.mailEndpoints }));
+  api.use('/repositories', repositoriesRouter({ store, manager, scheduler, endpoints: config.mailEndpoints }));
+  api.use('/lists', listsRouter({ store, scheduler }));
+  api.use('/mail-sources', mailSourcesRouter({ store, manager, scheduler, endpoints: config.mailEndpoints }));
   api.use('/scans', scansRouter({ store, manager, endpoints: config.mailEndpoints }));
   api.use('/schedules', schedulesRouter({ store, manager, scheduler }));
   api.use((req, res, next) => next(new HttpError(404, 'Rota não encontrada.')));
