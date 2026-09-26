@@ -25,6 +25,7 @@ import { startMockApis } from './helpers/mock-apis.js';
 import { startFakeImap } from './helpers/fake-imap.js';
 import { withGraph, repo as cloudRepo, file, folder } from './helpers/cloud-world.js';
 import { exportRetentionCsv, exportRetentionHtml } from '../src/report/retention-exports.js';
+import { summarizeRetention, filterRecords, filterMailRecords } from '../src/report/model.js';
 import { PassThrough } from 'node:stream';
 
 let root;
@@ -87,6 +88,35 @@ test('política: validação, data de corte, critérios e descrição', () => {
   assert.equal(patternMatcher([])('qualquer'), true);
   assert.equal(ageBucket(400).label, '1 a 2 anos');
   assert.equal(ageBucket(5000).label, 'Mais de 10 anos');
+});
+
+test('relatório: faixas de idade, grupos com o tamanho e os mais antigos primeiro', () => {
+  const file = (id, days, extra) => ({ id, size: 100 * id, retention: { criterion: 'modified', date: new Date(Date.now() - days * DAY).toISOString(), ageDays: days }, terms: [], matches: [], ...extra });
+  const files = [
+    file(1, 400, { extension: '.pdf', lastUser: 'ana', repositoryId: 'r1', repositoryName: 'RH' }),
+    file(2, 5000, { extension: '.pdf', lastUser: null, repositoryId: 'r1', repositoryName: 'RH' }),
+    file(3, 800, { extension: '', lastUser: 'ana', repositoryId: 'r2', repositoryName: 'Fin' }),
+  ];
+  const s = summarizeRetention(files);
+  assert.deepEqual(s.byAge.map((b) => [b.key, b.count, b.bytes]), [['1-2-anos', 1, 100], ['2-5-anos', 1, 300], ['mais-de-10-anos', 1, 200]]);
+  assert.equal(s.count, 3);
+  assert.equal(s.bytes, 600);
+  // Pelo espaço e, no empate, pela quantidade.
+  assert.deepEqual(s.byExtension.map((g) => [g.key, g.count, g.bytes]), [['.pdf', 2, 300], ['', 1, 300]]);
+  assert.deepEqual(s.byUser.map((g) => [g.key, g.identified, g.count]), [['ana', true, 2], ['', false, 1]]);
+  assert.deepEqual(s.byRepository.map((g) => [g.key, g.name, g.count, g.bytes]), [['r1', 'RH', 2, 300], ['r2', 'Fin', 1, 300]]);
+  // Os mais antigos primeiro; filtro pela faixa de idade.
+  assert.deepEqual(filterRecords(files, { sort: 'oldest' }).map((r) => r.id), [2, 3, 1]);
+  assert.deepEqual(filterRecords(files, { age: '2-5-anos' }).map((r) => r.id), [3]);
+  const mails = [
+    { id: 1, mailbox: 'a@x.com', mailboxName: 'A', folder: 'Caixa de Entrada', size: 10, date: '2015-01-01T00:00:00Z', retention: { criterion: 'received', date: '2015-01-01T00:00:00Z', ageDays: 4285 }, terms: [], matches: [] },
+    { id: 2, mailbox: 'b@x.com', mailboxName: '', folder: 'Itens Enviados', size: 20, date: '2012-01-01T00:00:00Z', retention: { criterion: 'received', date: '2012-01-01T00:00:00Z', ageDays: 5381 }, terms: [], matches: [] },
+  ];
+  const m = summarizeRetention(mails, 'mail');
+  assert.deepEqual(m.byMailbox.map((g) => [g.key, g.name, g.count]), [['a@x.com', 'A', 1], ['b@x.com', '', 1]]);
+  assert.deepEqual(m.byFolder.map((g) => g.key).sort(), ['Caixa de Entrada', 'Itens Enviados']);
+  assert.equal(m.byExtension, undefined);
+  assert.deepEqual(filterMailRecords(mails, { sort: 'oldest' }).map((r) => r.id), [2, 1]);
 });
 
 /** Pasta com arquivos antigos e recentes (a data de modificação e de acesso é ajustável). */
@@ -466,6 +496,9 @@ test('API das políticas de retenção', async () => {
     assert.equal((await api('GET', `/api/scans/${scan.id}/results?age=ate-1-ano`)).data.total, 0);
     const oldest = (await api('GET', `/api/scans/${scan.id}/results?sort=oldest`)).data.items;
     assert.ok(oldest.every((r) => r.retention.criterion === 'accessed' && r.retention.ageDays > 3650));
+    // Sem ordenação informada: os mais antigos primeiro.
+    const byDefault = (await api('GET', `/api/scans/${scan.id}/results`)).data.items;
+    assert.deepEqual(byDefault.map((r) => r.id), oldest.map((r) => r.id));
     const csv = await (await fetch(`${base}/api/scans/${scan.id}/export.csv`)).text();
     const lines = csv.trim().split('\r\n');
     assert.equal(lines.length, 4, 'cabeçalho e três arquivos (sem termos)');
