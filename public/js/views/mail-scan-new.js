@@ -158,6 +158,7 @@ export async function render(root, { ctx, props = {} }) {
       el.hidden = later;
     });
     form.querySelector('[data-name-label]').textContent = later ? 'Nome do agendamento' : 'Nome da análise (opcional)';
+    form.elements.name.maxLength = later ? 120 : 200;
     form.elements.name.placeholder = later ? 'Ex.: Varredura LGPD dos e-mails – diária' : 'Ex.: Varredura LGPD dos e-mails – setembro';
     submit.className = `btn ${deleting ? 'danger' : 'primary'}`;
     const label = later ? (deleting ? 'Salvar agendamento com exclusão' : 'Salvar agendamento') : deleting ? 'Iniciar análise e exclusão' : 'Iniciar análise';

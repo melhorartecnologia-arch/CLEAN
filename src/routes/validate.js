@@ -35,7 +35,7 @@ export const DOMAIN_RE = /^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
 export function text(value, field, { required = false, max = 500 } = {}) {
   const v = typeof value === 'string' ? value.trim() : value === undefined || value === null ? '' : String(value).trim();
   if (required && !v) throw bad(`Informe ${field}.`);
-  if (v.length > max) throw bad(`${field} deve ter no máximo ${max} caracteres.`);
+  if (v.length > max) throw bad(`${field[0].toUpperCase()}${field.slice(1)} deve ter no máximo ${max} caracteres.`);
   return v;
 }
 

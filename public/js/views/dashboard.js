@@ -1,11 +1,12 @@
 // Painel inicial: números gerais, primeiros passos e análises recentes (arquivos e e-mail).
 import { get } from '../api.js';
 import { html, render as paint, icon, fmtNum, fmtCompact, fmtDateTime, fmtServerDateTime, statusBadge, plural } from '../ui.js';
+import { zoneNote } from '../schedule-form.js';
 
 const isMail = (s) => s.kind === 'mail';
 const running = (s) => s.status === 'running' || s.status === 'queued';
 
-export async function render(root) {
+export async function render(root, { ctx }) {
   const [repos, lists, sources, scans, schedules] = await Promise.all([
     get('/api/repositories'),
     get('/api/lists'),
@@ -80,6 +81,7 @@ export async function render(root) {
               <h2>Próximos agendamentos</h2>
               <span class="small"><a href="#/agendamentos">Ver todos</a></span>
             </div>
+            <p class="muted small">${zoneNote(ctx.info)}</p>
             ${attention.length
               ? html`<div class="alert">${icon('alert')}<div><b>${plural(attention.length, 'agendamento precisa', 'agendamentos precisam')} de atenção:</b> ${attention.map((s) => s.name).join(', ')}. <a href="#/agendamentos">Ver os detalhes</a></div></div>`
               : ''}
@@ -134,7 +136,7 @@ export async function render(root) {
       const latest = await get('/api/scans');
       if (!stopped && !latest.some(running)) {
         clearInterval(timer);
-        render(root);
+        render(root, { ctx });
       }
     } catch {
       // tenta de novo no próximo ciclo

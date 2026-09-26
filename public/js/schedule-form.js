@@ -40,6 +40,13 @@ const KEEP = [
   [100, 'Os 100 mais recentes'],
 ];
 
+/** Opções de "Relatórios guardados", incluindo um valor salvo fora da lista. */
+function keepOptions(current) {
+  const value = Number(current) || 0;
+  if (KEEP.some(([v]) => v === value)) return KEEP;
+  return [...KEEP, [value, `Os ${value} mais recentes`]].sort((a, b) => (a[0] || Infinity) - (b[0] || Infinity));
+}
+
 /** Hoje (AAAA-MM-DD) no fuso do servidor (ou no do navegador, se o fuso for desconhecido). */
 function today(timeZone) {
   try {
@@ -130,17 +137,17 @@ export function scheduleSection({ kind, schedule = null, fixed = false, info }) 
           <input type="checkbox" name="workdaysOnly" ${chk(r.workdaysOnly)} />
           <span>Somente em dias úteis (de segunda a sexta)</span>
         </label>
-        <div class="field full" data-for="monthly">
-          <span class="field-label">Dia do mês</span>
+        <fieldset class="plain full" data-for="monthly">
+          <legend>Dia do mês</legend>
           <div class="option-row">
-            <label class="check"><input type="radio" name="monthlyMode" value="day" ${chk((r.monthlyMode || 'day') === 'day')} /><span>No dia</span></label>
+            <label class="check"><input type="radio" name="monthlyMode" value="day" aria-label="No dia do mês informado ao lado" ${chk((r.monthlyMode || 'day') === 'day')} /><span>No dia</span></label>
             <input type="number" name="monthDay" min="1" max="31" value="${r.monthDay || 1}" aria-label="Dia do mês" data-selects="monthlyMode:day" />
           </div>
           <div class="option-row">
             <label class="check"><input type="radio" name="monthlyMode" value="last-day" ${chk(r.monthlyMode === 'last-day')} /><span>No último dia do mês</span></label>
           </div>
           <div class="option-row">
-            <label class="check"><input type="radio" name="monthlyMode" value="weekday" ${chk(r.monthlyMode === 'weekday')} /><span data-article>${feminine(r.weekday ?? 1) ? 'Na' : 'No'}</span></label>
+            <label class="check"><input type="radio" name="monthlyMode" value="weekday" aria-label="Num dia da semana do mês (semana e dia escolhidos ao lado)" ${chk(r.monthlyMode === 'weekday')} /><span data-article>${feminine(r.weekday ?? 1) ? 'Na' : 'No'}</span></label>
             <select name="weekOfMonth" aria-label="Qual semana do mês" data-selects="monthlyMode:weekday">
               ${ORDINALS.map(([v, stem]) => html`<option value="${v}" ${sel(r.weekOfMonth ?? 1, v)}>${ordinal(stem, r.weekday ?? 1)}</option>`)}
             </select>
@@ -148,34 +155,34 @@ export function scheduleSection({ kind, schedule = null, fixed = false, info }) 
               ${WEEKDAYS.map(([v, , name]) => html`<option value="${v}" ${sel(r.weekday ?? 1, v)}>${name}</option>`)}
             </select>
           </div>
-        </div>
-        <div class="field full" data-for="hourly daily weekly monthly">
-          <span class="field-label">Término</span>
+        </fieldset>
+        <fieldset class="plain full" data-for="hourly daily weekly monthly">
+          <legend>Término</legend>
           <div class="option-row">
             <label class="check"><input type="radio" name="end" value="never" ${chk(!r.end || r.end === 'never')} /><span>Nunca</span></label>
           </div>
           <div class="option-row">
-            <label class="check"><input type="radio" name="end" value="date" ${chk(r.end === 'date')} /><span>Em</span></label>
+            <label class="check"><input type="radio" name="end" value="date" aria-label="Terminar na data informada ao lado" ${chk(r.end === 'date')} /><span>Em</span></label>
             <input type="date" name="endDate" value="${r.endDate || ''}" aria-label="Data de término" data-selects="end:date" />
           </div>
           <div class="option-row">
-            <label class="check"><input type="radio" name="end" value="count" ${chk(r.end === 'count')} /><span>Depois de</span></label>
+            <label class="check"><input type="radio" name="end" value="count" aria-label="Terminar depois do número de execuções informado ao lado" ${chk(r.end === 'count')} /><span>Depois de</span></label>
             <input type="number" name="count" min="1" max="1000" value="${r.count || 10}" aria-label="Número de execuções" data-selects="end:count" />
             <span>execuções</span>
           </div>
-        </div>
+        </fieldset>
       </div>
       <div class="schedule-preview" data-preview aria-live="polite"></div>
       <p class="muted small">${zoneNote(info)} O CLEAN precisa estar em execução nesses horários (instale-o como serviço do Windows).</p>
 
       <div class="form-grid">
-        <div class="field full">
-          <span class="field-label">${mail ? 'Mensagens analisadas' : 'Arquivos analisados'} em cada execução</span>
+        <fieldset class="plain full">
+          <legend>${mail ? 'Mensagens analisadas' : 'Arquivos analisados'} em cada execução</legend>
           <div class="option-row">
             <label class="check"><input type="radio" name="periodType" value="all" ${chk(!p.type || p.type === 'all')} /><span>${mail ? 'Todas as mensagens' : 'Todos os arquivos'}</span></label>
           </div>
           <div class="option-row">
-            <label class="check"><input type="radio" name="periodType" value="days" ${chk(p.type === 'days')} /><span>Somente ${mail ? 'as recebidas' : 'os alterados'} nos últimos</span></label>
+            <label class="check"><input type="radio" name="periodType" value="days" aria-label="Somente ${mail ? 'as recebidas' : 'os alterados'} nos últimos dias (número informado ao lado)" ${chk(p.type === 'days')} /><span>Somente ${mail ? 'as recebidas' : 'os alterados'} nos últimos</span></label>
             <input type="number" name="periodDays" min="1" max="3650" value="${p.days || 7}" aria-label="Número de dias" data-selects="periodType:days" />
             <span>dias</span>
           </div>
@@ -195,7 +202,7 @@ export function scheduleSection({ kind, schedule = null, fixed = false, info }) 
             concluída (com 1 hora de margem); cada relatório mostra só o que foi encontrado nesse período. Mudanças nos locais, nas listas ou nas
             opções tornam a próxima execução completa. A análise completa periódica também pega o que ficou de fora por erro de leitura.
           </small>
-        </div>
+        </fieldset>
         <label class="check full">
           <input type="checkbox" name="catchUp" ${chk(schedule ? schedule.catchUp : true)} />
           <span><b>Se o CLEAN estiver parado no horário, executar assim que ele voltar</b><br /><small class="muted">Uma única execução, mesmo que vários horários tenham sido perdidos. Desmarcado: o horário perdido fica só registrado no histórico.</small></span>
@@ -203,7 +210,7 @@ export function scheduleSection({ kind, schedule = null, fixed = false, info }) 
         <label class="field">
           <span>Relatórios guardados</span>
           <select name="keepLast">
-            ${KEEP.map(([v, label]) => html`<option value="${v}" ${sel(schedule?.keepLast ?? 0, v)}>${label}</option>`)}
+            ${keepOptions(schedule?.keepLast ?? 0).map(([v, label]) => html`<option value="${v}" ${sel(schedule?.keepLast ?? 0, v)}>${label}</option>`)}
           </select>
           <small>Os mais antigos deste agendamento são excluídos a cada nova execução (o registro geral de exclusões é mantido).</small>
         </label>
@@ -216,10 +223,11 @@ export function scheduleSection({ kind, schedule = null, fixed = false, info }) 
 export function readSchedule(form) {
   const f = new FormData(form);
   const num = (name) => Number(f.get(name));
+  const workdays = f.get('frequency') === 'daily' && f.get('workdaysOnly') === 'on';
   return {
     rule: {
       frequency: f.get('frequency'),
-      interval: num('interval'),
+      interval: workdays ? 1 : Number(form.elements.interval.value),
       startDate: f.get('startDate'),
       time: f.get('time'),
       untilTime: f.get('untilTime'),
@@ -233,7 +241,7 @@ export function readSchedule(form) {
       endDate: f.get('endDate'),
       count: num('count'),
     },
-    period: { type: f.get('periodType'), days: num('periodDays'), fullEvery: num('fullEvery') },
+    period: { type: f.get('periodType'), days: num('periodDays'), fullEvery: f.get('fullEvery') === '' ? null : num('fullEvery') },
     catchUp: f.get('catchUp') === 'on',
     keepLast: num('keepLast'),
   };
@@ -252,6 +260,9 @@ export function bindSchedule(form, { onModeChange = () => {} } = {}) {
   let touchedDays = false;
   let lastFrequency = form.elements.frequency.value;
   let request = 0;
+  const dayInputs = () => [...form.querySelectorAll('[name="weekdays"]')];
+  // Dias escolhidos em cada repetição (hourly/weekly): voltar a uma repetição recupera os dias dela.
+  const daysByFrequency = { [lastFrequency]: dayInputs().filter((el) => el.checked).map((el) => el.value) };
 
   const show = () => {
     const frequency = form.elements.frequency.value;
@@ -271,13 +282,15 @@ export function bindSchedule(form, { onModeChange = () => {} } = {}) {
     fields.querySelector('[data-time-label]').textContent = frequency === 'hourly' ? 'Primeiro horário do dia' : 'Horário';
     // O intervalo muda de sentido com a repetição (horas, dias, semanas, meses): volta para 1.
     if (frequency !== lastFrequency) form.elements.interval.value = '1';
-    // Dias da semana: sugestão diferente para "a cada algumas horas" e "semanalmente", enquanto o
-    // usuário não escolher.
-    if (frequency !== lastFrequency && !touchedDays) {
-      const defaults = frequency === 'hourly' ? [1, 2, 3, 4, 5] : [1];
-      form.querySelectorAll('[name="weekdays"]').forEach((el) => {
-        el.checked = defaults.includes(Number(el.value));
-      });
+    // Dias da semana: os já escolhidos nesta repetição ou, enquanto o usuário não escolher, uma
+    // sugestão diferente para "a cada algumas horas" e "semanalmente".
+    if (frequency !== lastFrequency) {
+      daysByFrequency[lastFrequency] = dayInputs().filter((el) => el.checked).map((el) => el.value);
+      const remembered = daysByFrequency[frequency];
+      const days = remembered || (touchedDays ? null : frequency === 'hourly' ? ['1', '2', '3', '4', '5'] : ['1']);
+      if (days) {
+        for (const el of dayInputs()) el.checked = days.includes(el.value);
+      }
     }
     lastFrequency = frequency;
     // "Na primeira segunda-feira" / "No último sábado".
@@ -330,20 +343,8 @@ export function bindSchedule(form, { onModeChange = () => {} } = {}) {
     show();
     if (fields.contains(event.target) || name === 'when') refresh();
   };
-  const onFocus = (event) => {
-    const selects = event.target.dataset?.selects;
-    if (!selects) return;
-    const [group, value] = selects.split(':');
-    const radio = form.querySelector(`[name="${group}"][value="${value}"]`);
-    if (radio && !radio.checked) {
-      radio.checked = true;
-      show();
-      refresh();
-    }
-  };
   form.addEventListener('change', onChange);
   form.addEventListener('input', onChange);
-  form.addEventListener('focusin', onFocus);
   show();
   onModeChange(scheduling(form));
   drawPreview();
@@ -352,6 +353,5 @@ export function bindSchedule(form, { onModeChange = () => {} } = {}) {
     request++;
     form.removeEventListener('change', onChange);
     form.removeEventListener('input', onChange);
-    form.removeEventListener('focusin', onFocus);
   };
 }

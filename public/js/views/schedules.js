@@ -28,7 +28,7 @@ function runResult(s, h) {
   if (h.status === 'failed') return html`<span class="badge failed">Não iniciada</span>`;
   const status = h.scanStatus || h.outcome?.status;
   const badge = status && status !== 'removed' ? statusBadge(status) : html`<span class="badge">Iniciada</span>`;
-  return h.reportExists ? html`<a href="${reportLink(s, h.scanId)}" class="result-link">${badge}</a>` : badge;
+  return h.reportExists ? html`<a href="${reportLink(s, h.scanId)}" class="result-link" data-action="report" aria-label="Abrir o relatório">${badge}</a>` : badge;
 }
 
 function outcomeText(s, h) {
@@ -49,7 +49,7 @@ export async function render(root, { ctx }) {
     const last = s.lastRun;
     return html`<tr data-id="${s.id}">
       <td>
-        <a href="#/agendamentos/${s.id}"><b>${s.name}</b></a>
+        <a href="#/agendamentos/${s.id}" data-action="open"><b>${s.name}</b></a>
         <span class="kind-badge">${KIND[s.kind]}</span>
         ${s.action === 'delete' ? html`<span class="chip danger">exclusão automática</span>` : ''}
         <div class="muted small">${s.targets.map((t) => t.name).join(', ')} · ${s.lists.map((l) => l.name).join(', ')}</div>
@@ -72,57 +72,79 @@ export async function render(root, { ctx }) {
           ? html`<button class="icon-btn" data-action="pause" aria-label="Pausar ${s.name}" title="Pausar">${icon('pause')}</button>`
           : html`<button class="icon-btn" data-action="resume" aria-label="Retomar ${s.name}" title="Retomar">${icon('refresh')}</button>`}
         <button class="icon-btn" data-action="history" aria-label="Histórico de ${s.name}" title="Histórico">${icon('history')}</button>
-        <a class="icon-btn" href="#/agendamentos/${s.id}" aria-label="Editar ${s.name}" title="Editar">${icon('edit')}</a>
+        <a class="icon-btn" href="#/agendamentos/${s.id}" data-action="edit" aria-label="Editar ${s.name}" title="Editar">${icon('edit')}</a>
         <button class="icon-btn danger" data-action="delete" aria-label="Excluir ${s.name}" title="Excluir">${icon('trash')}</button>
       </td>
     </tr>`;
   };
 
-  const draw = () =>
-    redraw(root, () =>
+  // A página é desenhada uma vez; as atualizações redesenham só a lista, mantendo o foco e a
+  // rolagem horizontal da tabela.
+  paint(
+    root,
+    html`<div class="page-head">
+        <div>
+          <h1>Agendamentos</h1>
+          <div class="sub">Análises executadas automaticamente nos dias e horários definidos, com os mesmos locais, listas e opções de uma análise comum.</div>
+        </div>
+        <div class="actions">
+          <a class="btn primary" href="#/agendamentos/novo">${icon('plus')} Agendar arquivos</a>
+          <a class="btn primary" href="#/agendamentos/novo?tipo=email">${icon('plus')} Agendar e-mails</a>
+        </div>
+      </div>
+      <div class="alert info">${icon('info')}<div>${zoneNote(ctx.info)} Os agendamentos só são executados com o CLEAN em execução (instale-o como serviço do Windows). Se a execução anterior de um agendamento ainda estiver em andamento, a nova é pulada.</div></div>
+      <section class="card" data-list></section>`,
+  );
+  const list = root.querySelector('[data-list]');
+
+  const draw = () => {
+    const scroll = list.querySelector('.table-wrap')?.scrollLeft || 0;
+    redraw(list, () =>
       paint(
-        root,
-        html`<div class="page-head">
-            <div>
-              <h1>Agendamentos</h1>
-              <div class="sub">Análises executadas automaticamente nos dias e horários definidos, com os mesmos locais, listas e opções de uma análise comum.</div>
-            </div>
-            <div class="actions">
-              <a class="btn primary" href="#/agendamentos/novo">${icon('plus')} Agendar arquivos</a>
-              <a class="btn primary" href="#/agendamentos/novo?tipo=email">${icon('plus')} Agendar e-mails</a>
-            </div>
-          </div>
-          <div class="alert info">${icon('info')}<div>${zoneNote(ctx.info)} Os agendamentos só são executados com o CLEAN em execução (instale-o como serviço do Windows). Se a execução anterior de um agendamento ainda estiver em andamento, a nova é pulada.</div></div>
-          <section class="card">
-            ${schedules.length === 0
-              ? html`<div class="empty">
-                  <p>Nenhum agendamento ainda. Agende uma análise para rodar sozinha, por exemplo toda noite ou uma vez por semana.</p>
-                  <div class="inline">
-                    <a class="btn primary" href="#/agendamentos/novo">${icon('plus')} Agendar arquivos</a>
-                    <a class="btn" href="#/agendamentos/novo?tipo=email">${icon('plus')} Agendar e-mails</a>
-                  </div>
-                </div>`
-              : html`<div class="table-wrap">
-                  <table class="data schedules">
-                    <thead>
-                      <tr><th>Agendamento</th><th>Quando</th><th>Próxima execução</th><th>Última execução</th><th><span class="sr-only">Ações</span></th></tr>
-                    </thead>
-                    <tbody>${schedules.map(row)}</tbody>
-                  </table>
-                </div>`}
-          </section>`,
+        list,
+        schedules.length === 0
+          ? html`<div class="empty">
+              <p>Nenhum agendamento ainda. Agende uma análise para rodar sozinha, por exemplo toda noite ou uma vez por semana.</p>
+              <div class="inline">
+                <a class="btn primary" href="#/agendamentos/novo">${icon('plus')} Agendar arquivos</a>
+                <a class="btn" href="#/agendamentos/novo?tipo=email">${icon('plus')} Agendar e-mails</a>
+              </div>
+            </div>`
+          : html`<div class="table-wrap">
+              <table class="data schedules">
+                <thead>
+                  <tr><th>Agendamento</th><th>Quando</th><th>Próxima execução</th><th>Última execução</th><th><span class="sr-only">Ações</span></th></tr>
+                </thead>
+                <tbody>${schedules.map(row)}</tbody>
+              </table>
+            </div>`,
       ),
     );
+    const wrap = list.querySelector('.table-wrap');
+    if (wrap) wrap.scrollLeft = scroll;
+  };
 
-  const refresh = async () => {
-    const latest = await get('/api/schedules');
-    if (stopped) return;
-    schedules = latest;
-    draw();
+  const dialogOpen = () => Boolean(document.getElementById('modal')?.open);
+
+  const refresh = async ({ force = false } = {}) => {
     clearTimeout(timer);
-    // Mais frequente enquanto alguma execução estiver em andamento ou prestes a começar.
-    const soon = schedules.some((s) => s.running || (s.nextRunAt && Date.parse(s.nextRunAt) - Date.now() < 90000));
-    timer = setTimeout(() => refresh().catch(() => {}), soon ? 4000 : 30000);
+    try {
+      // Com um diálogo aberto (histórico, confirmação), a lista espera: o botão que o abriu continua
+      // o mesmo e recebe o foco de volta ao fechar.
+      if (!force && dialogOpen()) return;
+      const latest = await get('/api/schedules');
+      if (stopped) return;
+      schedules = latest;
+      draw();
+    } finally {
+      // Mais frequente enquanto alguma execução estiver em andamento ou prestes a começar; uma falha
+      // (servidor reiniciando, rede) não interrompe as atualizações.
+      if (!stopped) {
+        clearTimeout(timer); // uma única atualização programada, mesmo com duas em andamento
+        const soon = schedules.some((s) => s.running || (s.nextRunAt && Date.parse(s.nextRunAt) - Date.now() < 90000));
+        timer = setTimeout(() => refresh().catch(() => {}), soon ? 4000 : 30000);
+      }
+    }
   };
 
   const showHistory = async (s) => {
@@ -131,6 +153,7 @@ export async function render(root, { ctx }) {
     await openDialog({
       title: `Histórico – ${s.name}`,
       wide: true,
+      describe: false,
       submitLabel: 'Fechar',
       cancelLabel: '',
       body: history.length
@@ -186,14 +209,14 @@ export async function render(root, { ctx }) {
         await del(`/api/schedules/${s.id}`);
         toast('Agendamento excluído.', 'success');
       }
-      await refresh();
+      await refresh({ force: true });
     } catch (err) {
       toast(err.message, 'error');
-      await refresh().catch(() => {});
+      await refresh({ force: true }).catch(() => {});
     }
   };
 
-  await refresh();
+  await refresh({ force: true });
   root.addEventListener('click', onClick);
   return () => {
     stopped = true;

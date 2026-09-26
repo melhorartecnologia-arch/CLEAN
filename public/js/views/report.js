@@ -10,6 +10,7 @@ import {
   fmtNum,
   fmtCompact,
   fmtDateTime,
+  fmtServerDateTime,
   fmtDuration,
   fmtBytes,
   statusBadge,
@@ -607,7 +608,11 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const exportsLabel = filtered ? 'Exportar (com os filtros atuais):' : 'Exportar:';
     // Agendamento que iniciou a análise e o período analisado (incremental ou "a partir de").
     const after = scan.options?.modifiedAfter || scan.options?.receivedAfter;
-    const period = after ? `somente ${scan.kind === 'mail' ? 'mensagens recebidas' : 'arquivos alterados'} a partir de ${fmtDateTime(after)}` : '';
+    // No fuso do servidor, como a data informada na análise (ou o período do agendamento).
+    const period = after ? `somente ${scan.kind === 'mail' ? 'mensagens recebidas' : 'arquivos alterados'} a partir de ${fmtServerDateTime(after, { weekday: false })}` : '';
+    const schedule = scan.scheduleExists
+      ? html`${icon('clock')} Agendamento <a href="#/agendamentos/${scan.scheduleId}">${scan.scheduleName}</a>`
+      : html`${icon('clock')} Agendamento "${scan.scheduleName}" (excluído)`;
     paint(
       $('[data-head]'),
       html`<div class="page-head">
@@ -615,7 +620,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           <div class="inline"><h1>${scan.name}</h1>${statusBadge(scan.status)}${scan.options?.deleteMatches ? html`<span class="badge deleting">com exclusão automática</span>` : ''}</div>
           <div class="sub">Início ${started} · duração ${duration} · ${P.subtitle(scan)}</div>
           ${scan.scheduleId || period
-            ? html`<div class="sub">${scan.scheduleId ? html`${icon('clock')} Agendamento <a href="#/agendamentos/${scan.scheduleId}">${scan.scheduleName}</a>` : ''}${scan.scheduleId && period ? ' · ' : ''}${period}</div>`
+            ? html`<div class="sub">${scan.scheduleId ? schedule : ''}${scan.scheduleId && period ? ' · ' : ''}${period}</div>`
             : ''}
         </div>
         <div class="actions">

@@ -241,7 +241,9 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   });
 
   router.get('/:id', (req, res) => {
-    res.json(getScan(req));
+    const scan = getScan(req);
+    // O agendamento que iniciou a análise pode ter sido excluído (o relatório continua).
+    res.json({ ...scan, scheduleExists: Boolean(scan.scheduleId && store.getSchedule(scan.scheduleId)) });
   });
 
   router.post('/:id/cancel', (req, res) => {

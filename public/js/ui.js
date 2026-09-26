@@ -174,12 +174,14 @@ export function toast(message, kind = 'info') {
  * Abre um formulário em diálogo modal. onSubmit(form) pode lançar erro (exibido no diálogo) ou
  * devolver false para manter o diálogo aberto.
  */
-export function openDialog({ title, body, submitLabel = 'Salvar', cancelLabel = 'Cancelar', wide = false, danger = false, onOpen, onSubmit }) {
+export function openDialog({ title, body, submitLabel = 'Salvar', cancelLabel = 'Cancelar', wide = false, danger = false, describe = true, onOpen, onSubmit }) {
   const dialog = document.getElementById('modal');
   dialog.className = wide ? 'wide' : '';
-  // Leitores de tela anunciam o título e o texto ao abrir (importante nas confirmações de exclusão).
+  // Leitores de tela anunciam o título e o texto ao abrir (importante nas confirmações de exclusão);
+  // describe: false em diálogos com conteúdo longo (tabelas), que não deve ser lido de uma vez.
   dialog.setAttribute('aria-labelledby', 'modal-title');
-  dialog.setAttribute('aria-describedby', 'modal-body');
+  if (describe) dialog.setAttribute('aria-describedby', 'modal-body');
+  else dialog.removeAttribute('aria-describedby');
   render(
     dialog,
     html`<form class="dialog" novalidate>

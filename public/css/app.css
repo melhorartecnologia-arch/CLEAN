@@ -1198,6 +1198,25 @@ details.help code {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+fieldset.plain {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+fieldset.plain > legend {
+  padding: 0;
+  margin-bottom: 5px;
+  font-size: 13px;
+  font-weight: 600;
+}
+@media (forced-colors: active) {
+  .weekdays input:checked + span {
+    forced-color-adjust: none;
+    border-color: Highlight;
+    background: Highlight;
+    color: HighlightText;
+  }
+}
 .option-row {
   display: flex;
   flex-wrap: wrap;
