@@ -69,11 +69,25 @@ export function zoneNote(info) {
   return server === local ? `Horários do servidor do CLEAN (${server}).` : `Horários do servidor do CLEAN (${server}), diferente do fuso deste computador (${local}).`;
 }
 
+/** Opção "Relatórios guardados" (owner: "deste agendamento", "desta política"). */
+export function keepField(schedule, owner = 'deste agendamento') {
+  const sel = (a, b) => (String(a) === String(b) ? 'selected' : '');
+  return html`<label class="field">
+    <span>Relatórios guardados</span>
+    <select name="keepLast">
+      ${keepOptions(schedule?.keepLast ?? 0).map(([v, label]) => html`<option value="${v}" ${sel(schedule?.keepLast ?? 0, v)}>${label}</option>`)}
+    </select>
+    <small>Os mais antigos ${owner} são excluídos a cada nova execução (o registro geral de exclusões é mantido).</small>
+  </label>`;
+}
+
 /**
  * Seção "Quando executar". kind: 'files' | 'mail'; schedule: agendamento em edição; fixed: a tela
- * é só de agendamento (sem a opção "Agora").
+ * é só de agendamento (sem a opção "Agora"). Políticas de retenção: manual (a primeira opção é
+ * "Manualmente", sem regra), sem o período de cada execução (period: false) e com os relatórios
+ * guardados fora da seção (keep: false).
  */
-export function scheduleSection({ kind, schedule = null, fixed = false, info }) {
+export function scheduleSection({ kind, schedule = null, fixed = false, info, manual = false, period: withPeriod = true, keep = true }) {
   const r = schedule?.rule || {};
   const p = schedule?.period || {};
   const frequency = r.frequency || 'daily';
@@ -82,19 +96,22 @@ export function scheduleSection({ kind, schedule = null, fixed = false, info }) 
   const items = mail ? 'mensagens' : 'arquivos';
   const sel = (a, b) => (String(a) === String(b) ? 'selected' : '');
   const chk = (a) => (a ? 'checked' : '');
+  const later = fixed || (manual && Boolean(schedule?.rule));
   return html`<fieldset class="full" data-when-fieldset>
     <legend>Quando executar</legend>
     <div class="type-choice" ${fixed ? 'hidden' : ''}>
       <label>
-        <input type="radio" name="when" value="now" ${chk(!fixed)} />
-        <span><b>Agora</b><small>Uma análise, iniciada ao confirmar.</small></span>
+        <input type="radio" name="when" value="${manual ? 'manual' : 'now'}" ${chk(!later)} />
+        ${manual
+          ? html`<span><b>Manualmente</b><small>Só quando alguém clicar em "Simular" ou "Executar" na lista de políticas.</small></span>`
+          : html`<span><b>Agora</b><small>Uma análise, iniciada ao confirmar.</small></span>`}
       </label>
       <label>
-        <input type="radio" name="when" value="schedule" ${chk(fixed)} />
+        <input type="radio" name="when" value="schedule" ${chk(later)} />
         <span><b>Agendar</b><small>Uma vez ou com repetição, nos dias e horários escolhidos.</small></span>
       </label>
     </div>
-    <div data-schedule-fields ${fixed ? '' : 'hidden'}>
+    <div data-schedule-fields ${later ? '' : 'hidden'}>
       <div class="form-grid schedule-grid">
         <label class="field">
           <span>Repetição</span>
@@ -176,7 +193,21 @@ export function scheduleSection({ kind, schedule = null, fixed = false, info }) 
       <p class="muted small">${zoneNote(info)} O CLEAN precisa estar em execução nesses horários (instale-o como serviço do Windows).</p>
 
       <div class="form-grid">
-        <fieldset class="plain full">
+        ${withPeriod ? periodFields(p, mail, items) : ''}
+        <label class="check full">
+          <input type="checkbox" name="catchUp" ${chk(schedule ? schedule.catchUp : true)} />
+          <span><b>Se o CLEAN estiver parado no horário, executar assim que ele voltar</b><br /><small class="muted">Uma única execução, mesmo que vários horários tenham sido perdidos. Desmarcado: o horário perdido fica só registrado no histórico.</small></span>
+        </label>
+        ${keep ? keepField(schedule) : ''}
+      </div>
+    </div>
+  </fieldset>`;
+}
+
+/** Período de cada execução (todos, últimos dias ou incremental). */
+function periodFields(p, mail, items) {
+  const chk = (a) => (a ? 'checked' : '');
+  return html`<fieldset class="plain full">
           <legend>${mail ? 'Mensagens analisadas' : 'Arquivos analisados'} em cada execução</legend>
           <div class="option-row">
             <label class="check"><input type="radio" name="periodType" value="all" ${chk(!p.type || p.type === 'all')} /><span>${mail ? 'Todas as mensagens' : 'Todos os arquivos'}</span></label>
@@ -203,21 +234,7 @@ export function scheduleSection({ kind, schedule = null, fixed = false, info }) 
             opções ou na ação tornam a próxima execução completa. A análise completa periódica pega o que as incrementais não veem:
             ${mail ? 'mensagens movidas entre pastas ou importadas' : 'pastas movidas inteiras para o repositório'} e itens com erro de leitura.
           </small>
-        </fieldset>
-        <label class="check full">
-          <input type="checkbox" name="catchUp" ${chk(schedule ? schedule.catchUp : true)} />
-          <span><b>Se o CLEAN estiver parado no horário, executar assim que ele voltar</b><br /><small class="muted">Uma única execução, mesmo que vários horários tenham sido perdidos. Desmarcado: o horário perdido fica só registrado no histórico.</small></span>
-        </label>
-        <label class="field">
-          <span>Relatórios guardados</span>
-          <select name="keepLast">
-            ${keepOptions(schedule?.keepLast ?? 0).map(([v, label]) => html`<option value="${v}" ${sel(schedule?.keepLast ?? 0, v)}>${label}</option>`)}
-          </select>
-          <small>Os mais antigos deste agendamento são excluídos a cada nova execução (o registro geral de exclusões é mantido).</small>
-        </label>
-      </div>
-    </div>
-  </fieldset>`;
+        </fieldset>`;
 }
 
 /** Regra, período e demais opções do agendamento, como a API espera. */
@@ -271,7 +288,7 @@ export function bindSchedule(form, { onModeChange = () => {}, scheduleId = null 
     fields.querySelectorAll('[data-for]').forEach((el) => {
       el.hidden = !el.dataset.for.split(' ').includes(frequency);
     });
-    const period = form.elements.periodType.value;
+    const period = form.elements.periodType?.value; // as políticas de retenção não têm período
     fields.querySelectorAll('[data-for-period]').forEach((el) => {
       el.hidden = el.dataset.forPeriod !== period;
     });

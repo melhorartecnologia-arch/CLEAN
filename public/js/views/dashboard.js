@@ -7,18 +7,24 @@ const isMail = (s) => s.kind === 'mail';
 const running = (s) => s.status === 'running' || s.status === 'queued';
 
 export async function render(root, { ctx }) {
-  const [repos, lists, sources, scans, schedules] = await Promise.all([
+  const [repos, lists, sources, scans, schedules, policies] = await Promise.all([
     get('/api/repositories'),
     get('/api/lists'),
     get('/api/mail-sources'),
     get('/api/scans'),
     get('/api/schedules'),
+    get('/api/schedules?purpose=retention'),
   ]);
-  const upcoming = schedules.filter((s) => s.state === 'active').sort((a, b) => String(a.nextRunAt).localeCompare(String(b.nextRunAt)));
-  const attention = schedules.filter((s) => s.problems.length || s.lastRun?.status === 'failed');
+  // Agendamentos de análise e políticas de retenção agendadas.
+  const planned = [...schedules, ...policies];
+  const upcoming = planned.filter((s) => s.state === 'active').sort((a, b) => String(a.nextRunAt).localeCompare(String(b.nextRunAt)));
+  const attention = planned.filter((s) => s.problems.length || s.lastRun?.status === 'failed');
+  const isPolicy = (s) => s.purpose === 'retention';
+  const editLink = (s) => `${isPolicy(s) ? '#/retencao' : '#/agendamentos'}/${s.id}`;
   const terms = lists.reduce((sum, l) => sum + l.termCount, 0);
-  const lastFiles = scans.find((s) => !isMail(s) && s.status === 'completed');
-  const lastMail = scans.find((s) => isMail(s) && s.status === 'completed');
+  // Os números de ocorrências vêm das análises por termos (as execuções da retenção não têm termos).
+  const lastFiles = scans.find((s) => !isMail(s) && !s.retention && s.status === 'completed');
+  const lastMail = scans.find((s) => isMail(s) && !s.retention && s.status === 'completed');
   const active = scans.filter(running);
   const ready = (repos.length > 0 || sources.length > 0) && terms > 0;
   const link = (s) => `${isMail(s) ? '#/email/analises' : '#/analises'}/${s.id}`;
@@ -75,28 +81,29 @@ export async function render(root, { ctx }) {
             </ol>
           </section>`}
 
-      ${schedules.length
+      ${planned.length
         ? html`<section class="card">
             <div class="card-head">
-              <h2>Próximos agendamentos</h2>
-              <span class="small"><a href="#/agendamentos">Ver todos</a></span>
+              <h2>Próximas execuções agendadas</h2>
+              <span class="small">${schedules.length ? html`<a href="#/agendamentos">Agendamentos</a>` : ''}${schedules.length && policies.length ? ' · ' : ''}${policies.length ? html`<a href="#/retencao">Retenção</a>` : ''}</span>
             </div>
             <p class="muted small">${zoneNote(ctx.info)}</p>
             ${attention.length
-              ? html`<div class="alert">${icon('alert')}<div><b>${plural(attention.length, 'agendamento precisa', 'agendamentos precisam')} de atenção:</b> ${attention.map((s) => s.name).join(', ')}. <a href="#/agendamentos">Ver os detalhes</a></div></div>`
+              ? html`<div class="alert">${icon('alert')}<div><b>Precisa${attention.length > 1 ? 'm' : ''} de atenção:</b> ${attention.map((s, i) => html`${i ? ', ' : ''}<a href="${editLink(s)}">${s.name}</a>${isPolicy(s) ? ' (retenção)' : ''}`)}.</div></div>`
               : ''}
             ${upcoming.length
               ? html`<ul class="upcoming">
                   ${upcoming.slice(0, 5).map(
                     (s) => html`<li>
                       <span class="nowrap"><b>${fmtServerDateTime(s.nextRunAt)}</b></span>
-                      <a href="#/agendamentos/${s.id}">${s.name}</a>
+                      <a href="${editLink(s)}">${s.name}</a>
                       <span class="kind-badge">${s.kind === 'mail' ? 'E-mail' : 'Arquivos'}</span>
-                      ${s.action === 'delete' ? html`<span class="chip danger">exclusão automática</span>` : ''}
+                      ${isPolicy(s) ? html`<span class="chip">retenção</span>` : ''}
+                      ${s.action === 'delete' ? html`<span class="chip danger">${isPolicy(s) ? 'exclui os expirados' : 'exclusão automática'}</span>` : ''}
                     </li>`,
                   )}
                 </ul>`
-              : html`<p class="muted">Nenhum agendamento ativo.</p>`}
+              : html`<p class="muted">Nenhuma execução agendada.</p>`}
           </section>`
         : ''}
 
@@ -116,11 +123,11 @@ export async function render(root, { ctx }) {
                   ${scans.slice(0, 8).map(
                     (s) => html`<tr>
                       <td><a href="${link(s)}">${s.name}</a></td>
-                      <td><span class="kind-badge">${isMail(s) ? 'E-mail' : 'Arquivos'}</span></td>
+                      <td><span class="kind-badge">${isMail(s) ? 'E-mail' : 'Arquivos'}</span>${s.retention ? html` <span class="chip">retenção</span>` : ''}</td>
                       <td>${statusBadge(s.status)}</td>
                       <td class="nowrap">${fmtDateTime(s.startedAt || s.createdAt)}</td>
                       <td class="num">${fmtNum(isMail(s) ? s.stats?.messagesSeen : s.stats?.filesSeen)}</td>
-                      <td class="num">${fmtNum(isMail(s) ? s.stats?.messagesMatched : s.stats?.filesMatched)}</td>
+                      <td class="num">${fmtNum(isMail(s) ? s.stats?.messagesMatched : s.stats?.filesMatched)}${s.retention ? html`<div class="muted small">expirad${isMail(s) ? 'as' : 'os'}</div>` : ''}</td>
                     </tr>`,
                   )}
                 </tbody>

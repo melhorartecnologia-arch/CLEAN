@@ -85,37 +85,22 @@ export function retentionInfoRows(scan) {
   ];
 }
 
-/** Quantidade e tamanho por chave (repositório, extensão, caixa...), dos maiores para os menores. */
-function groupBy(records, keyOf, labelOf = keyOf) {
-  const map = new Map();
-  for (const r of records) {
-    const key = keyOf(r);
-    let g = map.get(key);
-    if (!g) {
-      g = { label: labelOf(r), count: 0, bytes: 0 };
-      map.set(key, g);
-    }
-    g.count++;
-    g.bytes += Number(r.size) || 0;
-  }
-  return [...map.values()].sort((a, b) => b.bytes - a.bytes || b.count - a.count);
-}
-
-/** Tabelas do resumo: [título, rótulo da coluna, grupos]. */
+/** Tabelas do resumo: [título, rótulo da coluna, grupos { label, count, bytes }]. */
 function summaryTables(scan, records) {
-  const ages = summarizeRetention(records).byAge.map((b) => ({ label: b.label, count: b.count, bytes: b.bytes }));
+  const s = summarizeRetention(records, isMail(scan) ? 'mail' : 'files');
+  const rows = (groups, label) => groups.map((g) => ({ label: label(g), count: g.count, bytes: g.bytes }));
   if (isMail(scan)) {
     return [
-      ['Idade das mensagens expiradas', 'Faixa de idade', ages],
-      ['Caixas', 'Caixa', groupBy(records, (r) => r.mailbox)],
-      ['Pastas', 'Pasta', groupBy(records, (r) => r.folder || '')],
+      ['Idade das mensagens expiradas', 'Faixa de idade', rows(s.byAge, (g) => g.label)],
+      ['Caixas', 'Caixa', rows(s.byMailbox, (g) => (g.name ? `${g.name} <${g.key}>` : g.key))],
+      ['Pastas', 'Pasta', rows(s.byFolder, (g) => g.key || '(sem pasta)')],
     ];
   }
   return [
-    ['Idade dos arquivos expirados', 'Faixa de idade', ages],
-    ['Repositórios', 'Repositório', groupBy(records, (r) => r.repositoryName)],
-    ['Extensões', 'Extensão', groupBy(records, (r) => r.extension || '(sem extensão)').slice(0, 100)],
-    ['Últimos usuários', 'Usuário', groupBy(records, (r) => r.lastUser || '(não identificado)').slice(0, 100)],
+    ['Idade dos arquivos expirados', 'Faixa de idade', rows(s.byAge, (g) => g.label)],
+    ['Repositórios', 'Repositório', rows(s.byRepository, (g) => g.name)],
+    ['Extensões', 'Extensão', rows(s.byExtension, (g) => g.key || '(sem extensão)')],
+    ['Últimos usuários', 'Usuário', rows(s.byUser, (g) => g.key || '(não identificado)')],
   ];
 }
 

@@ -21,6 +21,7 @@ import {
   redraw,
 } from '../ui.js';
 import { replaceQuery, setActiveNav } from '../nav.js';
+import { FILE_CRITERIA, MAIL_CRITERIA, describeRetention, ageText } from '../retention.js';
 
 const CONTENT_STATUS = {
   ok: 'Analisado',
@@ -543,12 +544,342 @@ const MAIL = {
 };
 
 // ---------------------------------------------------------------------------------------------
+// Execuções das políticas de retenção: itens expirados (sem termos), com a data do critério e a idade
+
+const AGE_OPTIONS = [
+  ['ate-1-ano', 'Até 1 ano'],
+  ['1-2-anos', '1 a 2 anos'],
+  ['2-5-anos', '2 a 5 anos'],
+  ['5-10-anos', '5 a 10 anos'],
+  ['mais-de-10-anos', 'Mais de 10 anos'],
+];
+const ageFilter = (filters) => html`<label class="field"><span>Idade</span>
+    <select name="age"><option value="">Todas</option>${AGE_OPTIONS.map(([value, label]) => option(value, label, filters.age))}</select>
+  </label>`;
+const sortField = (filters, sorts) => html`<label class="field"><span>Ordenar por</span>
+    <select name="sort">${sorts.map(([value, label]) => option(value, label, filters.sort))}</select>
+  </label>`;
+
+/** Data do critério e idade do item (na data da análise). */
+const ageCell = (r) => html`<td class="nowrap">${fmtDateTime(r.retention?.date)}<div class="muted small">há ${ageText(r.retention?.ageDays)}</div></td>`;
+
+/** Gráfico das faixas de idade (na ordem das faixas, com o tamanho na dica). */
+function ageChart(summary, barChart, [one, many], o) {
+  const rows = (summary.retention?.byAge || []).map((b) => ({
+    label: b.label,
+    value: b.count,
+    filterValue: b.key,
+    tipValue: `${plural(b.count, one, many)} · ${fmtBytes(b.bytes)}`,
+    tipLabel: `Idade: ${b.label.toLowerCase()}`,
+    raw: b,
+  }));
+  return barChart({
+    key: 'age',
+    title: `Idade d${o}s ${many} expirad${o}s`,
+    subtitle: 'Pela data do critério da política, no dia da análise. Clique para filtrar.',
+    rows,
+    filterKey: 'age',
+    emptyText: `Nenhum${o === 'a' ? 'a' : ''} ${one} expirad${o}.`,
+    tableHead: html`<tr><th>Idade</th><th class="num">${many[0].toUpperCase()}${many.slice(1)}</th><th class="num">Tamanho</th></tr>`,
+    tableRow: (r) => html`<tr><td>${r.label}</td><td class="num">${fmtNum(r.raw.count)}</td><td class="num">${fmtBytes(r.raw.bytes)}</td></tr>`,
+  });
+}
+
+/** Linhas de um gráfico por grupo (quantidade ou espaço), com o tamanho e a quantidade na dica. */
+const groupRows = (groups, { label, filter = (g) => g.key, bySize = false, noun }) =>
+  groups.map((g) => ({
+    label: label(g),
+    value: bySize ? g.bytes : g.count,
+    valueText: bySize ? fmtBytes(g.bytes) : undefined,
+    filterValue: filter(g) || '',
+    tipValue: bySize ? `${fmtBytes(g.bytes)} · ${plural(g.count, ...noun)}` : `${plural(g.count, ...noun)} · ${fmtBytes(g.bytes)}`,
+    tipLabel: label(g),
+    raw: g,
+  }));
+const groupTable = (head, noun) => ({
+  tableHead: html`<tr><th>${head}</th><th class="num">${noun}</th><th class="num">Tamanho</th></tr>`,
+  tableRow: (r) => html`<tr><td>${r.label}</td><td class="num">${fmtNum(r.raw.count)}</td><td class="num">${fmtBytes(r.raw.bytes)}</td></tr>`,
+});
+
+const RETENTION_FILES = {
+  ...FILES,
+  nav: 'retencao',
+  retention: true,
+  filterKeys: ['q', 'age', 'user', 'repository', 'extension', 'deletion', 'sort', 'page'],
+  criteria: ['q', 'age', 'user', 'repository', 'extension', 'deletion'],
+  descSorts: new Set(['modified', 'size']),
+  defaultSort: 'oldest',
+  resultsTitle: 'Arquivos expirados',
+  views: { age: 'chart', extensions: 'chart', users: 'chart', repositories: 'chart' },
+
+  subtitle: (scan) => `${(scan.summary?.repositories || []).map((r) => r.name).join(', ')} · ${describeRetention(scan.retention, 'files')}`,
+
+  filterFields: (filters) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Caminho ou usuário" /></label>
+    ${ageFilter(filters)}
+    <label class="field"><span>Último usuário</span><select name="user"><option value="">Todos</option></select></label>
+    <label class="field"><span>Repositório</span><select name="repository"><option value="">Todos</option></select></label>
+    <label class="field"><span>Extensão</span><select name="extension"><option value="">Todas</option></select></label>
+    ${deletionFilter(filters, 'o')}
+    ${sortField(filters, [
+      ['oldest', 'Mais antigos'],
+      ['path', 'Caminho'],
+      ['size', 'Maiores arquivos'],
+      ['lastUser', 'Último usuário'],
+    ])}`,
+
+  fillOptions: (form, options, filters, fill, scan) => {
+    const o = options || { users: [], extensions: [] };
+    fill(form.elements.user, o.users, filters.user);
+    fill(form.elements.extension, o.extensions, filters.extension);
+    const repos = new Map((scan.summary?.repositories || []).map((r) => [r.id, r.name]));
+    fill(form.elements.repository, [...repos.keys()], filters.repository, (v) => repos.get(v) || v);
+  },
+
+  progress: (st) => html`<span><b>${fmtNum(st.filesSeen)}</b> arquivos verificados</span>
+    <span><b>${fmtNum(st.directories)}</b> pastas</span>
+    ${st.libraries ? html`<span><b>${fmtNum(st.libraries)}</b> bibliotecas (OneDrive/SharePoint)</span>` : ''}
+    <span><b>${fmtNum(st.filesMatched)}</b> expirados (${fmtBytes(st.bytesExpired)})</span>
+    <span><b>${fmtNum(st.errors)}</b> erros</span>
+    <span>repositório <b>${Math.min((st.repositoriesDone || 0) + 1, st.repositoriesTotal || 1)}</b> de <b>${st.repositoriesTotal || 1}</b></span>`,
+
+  tiles: (st) => {
+    const pct = st.filesSeen ? Math.round((st.filesMatched / st.filesSeen) * 1000) / 10 : 0;
+    return html`<div class="tile"><div class="label">Arquivos verificados</div><div class="value">${fmtCompact(st.filesSeen)}</div><div class="detail">em ${plural(st.directories || 0, 'pasta', 'pastas')}${st.libraries ? ` · ${plural(st.libraries, 'biblioteca', 'bibliotecas')}` : ''}${st.retentionUnknown ? ` · ${fmtNum(st.retentionUnknown)} sem a data do critério (mantidos)` : ''}</div></div>
+      <div class="tile"><div class="label">Arquivos expirados</div><div class="value">${fmtCompact(st.filesMatched)}</div><div class="detail">${pct.toLocaleString('pt-BR')}% dos verificados</div></div>
+      <div class="tile"><div class="label">Espaço dos expirados</div><div class="value">${fmtBytes(st.bytesExpired || 0)}</div><div class="detail">somando os arquivos expirados</div></div>
+      <div class="tile"><div class="label">Erros de acesso ou leitura</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`;
+  },
+
+  charts: (summary, barChart) => {
+    const r = summary.retention || { byExtension: [], byUser: [], byRepository: [] };
+    const noun = ['arquivo', 'arquivos'];
+    return html`${ageChart(summary, barChart, noun, 'o')}
+    ${barChart({
+      key: 'extensions',
+      title: 'Espaço por extensão',
+      subtitle: 'Tamanho dos arquivos expirados de cada tipo. Clique para filtrar.',
+      rows: groupRows(r.byExtension, { label: (g) => g.key || '(sem extensão)', bySize: true, noun }),
+      filterKey: 'extension',
+      emptyText: 'Nenhum arquivo expirado.',
+      ...groupTable('Extensão', 'Arquivos'),
+    })}
+    ${barChart({
+      key: 'users',
+      title: 'Últimos usuários',
+      subtitle: 'Quem interagiu por último com os arquivos expirados (proprietário ou Microsoft 365). Clique para filtrar.',
+      rows: groupRows(r.byUser, { label: (g) => g.key || '(não identificado)', filter: (g) => (g.identified ? g.key : ''), noun }),
+      filterKey: 'user',
+      emptyText: 'Nenhum arquivo expirado.',
+      ...groupTable('Usuário', 'Arquivos'),
+    })}
+    ${barChart({
+      key: 'repositories',
+      title: 'Espaço por repositório',
+      subtitle: 'Tamanho dos arquivos expirados em cada repositório. Clique para filtrar.',
+      rows: groupRows(r.byRepository, { label: (g) => g.name, bySize: true, noun }),
+      filterKey: 'repository',
+      emptyText: 'Nenhum arquivo expirado.',
+      ...groupTable('Repositório', 'Arquivos'),
+    })}`;
+  },
+
+  tableHead: (scan) =>
+    html`<tr><th><span class="sr-only">Detalhes</span></th><th>Arquivo</th><th>Último usuário</th><th>${(FILE_CRITERIA[scan.retention?.criterion] || FILE_CRITERIA.used).date}</th><th class="num">Tamanho</th></tr>`,
+
+  row: (r) => html`<td><div class="name">${r.name}</div>${deletionChip(r, 'o')}<div class="path">${folderOf(r)}</div></td>
+    <td>${r.lastUser ? html`${r.lastUser}<div><span class="chip source">${SOURCE_SHORT[r.lastUserSource]}</span></div>` : html`<span class="muted">não identificado</span>`}</td>
+    ${ageCell(r)}
+    <td class="num nowrap">${fmtBytes(r.size)}</td>`,
+
+  detail: (r, ctx) => {
+    const c = r.cloud;
+    const link = c && /^https:\/\//i.test(c.webUrl || '') ? c.webUrl : null;
+    const criterion = FILE_CRITERIA[r.retention?.criterion] || FILE_CRITERIA.used;
+    return html`<div class="detail-grid two">
+      <div>
+        <h4>Arquivo</h4>
+        <dl class="kv">
+          ${c
+            ? html`<dt>${CLOUD_KIND[c.kind]}</dt><dd>${c.accountName && c.accountName !== c.account ? html`${c.accountName} <span class="muted small">${c.account}</span>` : c.account} › ${c.library}</dd>`
+            : ''}
+          <dt>${c ? 'Endereço' : 'Caminho'}</dt>
+          <dd><span class="mono">${r.path}</span> <button type="button" class="btn small" data-action="copy" data-copy="${c?.webUrl || r.path}" data-copied="${c ? 'Endereço copiado.' : 'Caminho copiado.'}">${icon('copy')} Copiar</button></dd>
+          ${link ? html`<dt>Abrir</dt><dd><a href="${link}" target="_blank" rel="noopener noreferrer">Abrir no ${CLOUD_KIND[c.kind]}</a> <span class="muted small">(exige acesso ao arquivo)</span></dd>` : ''}
+          <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
+          <dt>Criado em</dt><dd>${fmtDateTime(r.created)}</dd>
+          <dt>Modificado em</dt><dd>${fmtDateTime(r.modified)}</dd>
+          ${c ? '' : html`<dt>Último acesso</dt><dd>${r.accessed ? fmtDateTime(r.accessed) : '—'}</dd>`}
+        </dl>
+        ${deletionBlock(r, 'arquivo', ctx)}
+      </div>
+      <div>
+        <h4>Retenção</h4>
+        <dl class="kv">
+          <dt>Critério</dt><dd>${criterion.label}</dd>
+          <dt>Data considerada</dt><dd><b>${fmtDateTime(r.retention?.date)}</b></dd>
+          <dt>Idade</dt><dd>${ageText(r.retention?.ageDays)} <span class="muted small">(${plural(r.retention?.ageDays || 0, 'dia', 'dias')} no dia da análise)</span></dd>
+        </dl>
+        <h4 class="spaced">Quem interagiu com o arquivo</h4>
+        <dl class="kv">
+          <dt>Último usuário</dt><dd><b>${r.lastUser || 'não identificado'}</b>${r.lastUserSource ? html`<br /><span class="muted small">fonte: ${SOURCE[r.lastUserSource]}</span>` : ''}</dd>
+          ${c?.lastModifiedBy ? html`<dt>Alterado por último por</dt><dd>${personText(c.lastModifiedBy)} <span class="muted small">em ${fmtDateTime(r.modified)}</span></dd>` : ''}
+          ${c?.createdBy ? html`<dt>Criado por</dt><dd>${personText(c.createdBy)} <span class="muted small">em ${fmtDateTime(r.created)}</span></dd>` : ''}
+          ${c
+            ? c.kind === 'onedrive'
+              ? html`<dt>Dono do OneDrive</dt><dd>${r.owner || '—'}</dd>`
+              : ''
+            : html`<dt>Proprietário (NTFS)</dt><dd>${r.owner || html`<span class="muted">${r.ownerError ? `não obtido: ${r.ownerError}` : 'não verificado'}</span>`}</dd>`}
+        </dl>
+      </div>
+    </div>`;
+  },
+
+  empty: {
+    filtered: 'Nenhum arquivo corresponde aos filtros.',
+    running: 'Nenhum arquivo expirado encontrado até agora.',
+    none: 'Nenhum arquivo expirado: todos os arquivos verificados estão dentro do prazo da política.',
+  },
+};
+
+const RETENTION_MAIL = {
+  ...MAIL,
+  nav: 'retencao',
+  retention: true,
+  filterKeys: ['q', 'age', 'mailbox', 'sender', 'deletion', 'sort', 'page'],
+  criteria: ['q', 'age', 'mailbox', 'sender', 'deletion'],
+  descSorts: new Set(['date', 'size']),
+  defaultSort: 'oldest',
+  resultsTitle: 'Mensagens expiradas',
+  views: { age: 'chart', mailboxes: 'chart', folders: 'chart', senders: 'chart' },
+
+  subtitle: (scan) => {
+    const s = scan.summary || {};
+    const sources = (s.sources || []).map((x) => `${x.name} (${TYPE_LABELS[x.type] || x.type}${x.scope === 'all' ? ', todas as caixas' : ''})`);
+    return `${sources.join(', ')} · ${describeRetention(scan.retention, 'mail')}`;
+  },
+
+  filterFields: (filters) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Assunto, remetente ou caixa" /></label>
+    ${ageFilter(filters)}
+    <label class="field"><span>Caixa</span><select name="mailbox"><option value="">Todas</option></select></label>
+    <label class="field"><span>Remetente</span><select name="sender"><option value="">Todos</option></select></label>
+    ${deletionFilter(filters, 'a')}
+    ${sortField(filters, [
+      ['oldest', 'Mais antigas'],
+      ['date', 'Mais recentes'],
+      ['mailbox', 'Caixa'],
+      ['sender', 'Remetente'],
+      ['subject', 'Assunto'],
+      ['size', 'Maiores mensagens'],
+    ])}`,
+
+  fillOptions: (form, options, filters, fill) => {
+    const o = options || { mailboxes: [], senders: [] };
+    fill(form.elements.mailbox, o.mailboxes, filters.mailbox);
+    const senders = new Map((o.senders || []).map((s) => [s.value, s.label]));
+    fill(form.elements.sender, [...senders.keys()], filters.sender, (v) => senders.get(v) || v);
+  },
+
+  progress: (st) => html`<span><b>${fmtNum(st.messagesMatched)}</b> mensagens expiradas (${fmtBytes(st.bytesExpired)})</span>
+    <span><b>${fmtNum(st.errors)}</b> erros</span>
+    <span>${st.mailboxesTotal ? html`caixa <b>${Math.min((st.mailboxesDone || 0) + 1, st.mailboxesTotal)}</b> de <b>${fmtNum(st.mailboxesTotal)}</b>` : 'listando as caixas…'}</span>`,
+
+  tiles: (st) => html`<div class="tile"><div class="label">Caixas analisadas</div><div class="value">${fmtCompact(Math.max(0, (st.mailboxesDone || 0) - (st.mailboxesSkipped || 0)))}</div><div class="detail">${st.mailboxesSkipped ? `${fmtNum(st.mailboxesSkipped)} sem e-mail` : 'só os cabeçalhos das mensagens antigas'}</div></div>
+    <div class="tile"><div class="label">Mensagens expiradas</div><div class="value">${fmtCompact(st.messagesMatched)}</div><div class="detail">recebidas antes da data de corte</div></div>
+    <div class="tile"><div class="label">Espaço das expiradas</div><div class="value">${fmtBytes(st.bytesExpired || 0)}</div><div class="detail">somando as mensagens expiradas</div></div>
+    <div class="tile"><div class="label">Erros</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`,
+
+  charts: (summary, barChart) => {
+    const r = summary.retention || { byMailbox: [], byFolder: [] };
+    const noun = ['mensagem', 'mensagens'];
+    const senders = summary.bySender.map((s) => ({ label: s.label, value: s.messages, filterValue: s.sender, tipValue: plural(s.messages, ...noun), tipLabel: s.label, raw: s }));
+    return html`${ageChart(summary, barChart, noun, 'a')}
+    ${barChart({
+      key: 'mailboxes',
+      title: 'Caixas',
+      subtitle: 'Mensagens expiradas em cada caixa. Clique para filtrar.',
+      rows: groupRows(r.byMailbox, { label: (g) => g.key, noun }),
+      filterKey: 'mailbox',
+      emptyText: 'Nenhuma mensagem expirada.',
+      ...groupTable('Caixa', 'Mensagens'),
+    })}
+    ${barChart({
+      key: 'folders',
+      title: 'Pastas',
+      subtitle: 'Mensagens expiradas por pasta (somando todas as caixas).',
+      rows: groupRows(r.byFolder, { label: (g) => g.key || '(sem pasta)', filter: () => '', noun }),
+      emptyText: 'Nenhuma mensagem expirada.',
+      ...groupTable('Pasta', 'Mensagens'),
+    })}
+    ${barChart({
+      key: 'senders',
+      title: 'Remetentes',
+      subtitle: 'Quem enviou as mensagens expiradas. Clique para filtrar.',
+      rows: senders,
+      filterKey: 'sender',
+      emptyText: 'Nenhuma mensagem expirada.',
+      tableHead: html`<tr><th>Remetente</th><th class="num">Mensagens</th></tr>`,
+      tableRow: (row) => html`<tr><td>${row.raw.label}</td><td class="num">${fmtNum(row.raw.messages)}</td></tr>`,
+    })}`;
+  },
+
+  tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Mensagem</th><th>Remetente</th><th>Recebida em</th><th class="num">Tamanho</th></tr>`,
+
+  row: (r) => html`<td><div class="name">${r.subject || '(sem assunto)'}</div>${deletionChip(r, 'a')}<div class="path">${r.mailbox} › ${r.folder}</div></td>
+    <td>${r.from || html`<span class="muted">sem remetente</span>`}</td>
+    ${ageCell(r)}
+    <td class="num nowrap">${fmtBytes(r.size)}</td>`,
+
+  detail: (r, ctx) => {
+    const safeLink = /^https:\/\//i.test(r.webLink || '') ? r.webLink : null;
+    const messageId = String(r.internetMessageId || '').replace(/^<|>$/g, '');
+    return html`<div class="detail-grid two">
+      <div>
+        <h4>Mensagem</h4>
+        <dl class="kv">
+          <dt>Assunto</dt><dd><b>${r.subject || '(sem assunto)'}</b></dd>
+          <dt>De</dt><dd>${r.from || '—'}</dd>
+          <dt>Caixa</dt><dd>${r.mailboxName ? `${r.mailboxName} <${r.mailbox}>` : r.mailbox}</dd>
+          <dt>Pasta</dt><dd>${r.folder}</dd>
+          <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
+          ${messageId
+            ? html`<dt>Message-ID</dt><dd><span class="mono small">${messageId}</span> <button type="button" class="btn small" data-action="copy" data-copy="${messageId}" data-copied="Message-ID copiado.">${icon('copy')} Copiar</button></dd>`
+            : ''}
+          <dt>Conexão</dt><dd>${r.sourceName} (${TYPE_LABELS[r.sourceType] || r.sourceType})</dd>
+          ${safeLink ? html`<dt>Abrir</dt><dd><a href="${safeLink}" target="_blank" rel="noopener noreferrer">Abrir no Outlook na Web</a> <span class="muted small">(exige acesso à caixa)</span></dd>` : ''}
+        </dl>
+        ${deletionBlock(r, 'mensagem', ctx)}
+      </div>
+      <div>
+        <h4>Retenção</h4>
+        <dl class="kv">
+          <dt>Critério</dt><dd>${MAIL_CRITERIA.received.label}</dd>
+          <dt>Recebida em</dt><dd><b>${fmtDateTime(r.retention?.date || r.date)}</b></dd>
+          <dt>Idade</dt><dd>${ageText(r.retention?.ageDays)} <span class="muted small">(${plural(r.retention?.ageDays || 0, 'dia', 'dias')} no dia da análise)</span></dd>
+        </dl>
+        <p class="muted small">A política lê só os cabeçalhos das mensagens antigas: o corpo e os anexos não são baixados.</p>
+      </div>
+    </div>`;
+  },
+
+  empty: {
+    filtered: 'Nenhuma mensagem corresponde aos filtros.',
+    running: 'Nenhuma mensagem expirada encontrada até agora.',
+    none: 'Nenhuma mensagem expirada: todas as mensagens estão dentro do prazo da política.',
+  },
+};
+
+function profileOf(scan) {
+  if (scan.retention) return scan.kind === 'mail' ? RETENTION_MAIL : RETENTION_FILES;
+  return scan.kind === 'mail' ? MAIL : FILES;
+}
+
+// ---------------------------------------------------------------------------------------------
 
 export async function render(root, { params, query, isCurrent = () => true }) {
   const id = params[0];
   let scan = await get(`/api/scans/${id}`);
   if (!isCurrent()) return null; // o usuário já foi para outra tela
-  const P = scan.kind === 'mail' ? MAIL : FILES;
+  const P = profileOf(scan);
   // Endereço e menu de acordo com o tipo da análise (ex.: link antigo para uma análise de e-mail).
   if (!location.hash.startsWith(`${P.base}/`)) history.replaceState(null, '', `${P.base}/${id}${query.toString() ? `?${query}` : ''}`);
   setActiveNav(P.nav);
@@ -616,18 +947,31 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const after = scan.options?.modifiedAfter || scan.options?.receivedAfter;
     // No fuso do servidor, como a data informada na análise (ou o período do agendamento).
     const period = after ? `somente ${scan.kind === 'mail' ? 'mensagens recebidas' : 'arquivos alterados'} a partir de ${fmtServerDateTime(after, { weekday: false })}` : '';
+    const [scheduleNoun, scheduleBase] = P.retention ? ['Política de retenção', '#/retencao'] : ['Agendamento', '#/agendamentos'];
     const schedule = scan.scheduleExists
-      ? html`${icon('clock')} Agendamento <a href="#/agendamentos/${scan.scheduleId}">${scan.scheduleName}</a>`
-      : html`${icon('clock')} Agendamento "${scan.scheduleName}" (excluído)`;
+      ? html`${icon('clock')} ${scheduleNoun} <a href="${scheduleBase}/${scan.scheduleId}">${scan.scheduleName}</a>`
+      : html`${icon('clock')} ${scheduleNoun} "${scan.scheduleName}" (excluíd${P.retention ? 'a' : 'o'})`;
+    // Retenção: a data de corte (no fuso do servidor, onde ela foi calculada) e a forma de exclusão.
+    const cutoff = P.retention
+      ? html`<div class="sub">Expiram ${P.o === 'a' ? 'as mensagens' : 'os arquivos'} com a data do critério anterior a <b>${fmtServerDateTime(scan.retention.cutoff, { weekday: false })}</b>${scan.options?.deleteMatches
+          ? html` · exclusão ${scan.retention.deleteMode === 'trash' ? 'para a lixeira' : 'definitiva'}${scan.retention.maxDeletions ? ` (até ${fmtNum(scan.retention.maxDeletions)} por execução)` : ''}`
+          : ' · simulação: nada é excluído'}</div>`
+      : '';
+    const badge = scan.options?.deleteMatches
+      ? html`<span class="badge deleting">${P.retention ? 'exclui os expirados' : 'com exclusão automática'}</span>`
+      : P.retention
+        ? html`<span class="badge">simulação</span>`
+        : '';
     paint(
       $('[data-head]'),
       html`<div class="page-head">
         <div>
-          <div class="inline"><h1>${scan.name}</h1>${statusBadge(scan.status)}${scan.options?.deleteMatches ? html`<span class="badge deleting">com exclusão automática</span>` : ''}</div>
+          <div class="inline"><h1>${scan.name}</h1>${statusBadge(scan.status)}${badge}</div>
           <div class="sub">Início ${started} · duração ${duration} · ${P.subtitle(scan)}</div>
           ${scan.scheduleId || period
             ? html`<div class="sub">${scan.scheduleId ? schedule : ''}${scan.scheduleId && period ? ' · ' : ''}${period}</div>`
             : ''}
+          ${cutoff}
         </div>
         <div class="actions">
           ${isActive(scan) ? html`<button type="button" class="btn danger" data-action="cancel">${icon('stop')} Cancelar análise</button>` : ''}
@@ -687,13 +1031,17 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         t.missing ? `${fmtNum(t.missing)} já não existia${t.missing > 1 ? 'm' : ''}` : '',
         t.changed ? `${fmtNum(t.changed)} mantid${o}${t.changed > 1 ? 's' : ''} (alterad${o}${t.changed > 1 ? 's' : ''} depois da análise)` : '',
         t.failed ? `${fmtNum(t.failed)} com falha` : '',
+        // Retenção: expirados além do limite de exclusões da execução (só listados).
+        st.deleteSkipped ? `${fmtNum(st.deleteSkipped)} não excluíd${o}${st.deleteSkipped > 1 ? 's' : ''} (limite da execução)` : '',
       ]
         .filter(Boolean)
-        .join(' · ') || (scan.options?.deleteMatches ? 'exclusão automática ligada' : 'pelo relatório');
-    const tile =
-      scan.options?.deleteMatches || t.deleted || t.missing || t.changed || t.failed
-        ? html`<div class="tile"><div class="label">Excluíd${o}s</div><div class="value">${fmtCompact(t.deleted)}</div><div class="detail">${detail}</div></div>`
-        : '';
+        .join(' · ') || (scan.options?.deleteMatches ? (P.retention ? 'exclusão pela política' : 'exclusão automática ligada') : 'pelo relatório');
+    let tile = '';
+    if (scan.options?.deleteMatches || t.deleted || t.missing || t.changed || t.failed) {
+      tile = html`<div class="tile"><div class="label">Excluíd${o}s</div><div class="value">${fmtCompact(t.deleted)}</div><div class="detail">${detail}</div></div>`;
+    } else if (P.retention) {
+      tile = html`<div class="tile"><div class="label">Excluíd${o}s</div><div class="value">0</div><div class="detail">simulação: nada foi excluído</div></div>`;
+    }
     paint($('[data-tiles]'), html`${P.tiles(st)}${tile}`);
     $('[data-error-count]').textContent = st.errors ? `(${fmtNum(st.errors)})` : '';
   };
@@ -718,14 +1066,14 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     select.value = current || '';
   };
 
-  const drawFilterOptions = () => P.fillOptions(filtersForm, summary?.options, filters, fillSelect);
+  const drawFilterOptions = () => P.fillOptions(filtersForm, summary?.options, filters, fillSelect, scan);
 
   // ---------- Gráficos (barras horizontais de uma série: cor única, valor na ponta) ----------
 
   const barChart = ({ key, title, subtitle, rows, filterKey, emptyText, tableHead, tableRow }) => {
     const view = chartView[key];
     const top = rows.slice(0, TOP);
-    const max = rows[0]?.value || 0;
+    const max = rows.reduce((m, r) => Math.max(m, r.value), 0); // as faixas de idade não vêm em ordem de valor
     const body =
       rows.length === 0
         ? html`<div class="empty">${emptyText}</div>`
@@ -739,7 +1087,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
                       aria-pressed="${selected ? 'true' : 'false'}" aria-label="${r.label}: ${r.tipValue}"
                       data-tip-value="${r.tipValue}" data-tip-label="${r.tipLabel}">
                     <span class="bar-label">${r.label}</span>
-                    <span class="bar-track"><span class="bar" data-w="${width}"></span><span class="bar-value">${fmtNum(r.value)}</span></span>
+                    <span class="bar-track"><span class="bar" data-w="${width}"></span><span class="bar-value">${r.valueText ?? fmtNum(r.value)}</span></span>
                   </button>`;
                 })}
               </div>
@@ -784,7 +1132,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       html`${heading}
         <div class="table-wrap">
           <table class="data results">
-            <thead>${P.tableHead}</thead>
+            <thead>${typeof P.tableHead === 'function' ? P.tableHead(scan) : P.tableHead}</thead>
             <tbody>
               ${results.items.map((r) => {
                 const open = expanded.has(r.id);
@@ -972,7 +1320,8 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       const key = bar.dataset.filterKey;
       const value = bar.dataset.filterValue;
       const changes = { [key]: filters[key] === value ? '' : value };
-      if (key === 'location' && filtersForm.elements.location) filtersForm.elements.location.value = changes.location;
+      // Campos de opções fixas (local, idade) mudam aqui; os demais são preenchidos com o resumo.
+      if (filtersForm.elements[key]) filtersForm.elements[key].value = changes[key];
       applyFilters(changes);
       document.getElementById('tooltip').hidden = true;
       return;
@@ -989,10 +1338,10 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       applyFilters({ page: el.dataset.page });
       $('[data-results]').scrollIntoView({ block: 'start', behavior: 'smooth' });
     } else if (action === 'clear-filters') {
-      filtersForm.elements.q.value = '';
-      filtersForm.elements.location.value = '';
-      filtersForm.elements.deletion.value = '';
-      filtersForm.elements.sort.value = P.defaultSort;
+      for (const field of filtersForm.elements) {
+        if (field.name === 'sort') field.value = P.defaultSort;
+        else if (P.criteria.includes(field.name)) field.value = '';
+      }
       applyFilters({ ...Object.fromEntries(P.criteria.map((k) => [k, ''])), sort: '' });
     } else if (action === 'copy') {
       try {

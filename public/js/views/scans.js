@@ -1,6 +1,7 @@
 // Lista de análises (de arquivos ou de e-mail), com progresso das que estão em andamento.
 import { get, post, del } from '../api.js';
 import { html, render as paint, icon, toast, confirmDialog, fmtNum, fmtDateTime, fmtDuration, statusBadge } from '../ui.js';
+import { describeRetention } from '../retention.js';
 
 const active = (s) => s.status === 'running' || s.status === 'queued';
 
@@ -65,15 +66,19 @@ export async function render(root, { props = {} }) {
                       const [seen, matched] = K.values(s);
                       return html`<tr>
                         <td>
-                          <a href="${K.base}/${s.id}"><b>${s.name}</b></a>${s.scheduleId ? html` <span class="chip" title="Iniciada pelo agendamento &quot;${s.scheduleName}&quot;">${icon('clock')} agendada</span>` : ''}
-                          <div class="muted small">${K.where(s)} · ${(s.summary?.lists || []).map((l) => l.name).join(', ')}</div>
+                          <a href="${K.base}/${s.id}"><b>${s.name}</b></a>${s.retention
+                            ? html` <span class="chip" title="${s.scheduleId ? `Execução da política de retenção "${s.scheduleName}"` : 'Execução de uma política de retenção'}">${icon('clock')} retenção</span>`
+                            : s.scheduleId
+                              ? html` <span class="chip" title="Iniciada pelo agendamento &quot;${s.scheduleName}&quot;">${icon('clock')} agendada</span>`
+                              : ''}
+                          <div class="muted small">${K.where(s)} · ${s.retention ? describeRetention(s.retention, kind) : (s.summary?.lists || []).map((l) => l.name).join(', ')}</div>
                           ${active(s) ? html`<div class="progress-line" role="progressbar" aria-label="Análise em andamento"></div>` : ''}
                         </td>
                         <td>${statusBadge(s.status)}</td>
                         <td class="nowrap">${fmtDateTime(s.startedAt || s.createdAt)}</td>
                         <td class="nowrap">${duration(s)}</td>
                         <td class="num">${fmtNum(seen)}</td>
-                        <td class="num">${fmtNum(matched)}</td>
+                        <td class="num">${fmtNum(matched)}${s.retention ? html`<div class="muted small">expirad${kind === 'mail' ? 'as' : 'os'}</div>` : ''}</td>
                         <td class="num">${fmtNum(s.stats?.errors)}</td>
                         <td class="actions">
                           <a class="icon-btn" href="${K.base}/${s.id}" aria-label="Abrir relatório de ${s.name}" title="Abrir relatório">${icon('file')}</a>

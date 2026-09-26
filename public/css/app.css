@@ -917,6 +917,9 @@ tr.detail > td {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.6fr);
   gap: 18px 24px;
 }
+.detail-grid.two {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
 .detail-grid h4 {
   margin: 0 0 8px;
   font-size: 12px;
@@ -1198,6 +1201,11 @@ details.help code {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+/* Campos empilhados dentro de um grupo (ex.: regra de idade da política de retenção). */
+.stack {
+  display: grid;
+  gap: 14px;
+}
 fieldset.plain {
   min-width: 0;
   padding: 0;
@@ -1400,6 +1408,9 @@ dialog::backdrop {
   .detail-grid > :last-child {
     grid-column: 1 / -1;
   }
+  .detail-grid.two > :last-child {
+    grid-column: auto;
+  }
 }
 
 @media (max-width: 700px) {
@@ -1467,7 +1478,8 @@ dialog::backdrop {
   }
   .grid-2,
   .form-grid,
-  .detail-grid {
+  .detail-grid,
+  .detail-grid.two {
     grid-template-columns: minmax(0, 1fr);
   }
   .log li {

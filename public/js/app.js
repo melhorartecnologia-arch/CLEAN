@@ -13,6 +13,8 @@ import * as mailSources from './views/mail-sources.js';
 import * as mailScanNew from './views/mail-scan-new.js';
 import * as schedules from './views/schedules.js';
 import * as scheduleEdit from './views/schedule-edit.js';
+import * as retention from './views/retention.js';
+import * as retentionEdit from './views/retention-edit.js';
 
 // [caminho, tela, item do menu, propriedades extras da tela]
 const ROUTES = [
@@ -31,6 +33,9 @@ const ROUTES = [
   [/^\/agendamentos$/, schedules, 'agendamentos'],
   [/^\/agendamentos\/novo$/, scheduleEdit, 'agendamentos'],
   [/^\/agendamentos\/([\w-]+)$/, scheduleEdit, 'agendamentos'],
+  [/^\/retencao$/, retention, 'retencao'],
+  [/^\/retencao\/nova$/, retentionEdit, 'retencao'],
+  [/^\/retencao\/([\w-]+)$/, retentionEdit, 'retencao'],
 ];
 
 /** Informações do servidor (versão, fuso, opções padrão), lidas uma vez. */

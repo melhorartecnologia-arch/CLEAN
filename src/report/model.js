@@ -386,16 +386,50 @@ export function summarizeMail(records) {
 // ---------------------------------------------------------------------------------------------
 // Retenção
 
-/** Itens expirados por faixa de idade (quantidade e tamanho), para o gráfico do relatório. */
-export function summarizeRetention(records) {
+/**
+ * Itens expirados (retenção) por faixa de idade e, com o tamanho de cada grupo, por extensão, último
+ * usuário e repositório (arquivos) ou por caixa e pasta (e-mail). kind: 'files' | 'mail'.
+ */
+export function summarizeRetention(records, kind = 'files') {
   const buckets = new Map(AGE_BUCKETS.map((b) => [b.key, { key: b.key, label: b.label, count: 0, bytes: 0 }]));
+  const mail = kind === 'mail';
+  const groups = mail ? { byMailbox: new Map(), byFolder: new Map() } : { byExtension: new Map(), byUser: new Map(), byRepository: new Map() };
+  const add = (map, key, extra, size) => {
+    let g = map.get(key);
+    if (!g) {
+      g = { key, ...extra, count: 0, bytes: 0 };
+      map.set(key, g);
+    }
+    g.count++;
+    g.bytes += size;
+  };
+  let count = 0;
   let bytes = 0;
   for (const r of records) {
     if (!r.retention) continue;
+    const size = Number(r.size) || 0;
     const b = buckets.get(ageBucket(r.retention.ageDays).key);
     b.count++;
-    b.bytes += Number(r.size) || 0;
-    bytes += Number(r.size) || 0;
+    b.bytes += size;
+    count++;
+    bytes += size;
+    if (mail) {
+      add(groups.byMailbox, r.mailbox, { name: r.mailboxName || '' }, size);
+      add(groups.byFolder, r.folder || '', {}, size);
+    } else {
+      add(groups.byExtension, r.extension || '', {}, size);
+      add(groups.byUser, r.lastUser || '', { identified: Boolean(r.lastUser) }, size);
+      add(groups.byRepository, r.repositoryId, { name: r.repositoryName }, size);
+    }
   }
-  return { byAge: [...buckets.values()].filter((b) => b.count > 0), bytes };
+  // Os maiores primeiro (extensões e repositórios pelo espaço; os demais pela quantidade).
+  const top = (map, by = 'count') => [...map.values()].sort((a, b) => b[by] - a[by] || b.count - a.count).slice(0, 500);
+  return {
+    count,
+    bytes,
+    byAge: [...buckets.values()].filter((b) => b.count > 0),
+    ...(mail
+      ? { byMailbox: top(groups.byMailbox), byFolder: top(groups.byFolder) }
+      : { byExtension: top(groups.byExtension, 'bytes'), byUser: top(groups.byUser), byRepository: top(groups.byRepository, 'bytes') }),
+  };
 }

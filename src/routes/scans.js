@@ -223,7 +223,12 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     const key = `${scan.id}|${records.length}|${deletions.length}|f|${JSON.stringify(criteria)}`;
     return { records, deletions, list: memo.get(key, () => modelOf(scan).filter(records, criteria)) };
   };
-  const filtersOf = (scan, query) => readFilters(query, modelOf(scan).keys);
+  const filtersOf = (scan, query) => {
+    const filters = readFilters(query, modelOf(scan).keys);
+    // Retenção: os itens mais antigos primeiro.
+    if (scan.retention && !filters.sort) filters.sort = 'oldest';
+    return filters;
+  };
 
   router.get('/', (req, res) => {
     const kind = req.query.kind === 'mail' || req.query.kind === 'files' ? req.query.kind : '';
@@ -419,7 +424,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     const summary = memo.get(`${scan.id}|${records.length}|${deletions.length}|s|${JSON.stringify(criteria)}`, () => ({
       ...model.summarize(list),
       // Retenção: itens expirados por faixa de idade.
-      ...(scan.retention ? { retention: summarizeRetention(list) } : {}),
+      ...(scan.retention ? { retention: summarizeRetention(list, scan.kind === 'mail' ? 'mail' : 'files') } : {}),
     }));
     const options = memo.get(`${scan.id}|${records.length}|o`, () => model.options(records));
     res.json({ ...summary, options, deletions: deletionTotals(records) });
