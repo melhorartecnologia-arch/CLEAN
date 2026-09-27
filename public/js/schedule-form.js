@@ -230,8 +230,8 @@ function periodFields(p, mail, items) {
           </div>
           <small data-for-period="since-last">
             A partir da segunda execução, entram só ${mail ? 'as mensagens recebidas' : `os ${items} modificados, criados ou copiados para o repositório`} desde o início da última execução
-            concluída (com 1 hora de margem); cada relatório mostra só o que foi encontrado nesse período. Mudanças nos locais, nas listas, nas
-            opções ou na ação tornam a próxima execução completa. A análise completa periódica pega o que as incrementais não veem:
+            concluída (com 1 hora de margem); cada relatório mostra só o que foi encontrado nesse período. Mudanças nos locais, nas listas (ou nos
+            tipos de arquivo), nas opções ou na ação tornam a próxima execução completa. A análise completa periódica pega o que as incrementais não veem:
             ${mail ? 'mensagens movidas entre pastas ou importadas' : 'pastas movidas inteiras para o repositório'} e itens com erro de leitura.
           </small>
         </fieldset>`;

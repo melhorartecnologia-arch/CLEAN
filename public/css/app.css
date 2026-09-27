@@ -1403,6 +1403,12 @@ td.row-controls {
 .bulk-bar.running {
   border-left: 3px solid var(--critical);
 }
+.bulk-bar:focus {
+  outline: none;
+}
+.bulk-bar:focus-visible {
+  outline: 2px solid var(--accent);
+}
 .bulk-status {
   display: flex;
   flex-direction: column;
@@ -1559,6 +1565,8 @@ dialog::backdrop {
     gap: 8px;
   }
   table.results .row-select {
+    width: 20px;
+    height: 20px;
     margin: 0;
   }
   .bulk-bar > .inline {

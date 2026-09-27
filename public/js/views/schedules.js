@@ -196,7 +196,7 @@ export async function render(root, { ctx }) {
           : `Executar agora o agendamento "${s.name}"? A próxima execução programada não muda.`;
         if (!(await confirmDialog(message, { title: 'Executar agora', confirmLabel: deleting ? 'Executar e excluir' : 'Executar agora', danger: deleting }))) return;
         const { scan } = await post(`/api/schedules/${s.id}/run`, { confirm: true });
-        toast('Análise iniciada.', 'success');
+        toast(s.purpose === 'types' ? 'Busca iniciada.' : 'Análise iniciada.', 'success');
         location.hash = reportLink(s, scan.id);
         return;
       }

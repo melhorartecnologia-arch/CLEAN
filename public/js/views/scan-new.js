@@ -85,12 +85,13 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
   </label>`;
   const media = catalog.categories.filter((c) => !c.work);
   const work = catalog.categories.filter((c) => c.work);
+  const workExtensions = new Set(work.flatMap((c) => c.extensions));
   const section = scheduleSection({ kind: 'files', schedule, fixed, info: ctx.info });
   paint(
     root,
     html`<div class="page-head">
         <div>
-          <h1>${title}</h1>
+          <h1 data-title>${title}</h1>
           <div class="sub">${fixed ? 'Escolha onde procurar, o que procurar, como e quando.' : 'Escolha onde procurar, o que procurar e como.'}</div>
         </div>
       </div>
@@ -267,8 +268,15 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     const raw = String(input.value || '').trim();
     if (raw === '') return 0;
     const n = Number(raw);
-    return Number.isFinite(n) && n >= 0 ? n : null;
+    return Number.isFinite(n) && n >= 0 && n <= 1_048_576 ? n : null;
   };
+  /** As "Outras extensões" digitadas, como o servidor as entende (".DOCX", "*.docx" -> ".docx"). */
+  const typedExtensions = () =>
+    String(form.elements.extensions.value || '')
+      .split(/[\s,;]+/)
+      .map((e) => e.trim().toLowerCase().replace(/^\*/, ''))
+      .filter(Boolean)
+      .map((e) => (e.startsWith('.') ? e : `.${e}`));
 
   const sync = () => {
     const types = mode() === 'types';
@@ -288,7 +296,13 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     form.querySelector('[data-delete-confirm]').hidden = !deleting;
     form.querySelector('[data-limit]').hidden = !(types && deleting);
     form.querySelector('[data-path-warning]').hidden = types || !(form.elements.checkName.checked && form.elements.nameTarget.value === 'path');
-    const workNames = types ? [...form.querySelectorAll('[name="categories"]:checked')].filter((el) => el.dataset.work).map((el) => catalog.categories.find((c) => c.key === el.value)?.label) : [];
+    // Arquivos de trabalho: as categorias marcadas e as extensões digitadas que são desses tipos.
+    const workNames = types
+      ? [
+          ...[...form.querySelectorAll('[name="categories"]:checked')].filter((el) => el.dataset.work).map((el) => catalog.categories.find((c) => c.key === el.value)?.label),
+          ...[...new Set(typedExtensions())].filter((e) => workExtensions.has(e)),
+        ]
+      : [];
     form.querySelector('[data-work-warning]').hidden = !workNames.length;
     form.querySelector('[data-work-names]').textContent = workNames.join(', ');
     form.querySelector('[data-schedule-only]').hidden = !later;
@@ -296,6 +310,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
       el.hidden = later;
     });
     form.querySelector('[data-name-label]').textContent = later ? 'Nome do agendamento' : types ? 'Nome da busca (opcional)' : 'Nome da análise (opcional)';
+    if (!fixed) form.querySelector('[data-title]').textContent = types ? 'Nova busca por tipo de arquivo' : 'Nova análise';
     form.elements.name.maxLength = later ? 120 : 200;
     form.elements.name.placeholder = T.namePlaceholder[later ? 1 : 0];
     submit.className = `btn ${deleting ? 'danger' : 'primary'}`;
@@ -303,9 +318,13 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     paint(submit, html`${icon(later ? 'clock' : 'play')} ${label}`);
   };
   const onChange = (event) => {
-    if (['search', 'action', 'nameTarget', 'checkName', 'categories'].includes(event.target.name)) sync();
+    if (['search', 'action', 'nameTarget', 'checkName', 'categories', 'extensions'].includes(event.target.name)) sync();
+  };
+  const onInput = (event) => {
+    if (event.target.name === 'extensions') sync();
   };
   form.addEventListener('change', onChange);
+  form.addEventListener('input', onInput);
   const unbind = bindSchedule(form, { onModeChange: sync, scheduleId: schedule?.id || null });
 
   const onSubmit = async (event) => {
@@ -382,6 +401,9 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     } catch (err) {
       toast(err.message, 'error');
       submit.disabled = false;
+      // O campo do erro, quando o servidor recusa uma das opções da busca por tipo.
+      const field = /Extensão inválida|extensões/.test(err.message) ? 'extensions' : /tamanho mínimo/.test(err.message) ? 'minSizeMB' : /limite de exclusões/.test(err.message) ? 'maxDeletions' : null;
+      if (types && field && !form.elements[field].closest('[hidden]')) form.elements[field].focus();
     }
   };
   form.addEventListener('submit', onSubmit);
@@ -389,5 +411,6 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     unbind();
     form.removeEventListener('submit', onSubmit);
     form.removeEventListener('change', onChange);
+    form.removeEventListener('input', onInput);
   };
 }
