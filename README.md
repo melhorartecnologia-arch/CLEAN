@@ -28,8 +28,13 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   as pastas, assunto, corpo, nomes e conteúdo dos anexos (os mesmos formatos acima, inclusive
   e-mails encaminhados como anexo). O relatório mostra a caixa, a pasta, o remetente, os
   destinatários e a data de cada mensagem encontrada. Senhas e chaves ficam gravadas cifradas.
+- **Busca por tipo de arquivo**: vídeos, músicas, imagens, executáveis, compactados, imagens de
+  disco, temporários ou as extensões que você informar — com tamanho mínimo e a conferência do tipo
+  real pelo conteúdo (acha um vídeo renomeado para .pdf), para revisão no relatório ou exclusão
+  automática, agora ou agendada.
 - **Exclusão** opcional dos arquivos e mensagens encontrados: automática durante a análise
-  ("analisar e excluir") ou item a item pelo relatório, com registro de cada exclusão.
+  ("analisar e excluir"), item a item pelo relatório ou, nos relatórios de arquivos, **em lote** (os
+  selecionados ou todos os filtrados), com registro de cada exclusão.
 - **Agendamentos**: análises executadas sozinhas, uma vez ou com repetição (a cada algumas horas,
   diária, semanal ou mensal), com análise incremental, histórico e retenção dos relatórios.
 - **Políticas de retenção**: eliminam os arquivos e as mensagens mais antigos que uma idade máxima
@@ -52,13 +57,15 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
    - [Google Workspace (Gmail)](#google-workspace-gmail)
    - [Servidores IMAP](#servidores-imap)
 9. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
+   - [Exclusão em lote pelo relatório](#exclusão-em-lote-pelo-relatório)
 10. [Agendamentos](#agendamentos)
 11. [Políticas de retenção](#políticas-de-retenção)
-12. [Executando como serviço](#executando-como-serviço)
-13. [Configuração](#configuração)
-14. [Segurança](#segurança)
-15. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
-16. [Desenvolvimento](#desenvolvimento)
+12. [Busca por tipo de arquivo](#busca-por-tipo-de-arquivo)
+13. [Executando como serviço](#executando-como-serviço)
+14. [Configuração](#configuração)
+15. [Segurança](#segurança)
+16. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
+17. [Desenvolvimento](#desenvolvimento)
 
 ## Requisitos
 
@@ -102,7 +109,9 @@ de exemplo. Depois é só iniciar uma análise.
    - *Adicionar vários*, *Importar .txt/.csv* (um termo por linha ou a primeira coluna do CSV) e
      *Adicionar modelo pronto*.
    - *Testar os termos* mostra o que seria encontrado em um texto de exemplo antes de salvar.
-3. **Nova análise** — escolha repositórios e listas e o que verificar:
+3. **Nova análise** — em *O que procurar*, escolha **Termos das listas de referência** ou **Tipos de
+   arquivo** (veja [Busca por tipo de arquivo](#busca-por-tipo-de-arquivo)). Nos termos, escolha
+   repositórios e listas e o que verificar:
    - nome do arquivo (ou o caminho completo, incluindo os nomes das pastas) e/ou conteúdo;
    - somente arquivos alterados a partir de uma data (vale a data mais recente entre a modificação
      e a criação: um arquivo copiado para a pasta depois da data entra na análise, mesmo mantendo a
@@ -125,6 +134,8 @@ momento; o que já foi encontrado é mantido. Para repetir uma análise automati
 toda semana...), use **Quando executar › Agendar** ou o menu **Automação › Agendamentos** — veja
 [Agendamentos](#agendamentos). Para eliminar os arquivos e os e-mails antigos (por exemplo, sem uso
 há mais de 5 anos), use **Automação › Retenção** — veja [Políticas de retenção](#políticas-de-retenção).
+Para achar (e, se quiser, excluir) arquivos de um tipo — vídeos, músicas, instaladores, backups —,
+use **Buscar por tipo de arquivo** — veja [Busca por tipo de arquivo](#busca-por-tipo-de-arquivo).
 
 Para as caixas de e-mail, use o grupo **E-mail** do menu: *Caixas de e-mail* (conexões) e *Análises
 de e-mail* — veja [Análise de caixas de e-mail](#análise-de-caixas-de-e-mail).
@@ -415,6 +426,7 @@ excluído. Há três formas de trabalhar:
 | **Somente analisar** | *Nova análise › O que fazer com os itens encontrados › Somente analisar* (padrão) | Gera o relatório; nada é alterado. |
 | **Analisar e excluir automaticamente** | *Nova análise › Analisar e excluir automaticamente* e digitar **EXCLUIR** para confirmar | Cada item encontrado é excluído durante a análise, sem confirmação item a item. Arquivos: depois de registrados no relatório com o último usuário (ao fim de cada repositório ou a cada 200 arquivos). E-mails: ao fim de cada caixa (para não atrapalhar a leitura das pastas). |
 | **Excluir depois, item a item** | No relatório, abra o item e clique em **Excluir arquivo** / **Excluir mensagem** | Exclui só aquele item, depois de uma confirmação. Se o arquivo mudou depois da análise, o CLEAN avisa e pede uma segunda confirmação. |
+| **Excluir depois, em lote** (arquivos) | No relatório, marque os arquivos e clique em **Excluir selecionados**, ou use **Excluir todos os filtrados** | Exclui os escolhidos em segundo plano, depois de uma prévia e da confirmação **EXCLUIR** — veja [Exclusão em lote pelo relatório](#exclusão-em-lote-pelo-relatório). |
 
 Salvaguardas:
 
@@ -485,12 +497,44 @@ Importante:
   análise ainda pode ser excluída pelo relatório. Se a resposta de uma exclusão se perder (falha de
   rede) e a nova tentativa não encontrar a mensagem, ela é dada como excluída.
 
+### Exclusão em lote pelo relatório
+
+Nos relatórios de arquivos (análises por termos, buscas por tipo e execuções das políticas de
+retenção), depois de revisar os resultados:
+
+1. marque os arquivos (a caixa ao lado de cada um; *Selecionar todos* marca os da página) e clique
+   em **Excluir selecionados** — a seleção vale entre as páginas e é desfeita quando os filtros
+   mudam —, ou use **Excluir todos os filtrados** (sem filtros, **Excluir todos os arquivos**);
+2. a confirmação mostra quantos arquivos serão excluídos em cada repositório e de que forma
+   (definitiva nas pastas do Windows; para a lixeira ou definitiva no OneDrive e no SharePoint,
+   conforme o repositório) e quantos ficam de fora: já excluídos, em repositórios sem *Permitir
+   exclusão*, em locais protegidos, de repositórios removidos ou alterados no cadastro, em pastas
+   que passaram a ser ignoradas. Digite **EXCLUIR**;
+3. a exclusão roda em segundo plano, um arquivo de cada vez, e o relatório mostra o andamento — dá
+   para fechar a página e voltar depois. **Parar a exclusão** interrompe o lote depois do arquivo em
+   andamento.
+
+Cada arquivo passa pelas mesmas conferências da exclusão item a item, mas sem a segunda
+confirmação: os alterados depois da análise (na retenção, também os que deixaram de estar
+expirados) **são mantidos** e aparecem como alterados. Se a forma de exclusão de um repositório
+mudar entre a prévia e a confirmação, o CLEAN recusa e pede para começar de novo; se mudar durante
+o lote, os arquivos daquele repositório falham em vez de serem excluídos de outra forma. Depois de 20
+falhas seguidas (sem permissão de modificação, por exemplo), o lote para sozinho e o motivo aparece
+no relatório. Cada exclusão é
+registrada na hora, como manual, com quem confirmou e a indicação *(exclusão em lote)*; o
+**Registro** da análise mostra o início e o resultado de cada lote. Um lote por relatório de cada
+vez, com até 100.000 arquivos (filtre o relatório para excluir mais); enquanto ele roda, o relatório
+não pode ser excluído. Se o CLEAN for encerrado no meio, o lote para (o que já foi excluído fica
+registrado) e pode ser iniciado de novo com os arquivos que restaram. Nos relatórios de e-mail, a
+exclusão continua item a item.
+
 ## Agendamentos
 
 Em **Automação › Agendamentos**, cadastre análises de arquivos ou de e-mail que o CLEAN executa
-sozinho nos dias e horários definidos. O formulário é o mesmo da nova análise (locais, listas, o que
-verificar e o que fazer com os itens encontrados), com a regra de recorrência; na tela *Nova análise*,
-a opção **Quando executar › Agendar** faz o mesmo.
+sozinho nos dias e horários definidos. O formulário é o mesmo da nova análise (locais, listas — ou
+tipos de arquivo, na [busca por tipo](#busca-por-tipo-de-arquivo) —, o que verificar e o que fazer
+com os itens encontrados), com a regra de recorrência; na tela *Nova análise*, a opção **Quando
+executar › Agendar** faz o mesmo.
 
 | Repetição | Exemplos |
 |---|---|
@@ -679,6 +723,77 @@ Antes de ligar a exclusão, confirme com as áreas responsáveis os **prazos leg
 documentos (fiscais, trabalhistas, contábeis). Retenções e bloqueios de litígio do Microsoft Purview
 e do Google Vault continuam valendo sobre o que o CLEAN excluir.
 
+## Busca por tipo de arquivo
+
+Em **Nova análise › O que procurar › Tipos de arquivo** — ou pelo botão **Buscar por tipo de
+arquivo** em *Análises de arquivos* e no painel —, o CLEAN lista os arquivos dos tipos escolhidos:
+vídeos e músicas nos compartilhamentos, instaladores esquecidos, backups e temporários antigos,
+imagens de disco. Não há lista de referência: vale o tipo do arquivo.
+
+**O que procurar** (pode combinar vários):
+
+| Tipo | Extensões (exemplos; a lista completa aparece na tela) |
+|---|---|
+| Vídeos | .mp4, .mov, .avi, .mkv, .wmv, .mpg, .webm, .3gp, .vob, .m2ts |
+| Músicas e áudio | .mp3, .wav, .wma, .aac, .m4a, .flac, .ogg, .opus, .mid |
+| Imagens e fotos | .jpg, .png, .gif, .bmp, .tif, .webp, .heic, .psd e fotos RAW (.cr2, .nef, .arw, .dng) |
+| Executáveis e instaladores | .exe, .msi, .msix, .bat, .cmd, .ps1, .vbs, .scr, .jar, .apk, .dmg |
+| Compactados | .zip, .rar, .7z, .tar, .gz, .tgz, .bz2, .xz, .cab |
+| Imagens de disco e máquinas virtuais | .iso, .img, .vhd, .vhdx, .vmdk, .vdi, .qcow2, .ova, .wim |
+| Temporários e backups | .tmp, .temp, .bak, .old, .orig, .dmp, .crdownload, .part |
+| *Arquivos de trabalho:* documentos, planilhas, apresentações, e-mails e bancos de dados | .doc, .docx, .pdf, .txt, .xls, .xlsx, .csv, .ppt, .pptx, .pst, .ost, .msg, .eml, .mdb, .accdb, .sqlite, .mdf |
+
+- **Outras extensões**: as que você informar, separadas por vírgula ou espaço (`.dwg, .log`),
+  sozinhas ou junto com os tipos. Vale o fim do nome, sem diferenciar maiúsculas, inclusive
+  extensões compostas como `.tar.gz`;
+- **Tamanho mínimo** (MB): só os arquivos a partir desse tamanho — por exemplo, os vídeos de 100 MB
+  ou mais. Os menores do tipo procurado são contados à parte no relatório;
+- **Conferir o tipo real pelo conteúdo** (pastas do Windows): acha arquivos **renomeados** — um
+  vídeo salvo como `relatorio.pdf`, uma foto sem extensão — lendo os primeiros 512 bytes dos
+  arquivos **sem extensão** ou com a extensão de **outro tipo da lista**. Reconhece vídeos, áudios,
+  imagens, executáveis, compactados, imagens de disco, PDF, arquivos de dados do Outlook e bancos de
+  dados SQLite e Access; planilhas, apresentações, textos, documentos antigos do Office e temporários
+  são achados só pela extensão. Para evitar falsos positivos, arquivos com extensões **fora da
+  lista** valem pelo que são (um `.dll` é um executável, um `.ai` do Illustrator é um PDF por
+  dentro, um `.lrcat` do Lightroom é um banco SQLite), o formato próprio de uma extensão não conta
+  como renomeado (um `.docx` é um ZIP, um `.m4a` é um MP4, um `.ova` é um TAR) e textos não são
+  confundidos com assinaturas. A conferência deixa a busca mais lenta (cada arquivo é aberto) e,
+  como a leitura do conteúdo nas análises por termos, pode atualizar o último acesso dos arquivos.
+  No OneDrive e no SharePoint vale só a extensão (o conteúdo não é baixado);
+- somente os arquivos alterados a partir de uma data, os repositórios, os arquivos processados em
+  paralelo e o proprietário (NTFS), como numa análise por termos.
+
+**O que fazer com os arquivos encontrados:**
+
+- **Somente procurar** (padrão): gera o relatório para a revisão. Depois, exclua pelo relatório —
+  item a item, os selecionados ou todos os filtrados (veja
+  [Exclusão em lote pelo relatório](#exclusão-em-lote-pelo-relatório));
+- **Procurar e excluir automaticamente**: cada arquivo encontrado é excluído durante a busca, sem
+  confirmação item a item, com as salvaguardas da [exclusão automática](#exclusão-dos-itens-encontrados)
+  (*Permitir exclusão*, **EXCLUIR**, arquivos alterados depois de listados são mantidos, locais
+  protegidos nunca são tentados) e um **limite de exclusões por execução** (1.000 por padrão; 0 = sem
+  limite), que funciona como o das [políticas de retenção](#políticas-de-retenção): acima dele, os
+  arquivos encontrados ficam só no relatório e o CLEAN avisa. A tela avisa quando tipos de arquivos
+  de trabalho estão marcados junto com a exclusão automática.
+
+Rode primeiro *Somente procurar* e revise o relatório antes de ligar a exclusão automática — em
+especial com os arquivos de trabalho e com *Conferir o tipo real*.
+
+**Agendada:** em **Automação › Agendamentos › Agendar busca por tipo** (ou *Quando executar ›
+Agendar*), com a mesma recorrência, período (todos os arquivos, os alterados nos últimos dias ou
+incremental), histórico e relatórios guardados dos [agendamentos](#agendamentos). Na exclusão
+automática agendada, os tipos, as extensões, o tamanho mínimo e o limite ficam registrados na
+confirmação: se forem alterados, é preciso salvar e confirmar de novo (uma execução que esperou na
+fila procura sem excluir).
+
+**Relatório:** arquivos verificados e encontrados, o espaço ocupado pelos encontrados, quantos foram
+achados pelo tipo real e o espaço já excluído; gráficos por tipo, espaço por extensão, últimos
+usuários e espaço por repositório (clique para filtrar); filtros por tipo, *encontrado por* (extensão
+ou conteúdo), usuário, repositório, extensão e exclusão, com os maiores arquivos primeiro. O Excel
+(abas *Resumo*, *Arquivos encontrados*, *Exclusões* e *Erros*), o CSV e o HTML têm uma linha por
+arquivo, com o tipo, a extensão, como ele foi encontrado e o formato real. As buscas aparecem em
+*Análises de arquivos* marcadas como *busca por tipo*.
+
 ## Executando como serviço
 
 Para que o CLEAN inicie com o Windows, sem sessão aberta — necessário para os
@@ -798,6 +913,10 @@ src/
     scanner.js                             análise das caixas de e-mail (na mesma worker thread)
     graph.js, gmail.js, imap.js            conectores Microsoft 365, Google Workspace e IMAP
     http.js, common.js                     requisições com novas tentativas, pastas e caixas ignoradas
+  types/
+    catalog.js                             busca por tipo: categorias, extensões e validação
+    signature.js                           tipo real pelos primeiros bytes (arquivos renomeados)
+  retention/                               políticas de retenção: critérios de data e limites
   report/                                  filtros, resumo e exportações (xlsx, csv, html)
 public/                                    interface web (HTML, CSS e JavaScript, sem build)
 test/                                      testes e arquivos de exemplo (fixtures)

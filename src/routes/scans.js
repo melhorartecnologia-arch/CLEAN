@@ -452,11 +452,12 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   // item a item; o relatório acompanha o progresso e pode cancelar. Uma por relatório.
   const bulkJobs = new Map(); // análise -> { total, done, deleted, missing, changed, failed, skipped, running... }
   const BULK_MAX = 100000;
+  const BULK_FAILURES = 20; // falhas seguidas que interrompem o lote (ex.: sem permissão de modificação)
   const BULK_KEY = (scanId) => `${scanId}:lote`;
   const publicJob = (job) => {
     if (!job) return null;
     // eslint-disable-next-line no-unused-vars
-    const { abort, ...rest } = job;
+    const { abort, methods, ...rest } = job;
     return rest;
   };
 
@@ -529,6 +530,10 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     if (changed) throw new HttpError(409, `A forma de exclusão de "${changed.name}" mudou no cadastro (agora: ${METHOD_TEXT[changed.method]}). Confira e confirme de novo.`, 'method-changed');
     const by = actor(req);
     const job = {
+      // A forma de exclusão confirmada vale para o lote inteiro (se o cadastro mudar no meio, falha).
+      methods: Object.fromEntries(repositories.map((g) => [g.id, g.method])),
+      halted: null,
+      lastError: null,
       total: ready.length,
       done: 0,
       deleted: 0,
@@ -564,26 +569,29 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     res.json(publicJob(job));
   });
 
-  /** Exclui os arquivos um a um, gravando cada resultado (em lotes) no registro da análise. */
+  /** Exclui os arquivos um a um, gravando cada resultado no registro da análise logo em seguida. */
   async function runBulk(scan, records, job) {
     const cache = new Map(); // conectores do OneDrive/SharePoint e proteções, por repositório
-    let pending = [];
-    const flush = async () => {
-      if (!pending.length) return;
-      const events = pending;
-      pending = [];
+    // Cada exclusão é registrada na hora (como na exclusão automática): uma queda do servidor no meio
+    // do lote não deixa exclusões feitas sem registro.
+    const record = async (event) => {
       memo.forget(scan.id);
       try {
-        await store.appendDeletions(scan.id, events);
+        await store.appendDeletions(scan.id, [event]);
       } catch (err) {
         console.error('[CLEAN] Falha ao gravar o registro de exclusões:', err.message);
-        store.appendLog(scan.id, { level: 'error', message: `Exclusão em lote: falha ao gravar o registro de ${events.length} exclusão(ões): ${err.message}` });
+        store.appendLog(scan.id, { level: 'error', message: `Exclusão em lote: falha ao gravar o registro da exclusão de ${event.item}: ${err.message}` });
       }
     };
+    let failures = 0; // seguidas
     try {
-      for (const record of records) {
+      for (const item of records) {
         if (job.cancelled) break;
-        const key = `${scan.id}:${record.id}`;
+        if (failures >= BULK_FAILURES) {
+          job.halted = `${BULK_FAILURES} falhas seguidas (a última: ${job.lastError}) — confira as permissões e o cadastro do repositório`;
+          break;
+        }
+        const key = `${scan.id}:${item.id}`;
         // O mesmo arquivo sendo excluído pelo relatório, item a item, neste momento: fica de fora.
         if (deleting.has(key)) {
           job.skipped++;
@@ -592,22 +600,26 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         }
         deleting.add(key);
         let result;
-        let method = record.cloud ? 'trash' : 'file';
+        let method = item.cloud ? 'trash' : 'file';
         try {
-          ({ result, method } = await removeFile(scan, record, { signal: job.abort.signal, cache }));
+          ({ result, method } = await removeFile(scan, item, { signal: job.abort.signal, cache, expectMethod: job.methods[item.repositoryId] }));
         } catch (err) {
           // O cadastro mudou durante o lote (ex.: "Permitir exclusão" desligada): falha com o motivo.
           result = { status: 'failed', error: err instanceof HttpError ? err.message : friendlyError(err) };
         } finally {
           deleting.delete(key);
         }
+        await record(deletionEvent(item.id, result, { mode: 'manual', method, by: `${job.by} (exclusão em lote)`, item: item.path }));
         job[result.status === 'deleted' ? 'deleted' : result.status === 'missing' ? 'missing' : result.status === 'changed' ? 'changed' : 'failed']++;
         job.done++;
-        pending.push(deletionEvent(record.id, result, { mode: 'manual', method, by: `${job.by} (exclusão em lote)`, item: record.path }));
-        if (pending.length >= 50) await flush();
+        if (result.status === 'failed') {
+          failures++;
+          job.lastError = result.error;
+        } else {
+          failures = 0;
+        }
       }
     } finally {
-      await flush();
       job.abort.abort();
       job.running = false;
       job.finishedAt = new Date().toISOString();
@@ -621,7 +633,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       ].filter(Boolean);
       store.appendLog(scan.id, {
         level: job.failed ? 'warn' : 'info',
-        message: `Exclusão em lote por ${job.by} ${job.cancelled ? `cancelada depois de ${job.done} de ${job.total}` : 'concluída'}: ${parts.join(', ')}.`,
+        message: `Exclusão em lote por ${job.by} ${job.halted ? `interrompida depois de ${job.done} de ${job.total} por ${job.halted}` : job.cancelled ? `cancelada depois de ${job.done} de ${job.total}` : 'concluída'}: ${parts.join(', ')}.`,
       });
     }
   }

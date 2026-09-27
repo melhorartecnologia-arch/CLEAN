@@ -1425,9 +1425,10 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       return;
     }
     if (!wasRunning || !bulk) return;
-    announce(`Exclusão em lote ${bulk.cancelled ? 'interrompida' : 'concluída'}.`);
+    const stoppedAt = `interrompida depois de ${fmtNum(bulk.done)} de ${fmtNum(bulk.total)}`;
+    announce(`Exclusão em lote ${bulk.halted || bulk.cancelled ? 'interrompida' : 'concluída'}.`);
     toast(
-      `Exclusão em lote ${bulk.cancelled ? `interrompida depois de ${fmtNum(bulk.done)} de ${fmtNum(bulk.total)}` : 'concluída'}: ${bulkOutcome(bulk, P.retention)}.`,
+      `Exclusão em lote ${bulk.halted ? `${stoppedAt} por ${bulk.halted}` : bulk.cancelled ? stoppedAt : 'concluída'}: ${bulkOutcome(bulk, P.retention)}.`,
       bulk.failed ? 'warn' : 'success',
     );
     try {

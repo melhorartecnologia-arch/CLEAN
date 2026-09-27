@@ -261,6 +261,26 @@ test('API: busca por tipo, relatório, exportações, exclusão em lote e agenda
     preview = (await api('POST', `/api/scans/${scan.id}/bulk-delete/preview`, { all: true, filters: {} })).data;
     assert.equal(preview.total, 2);
 
+    // Falhas seguidas (aqui, cada arquivo virou uma pasta): o lote para em 20, sem tentar o resto.
+    const many = fs.mkdtempSync(path.join(root, 'repo-'));
+    for (let i = 1; i <= 25; i++) fs.writeFileSync(path.join(many, `video-${String(i).padStart(2, '0')}.mp4`), MP4);
+    const manyRepo = (await api('POST', '/api/repositories', { name: 'Vídeos', path: many, allowDelete: true })).data;
+    res = await api('POST', '/api/scans', { repositoryIds: [manyRepo.id], fileTypes: { categories: ['video'] }, options: { resolveOwner: false } });
+    const manyScan = await waitScan(res.data.id);
+    assert.equal(manyScan.stats.filesMatched, 25);
+    for (const name of fs.readdirSync(many)) {
+      fs.rmSync(path.join(many, name));
+      fs.mkdirSync(path.join(many, name));
+    }
+    res = await api('POST', `/api/scans/${manyScan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR' });
+    assert.equal(res.status, 202, JSON.stringify(res.data));
+    job = await waitBulk(manyScan.id);
+    assert.deepEqual([job.total, job.done, job.failed, job.deleted], [25, 20, 20, 0]);
+    assert.match(job.halted, /^20 falhas seguidas \(a última: O caminho não é um arquivo\.\)/);
+    assert.equal(job.methods, undefined, 'detalhes internos do lote não saem na API');
+    const manyLog = (await api('GET', `/api/scans/${manyScan.id}`)).data.log;
+    assert.ok(manyLog.some((l) => l.level === 'warn' && /Exclusão em lote .* interrompida depois de 20 de 25 por 20 falhas seguidas/.test(l.message)));
+
     // Agendamento de busca por tipo (aparece em Agendamentos) e troca para termos.
     const schedule = {
       purpose: 'types',
