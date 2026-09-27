@@ -27,7 +27,7 @@ export function typeInfoRows(scan) {
   const o = scan.options || {};
   const t = scan.fileTypes || {};
   return [
-    ['Análise', scan.name],
+    ['Busca', scan.name],
     ...(scan.scheduleId ? [['Agendamento', scan.scheduleName || '']] : []),
     ['Situação', SCAN_STATUS_LABELS[scan.status] || scan.status],
     ['Início', toDate(scan.startedAt)],

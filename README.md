@@ -516,18 +516,27 @@ retenção), depois de revisar os resultados:
 
 Cada arquivo passa pelas mesmas conferências da exclusão item a item, mas sem a segunda
 confirmação: os alterados depois da análise (na retenção, também os que deixaram de estar
-expirados) **são mantidos** e aparecem como alterados. Se a forma de exclusão de um repositório
-mudar entre a prévia e a confirmação, o CLEAN recusa e pede para começar de novo; se mudar durante
-o lote, os arquivos daquele repositório falham em vez de serem excluídos de outra forma. Depois de 20
-falhas seguidas (sem permissão de modificação, por exemplo), o lote para sozinho e o motivo aparece
-no relatório. Cada exclusão é registrada na hora, como manual, com quem confirmou e a indicação
-*(exclusão em lote)* — se a gravação do registro falhar (disco cheio, por exemplo), o lote para: uma
-exclusão não fica sem rastro. O **Registro** da análise mostra o início e o resultado de cada lote.
-Um lote por relatório de cada vez (um segundo pedido, de outra aba, é recusado), com até 100.000
-arquivos (filtre o relatório para excluir mais); enquanto ele roda, o relatório não pode ser
-excluído. A confirmação vale para o que a prévia mostrou: se mais arquivos passarem a poder ser
-excluídos nesse intervalo (uma pasta que deixou de ser ignorada, por exemplo), o CLEAN pede para
-começar de novo. Ao encerrar, o CLEAN espera o arquivo em exclusão terminar; o lote para ali (o
+expirados) **são mantidos** e aparecem como alterados. A confirmação vale para os arquivos que a
+prévia mostrou: se os filtros ou a seleção mudarem enquanto ela é calculada, ou se mais arquivos
+passarem a poder ser excluídos até o EXCLUIR (uma pasta que deixou de ser ignorada, por exemplo), o
+CLEAN pede para começar de novo; se a forma de exclusão de um repositório mudar, também — e, se mudar
+durante o lote, os arquivos daquele repositório falham em vez de serem excluídos de outra forma. A
+prévia avisa quantos arquivos foram encontrados só pelo tipo real (na busca por tipo), para
+conferir antes.
+
+Os arquivos são excluídos em ordem de caminho. Arquivos do OneDrive e do SharePoint em contas ou
+sites protegidos por um repositório sem *Permitir exclusão* são pulados. Depois de 5 falhas seguidas
+numa pasta (uma pasta sem permissão, por exemplo), os demais arquivos dela não são tentados naquele
+lote; depois de 20 falhas seguidas em várias pastas (a conta do CLEAN sem permissão de modificação,
+por exemplo), o lote para, e o motivo aparece no relatório. Ao repetir o lote, os que falharam antes
+ficam por último, e assim ele avança nos demais.
+
+Cada exclusão é registrada na hora, como manual, com quem confirmou e a indicação *(exclusão em
+lote)* — se a gravação do registro falhar (disco cheio, por exemplo), o lote para: uma exclusão não
+fica sem rastro. O **Registro** da análise mostra o início e o resultado de cada lote. Um lote por
+relatório de cada vez (um segundo pedido, de outra aba, é recusado), com até 100.000 arquivos
+(filtre o relatório para excluir mais); enquanto ele roda, o relatório não pode ser excluído. Ao
+encerrar, o CLEAN não começa novos lotes e espera o arquivo em exclusão terminar; o lote para ali (o
 que já foi excluído fica registrado, e o Registro da análise anota a interrupção) e pode ser
 iniciado de novo com os arquivos que restaram. Nos relatórios de e-mail, a exclusão continua item a
 item.

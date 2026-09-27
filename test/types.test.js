@@ -263,6 +263,11 @@ test('API: busca por tipo, relatório, exportações, exclusão em lote e agenda
     }
     throw new Error('não terminou');
   };
+  // Exclusão em lote como a tela faz: prévia e confirmação com o token dela.
+  const bulk = async (scanId, target, extra = {}) => {
+    const shown = (await api('POST', `/api/scans/${scanId}/bulk-delete/preview`, target)).data;
+    return api('POST', `/api/scans/${scanId}/bulk-delete`, { ...target, confirmDelete: 'EXCLUIR', token: shown.token, ...extra });
+  };
   const waitBulk = async (id) => {
     for (let i = 0; i < 200; i++) {
       const { data } = await api('GET', `/api/scans/${id}/bulk-delete`);
@@ -310,8 +315,9 @@ test('API: busca por tipo, relatório, exportações, exclusão em lote e agenda
     assert.deepEqual([preview.total, preview.ready], [1, 1]);
     assert.deepEqual(preview.repositories.map((g) => [g.name, g.method, g.count]), [['Dados', 'file', 1]]);
     assert.match((await api('POST', `/api/scans/${scan.id}/bulk-delete`, { all: true, filters: { type: 'video' } })).data.error, /Digite EXCLUIR/);
-    assert.equal((await api('POST', `/api/scans/${scan.id}/bulk-delete`, { all: true, filters: { type: 'video' }, confirmDelete: 'EXCLUIR', methods: { [repo.id]: 'trash' } })).data.code, 'method-changed');
-    res = await api('POST', `/api/scans/${scan.id}/bulk-delete`, { all: true, filters: { type: 'video' }, confirmDelete: 'excluir', methods: { [repo.id]: 'file' } });
+    assert.match((await api('POST', `/api/scans/${scan.id}/bulk-delete`, { all: true, filters: { type: 'video' }, confirmDelete: 'EXCLUIR' })).data.error, /Faça a prévia/);
+    assert.equal((await bulk(scan.id, { all: true, filters: { type: 'video' } }, { methods: { [repo.id]: 'trash' } })).data.code, 'method-changed');
+    res = await bulk(scan.id, { all: true, filters: { type: 'video' } }, { confirmDelete: 'excluir', methods: { [repo.id]: 'file' } });
     assert.equal(res.status, 202, JSON.stringify(res.data));
     let job = await waitBulk(scan.id);
     assert.deepEqual([job.total, job.deleted, job.failed], [1, 1, 0]);
@@ -320,7 +326,7 @@ test('API: busca por tipo, relatório, exportações, exclusão em lote e agenda
     // Selecionados (ids), um deles alterado depois da busca: mantido.
     const pick = (await api('GET', `/api/scans/${scan.id}/results?sort=path`)).data.items.filter((r) => ['samba.MP3', 'setup.exe'].includes(r.name));
     fs.appendFileSync(path.join(dir, 'Instaladores/setup.exe'), 'alterado');
-    res = await api('POST', `/api/scans/${scan.id}/bulk-delete`, { ids: pick.map((r) => r.id), confirmDelete: 'EXCLUIR' });
+    res = await bulk(scan.id, { ids: pick.map((r) => r.id) });
     assert.equal(res.status, 202);
     job = await waitBulk(scan.id);
     assert.deepEqual([job.deleted, job.changed], [1, 1]);
@@ -336,7 +342,7 @@ test('API: busca por tipo, relatório, exportações, exclusão em lote e agenda
     // Pedidos inválidos: filtro desconhecido (ampliaria o alvo), nenhum arquivo, mais do que a prévia mostrou.
     assert.match((await api('POST', `/api/scans/${scan.id}/bulk-delete/preview`, { all: true, filters: { tipo: 'video' } })).data.error, /Filtro inválido: tipo/);
     assert.match((await api('POST', `/api/scans/${scan.id}/bulk-delete/preview`, { ids: [] })).data.error, /Escolha ao menos um arquivo/);
-    res = await api('POST', `/api/scans/${scan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR', expected: 0 });
+    res = await bulk(scan.id, { all: true, filters: {} }, { expected: 0 });
     assert.deepEqual([res.status, res.data.code], [409, 'preview-changed']);
 
     // Dois pedidos ao mesmo tempo (duas abas): só um lote começa.
@@ -345,7 +351,8 @@ test('API: busca por tipo, relatório, exportações, exclusão em lote e agenda
     const twiceRepo = (await api('POST', '/api/repositories', { name: 'Clipes', path: twice, allowDelete: true })).data;
     res = await api('POST', '/api/scans', { repositoryIds: [twiceRepo.id], fileTypes: { categories: ['video'] }, options: { resolveOwner: false } });
     const twiceScan = await waitScan(res.data.id);
-    const both = await Promise.all([1, 2].map(() => api('POST', `/api/scans/${twiceScan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR' })));
+    const twicePreview = (await api('POST', `/api/scans/${twiceScan.id}/bulk-delete/preview`, { all: true, filters: {} })).data;
+    const both = await Promise.all([1, 2].map(() => api('POST', `/api/scans/${twiceScan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR', token: twicePreview.token })));
     assert.deepEqual(both.map((r) => r.status).sort(), [202, 409]);
     job = await waitBulk(twiceScan.id);
     assert.equal(job.deleted, 3);
@@ -361,7 +368,7 @@ test('API: busca por tipo, relatório, exportações, exclusão em lote e agenda
       throw new Error('disco cheio');
     };
     try {
-      res = await api('POST', `/api/scans/${noLogScan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR' });
+      res = await bulk(noLogScan.id, { all: true, filters: {} });
       assert.equal(res.status, 202);
       job = await waitBulk(noLogScan.id);
     } finally {
@@ -378,25 +385,75 @@ test('API: busca por tipo, relatório, exportações, exclusão em lote e agenda
     assert.equal(store.getScan(noLogScan.id).bulkDeletion, null);
     assert.ok(store.getScan(noLogScan.id).log.some((l) => l.level === 'warn' && /Exclusão em lote por acesso local \(3 arquivo\(s\), iniciada em .*\) interrompida: o CLEAN foi encerrado antes do fim/.test(l.message)));
 
-    // Falhas seguidas (aqui, cada arquivo virou uma pasta): o lote para em 20, sem tentar o resto.
+    // Falhas seguidas numa pasta (aqui, cada arquivo virou uma pasta): depois de 5, os demais arquivos
+    // dela não são tentados neste lote; os que falharam ficam por último na próxima tentativa.
     const many = fs.mkdtempSync(path.join(root, 'repo-'));
-    for (let i = 1; i <= 25; i++) fs.writeFileSync(path.join(many, `video-${String(i).padStart(2, '0')}.mp4`), MP4);
+    fs.mkdirSync(path.join(many, 'A'));
+    for (let i = 1; i <= 8; i++) fs.writeFileSync(path.join(many, 'A', `video-${String(i).padStart(2, '0')}.mp4`), MP4);
     const manyRepo = (await api('POST', '/api/repositories', { name: 'Vídeos', path: many, allowDelete: true })).data;
     res = await api('POST', '/api/scans', { repositoryIds: [manyRepo.id], fileTypes: { categories: ['video'] }, options: { resolveOwner: false } });
     const manyScan = await waitScan(res.data.id);
-    assert.equal(manyScan.stats.filesMatched, 25);
-    for (const name of fs.readdirSync(many)) {
-      fs.rmSync(path.join(many, name));
-      fs.mkdirSync(path.join(many, name));
+    assert.equal(manyScan.stats.filesMatched, 8);
+    const byName = Object.fromEntries((await api('GET', `/api/scans/${manyScan.id}/results?sort=path&pageSize=50`)).data.items.map((r) => [r.name, r.id]));
+    for (let i = 1; i <= 5; i++) {
+      const file = path.join(many, 'A', `video-${String(i).padStart(2, '0')}.mp4`);
+      fs.rmSync(file);
+      fs.mkdirSync(file);
     }
-    res = await api('POST', `/api/scans/${manyScan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR' });
+    // Os que falham primeiro na ordem do pedido.
+    const order = ['video-01.mp4', 'video-02.mp4', 'video-03.mp4', 'video-04.mp4', 'video-05.mp4', 'video-06.mp4', 'video-07.mp4', 'video-08.mp4'].map((n) => byName[n]);
+    res = await bulk(manyScan.id, { ids: order });
     assert.equal(res.status, 202, JSON.stringify(res.data));
     job = await waitBulk(manyScan.id);
-    assert.deepEqual([job.total, job.done, job.failed, job.deleted], [25, 20, 20, 0]);
-    assert.match(job.halted, /^20 falhas seguidas \(a última: O caminho não é um arquivo\.\)/);
+    assert.deepEqual([job.total, job.failed, job.notTried, job.deleted, job.halted], [8, 5, 3, 0, null]);
     assert.equal(job.methods, undefined, 'detalhes internos do lote não saem na API');
-    const manyLog = (await api('GET', `/api/scans/${manyScan.id}`)).data.log;
+    let manyLog = (await api('GET', `/api/scans/${manyScan.id}`)).data.log;
+    assert.ok(manyLog.some((l) => l.level === 'warn' && /concluída: 0 excluído\(s\), 5 falha\(s\), 3 não tentado\(s\) em pastas com 5 falhas seguidas/.test(l.message)));
+    // Repetir o lote avança: os que falharam antes ficam por último.
+    res = await bulk(manyScan.id, { ids: order });
+    job = await waitBulk(manyScan.id);
+    assert.deepEqual([job.deleted, job.failed], [3, 5]);
+    assert.deepEqual(fs.readdirSync(path.join(many, 'A')).sort(), ['video-01.mp4', 'video-02.mp4', 'video-03.mp4', 'video-04.mp4', 'video-05.mp4']);
+
+    // Falhas seguidas em várias pastas (ex.: a conta do CLEAN sem permissão): o lote para em 20.
+    const spread = fs.mkdtempSync(path.join(root, 'repo-'));
+    for (let i = 1; i <= 25; i++) {
+      fs.mkdirSync(path.join(spread, `P${String(i).padStart(2, '0')}`));
+      fs.writeFileSync(path.join(spread, `P${String(i).padStart(2, '0')}`, 'clipe.mp4'), MP4);
+    }
+    const spreadRepo = (await api('POST', '/api/repositories', { name: 'Espalhados', path: spread, allowDelete: true })).data;
+    res = await api('POST', '/api/scans', { repositoryIds: [spreadRepo.id], fileTypes: { categories: ['video'] }, options: { resolveOwner: false } });
+    const spreadScan = await waitScan(res.data.id);
+    for (let i = 1; i <= 25; i++) {
+      const file = path.join(spread, `P${String(i).padStart(2, '0')}`, 'clipe.mp4');
+      fs.rmSync(file);
+      fs.mkdirSync(file);
+    }
+    res = await bulk(spreadScan.id, { all: true, filters: {} });
+    job = await waitBulk(spreadScan.id);
+    assert.deepEqual([job.total, job.done, job.failed], [25, 20, 20]);
+    assert.match(job.halted, /^20 falhas seguidas em várias pastas \(a última: O caminho não é um arquivo\.\)/);
+    manyLog = (await api('GET', `/api/scans/${spreadScan.id}`)).data.log;
     assert.ok(manyLog.some((l) => l.level === 'warn' && /Exclusão em lote .* interrompida depois de 20 de 25 por 20 falhas seguidas/.test(l.message)));
+
+    // A confirmação vale para os arquivos da prévia: outros (ou outra prévia) pedem para começar de novo.
+    const tokenDir = fs.mkdtempSync(path.join(root, 'repo-'));
+    for (let i = 1; i <= 3; i++) fs.writeFileSync(path.join(tokenDir, `aula-${i}.mp4`), MP4);
+    const tokenRepo = (await api('POST', '/api/repositories', { name: 'Aulas', path: tokenDir, allowDelete: true })).data;
+    res = await api('POST', '/api/scans', { repositoryIds: [tokenRepo.id], fileTypes: { categories: ['video'] }, options: { resolveOwner: false } });
+    const tokenScan = await waitScan(res.data.id);
+    const firstId = (await api('GET', `/api/scans/${tokenScan.id}/results`)).data.items[0].id;
+    preview = (await api('POST', `/api/scans/${tokenScan.id}/bulk-delete/preview`, { ids: [firstId] })).data;
+    assert.ok(preview.token);
+    res = await api('POST', `/api/scans/${tokenScan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR', token: preview.token });
+    assert.deepEqual([res.status, res.data.code], [409, 'preview-changed']);
+    assert.match(res.data.error, /2 arquivo\(s\) passaram a poder ser excluídos depois da prévia/);
+    res = await api('POST', `/api/scans/${tokenScan.id}/bulk-delete`, { ids: [firstId], confirmDelete: 'EXCLUIR', token: 'outra' });
+    assert.deepEqual([res.status, res.data.code], [409, 'preview-changed']);
+    res = await api('POST', `/api/scans/${tokenScan.id}/bulk-delete`, { ids: [firstId], confirmDelete: 'EXCLUIR', token: preview.token });
+    assert.equal(res.status, 202, JSON.stringify(res.data));
+    job = await waitBulk(tokenScan.id);
+    assert.equal(job.deleted, 1);
 
     // Agendamento de busca por tipo (aparece em Agendamentos) e troca para termos.
     const schedule = {

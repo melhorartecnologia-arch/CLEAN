@@ -129,7 +129,7 @@ function parseSchedule(body = {}, { store, existing = null, by }) {
     const where = kind === 'mail' ? 'da conexão de e-mail' : 'do repositório';
     if (blocked.length) throw bad(`A exclusão não está permitida em ${blocked.join(', ')}. Ative "Permitir exclusão" no cadastro ${where} ou escolha "${policy ? 'Somente listar (simulação)' : byType ? 'Somente procurar' : 'Somente analisar'}".`);
     if (String(body.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') {
-      throw bad(policy ? 'Para salvar a política com exclusão, digite EXCLUIR na confirmação.' : 'Para agendar a análise com exclusão automática, digite EXCLUIR na confirmação.');
+      throw bad(policy ? 'Para salvar a política com exclusão, digite EXCLUIR na confirmação.' : `Para agendar a ${byType ? 'busca' : 'análise'} com exclusão automática, digite EXCLUIR na confirmação.`);
     }
     // Registra o alcance e a forma de exclusão de cada local e os critérios (termos, exclusões e
     // locais protegidos) no momento da confirmação: se algo disso mudar, a exclusão fica suspensa.

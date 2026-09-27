@@ -1,4 +1,6 @@
 // Rotas /api/scans: análises, resultados (com filtros), resumo e exportações.
+import crypto from 'node:crypto';
+import path from 'node:path';
 import { Router } from 'express';
 import { HttpError } from './validate.js';
 import { ScanError } from '../scan/manager.js';
@@ -371,8 +373,10 @@ export function scansRouter({ store, manager, endpoints = {} }) {
    * Lança HttpError quando não é possível tentar (repositório removido ou alterado, exclusão não
    * permitida, pasta ignorada, forma de exclusão diferente da mostrada na confirmação). Devolve
    * { result, method }. cache: conectores e proteções da nuvem reaproveitados (exclusão em lote).
+   * skipProtected: numa conta ou num site protegido, devolve { protected: motivo } em vez de uma
+   * falha (a exclusão em lote pula o arquivo).
    */
-  async function removeFile(scan, record, { force = false, expectMethod, signal = null, cache = null } = {}) {
+  async function removeFile(scan, record, { force = false, expectMethod, signal = null, cache = null, skipProtected = false } = {}) {
     const repo = store.getRepository(record.repositoryId);
     if (!repo) throw new HttpError(409, 'O repositório deste arquivo foi excluído do cadastro.');
     if (cloudChanged(record, repo)) {
@@ -411,6 +415,8 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         entry.keptKey = keptKey;
       }
       const kept = keptCloudTarget(record.cloud, entry.kept);
+      // Protegido (e não uma falha ao conferir as proteções no Microsoft 365).
+      if (kept && skipProtected && kept !== entry.kept?.unresolved) return { result: null, method, protected: kept.error };
       return { result: kept ? { status: 'failed', error: kept.error } : await entry.connector.deleteItem(cloudTarget(record), method, { force }), method };
     }
     const result = await deleteFile(record.path, {
@@ -495,13 +501,24 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   // item a item; o relatório acompanha o progresso e pode interromper. Um lote por relatório.
   const bulkJobs = new Map(); // análise -> { total, done, deleted, missing, changed, failed, skipped, running... }
   const BULK_MAX = 100000;
-  const BULK_FAILURES = 20; // falhas seguidas que interrompem o lote (ex.: sem permissão de modificação)
+  const BULK_FAILURES = 20; // falhas seguidas (em várias pastas) que interrompem o lote: sem permissão de modificação, por exemplo
+  const FOLDER_FAILURES = 5; // falhas seguidas numa pasta: os demais arquivos dela não são tentados neste lote
+  const PREVIEW_TTL_MS = 30 * 60 * 1000;
+  // A última prévia de cada relatório (os arquivos que ela mostrou): a confirmação só vale para eles.
+  const bulkPreviews = new Map(); // análise -> { token, ids, at }
+  let closing = false; // o CLEAN está sendo encerrado: nenhum lote começa
   const BULK_KEY = (scanId) => `${scanId}:lote`;
   const publicJob = (job) => {
     if (!job) return null;
     // eslint-disable-next-line no-unused-vars
     const { abort, methods, finished, ...rest } = job;
     return rest;
+  };
+  // A pasta do arquivo (no OneDrive/SharePoint, a biblioteca e a pasta dentro dela).
+  const folderOf = (item) => {
+    if (!item.cloud) return path.dirname(item.path);
+    const rel = String(item.relativePath || '').replaceAll('\\', '/');
+    return `${item.cloud.driveId}|${rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''}`;
   };
   const isGone = (r) => r.deletion?.status === 'deleted' || r.deletion?.status === 'missing';
   const yieldNow = () => new Promise((resolve) => setImmediate(resolve));
@@ -593,13 +610,20 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     // Acima do máximo, nem confere um a um: a tela pede para filtrar.
     if (targets.length > BULK_MAX) return res.json({ total: targets.length, gone, ready: targets.length, repositories: [], blocked: {}, max: BULK_MAX, tooMany: true });
     const { ready, repositories, blocked } = await bulkPlan(scan, targets);
-    res.json({ total: targets.length, gone, ready: ready.length, repositories, blocked, max: BULK_MAX });
+    const token = crypto.randomUUID();
+    bulkPreviews.set(scan.id, { token, ids: new Set(ready.map((r) => r.id)), at: Date.now() });
+    // Busca por tipo: os encontrados só pelo tipo real (uma pista), para a pessoa conferir antes.
+    const byContent = ready.filter((r) => r.typeMatch?.by === 'content').length;
+    res.json({ total: targets.length, gone, ready: ready.length, repositories, blocked, max: BULK_MAX, byContent, token });
   });
 
   router.post('/:id/bulk-delete', async (req, res) => {
     const scan = getScan(req);
     if (manager.isActive(scan.id)) throw new HttpError(409, 'Aguarde o fim da análise para excluir itens pelo relatório.');
     if (String(req.body?.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') throw new HttpError(400, 'Digite EXCLUIR para confirmar a exclusão em lote.');
+    if (closing) throw new HttpError(409, 'O CLEAN está sendo encerrado: tente de novo quando ele voltar.');
+    // A confirmação vale para os arquivos que uma prévia mostrou (o token dela é obrigatório).
+    if (typeof req.body?.token !== 'string' || !req.body.token) throw new HttpError(400, 'Faça a prévia da exclusão em lote antes de confirmá-la.');
     // O relatório é reservado antes de qualquer espera: um segundo pedido ao mesmo tempo é recusado,
     // e o relatório não pode ser excluído (nem pela limpeza dos agendamentos) enquanto o lote existe.
     if (bulkJobs.get(scan.id)?.running || deleting.has(BULK_KEY(scan.id))) throw new HttpError(409, 'Já há uma exclusão em lote em andamento neste relatório.');
@@ -610,6 +634,15 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       if (targets.length > BULK_MAX) throw new HttpError(400, `Exclua no máximo ${BULK_MAX.toLocaleString('pt-BR')} arquivos por vez (filtre o relatório).`);
       const { ready, repositories } = await bulkPlan(scan, targets);
       if (!store.getScan(scan.id)) throw new HttpError(404, 'Análise não encontrada.');
+      if (closing) throw new HttpError(409, 'O CLEAN está sendo encerrado: tente de novo quando ele voltar.');
+      // A confirmação vale para os arquivos que a prévia mostrou: um arquivo que passou a poder ser
+      // excluído depois dela (ex.: uma pasta que deixou de ser ignorada) pede nova confirmação.
+      const shownPreview = bulkPreviews.get(scan.id);
+      if (!shownPreview || shownPreview.token !== req.body.token || Date.now() - shownPreview.at > PREVIEW_TTL_MS) {
+        throw new HttpError(409, 'A prévia desta exclusão expirou ou foi substituída por outra. Comece de novo.', 'preview-changed');
+      }
+      const extra = ready.filter((r) => !shownPreview.ids.has(r.id)).length;
+      if (extra) throw new HttpError(409, `${extra} arquivo(s) passaram a poder ser excluídos depois da prévia (o cadastro mudou).`, 'preview-changed');
       if (!ready.length) throw new HttpError(400, 'Nenhum dos arquivos escolhidos pode ser excluído (já excluídos, sem "Permitir exclusão" ou protegidos).');
       // Mais arquivos do que a prévia mostrou (ex.: uma pasta deixou de ser ignorada): nova confirmação.
       const expected = req.body?.expected;
@@ -626,6 +659,11 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         if (changed) throw new HttpError(409, `A forma de exclusão de "${changed.name}" mudou no cadastro (agora: ${METHOD_TEXT[changed.method]}). Confira e confirme de novo.`, 'method-changed');
       }
       const by = actor(req);
+      // Em ordem de caminho (os arquivos de cada pasta juntos), e os que já falharam numa tentativa
+      // anterior por último: repetir o lote avança nos demais.
+      const failedBefore = (r) => Number(r.deletion?.status === 'failed');
+      ready.sort((a, b) => failedBefore(a) - failedBefore(b) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      bulkPreviews.delete(scan.id);
       job = {
         // A forma de exclusão confirmada vale para o lote inteiro (se o cadastro mudar no meio, falha).
         methods: Object.fromEntries(repositories.map((g) => [g.id, g.method])),
@@ -637,7 +675,9 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         missing: 0,
         changed: 0,
         failed: 0,
-        skipped: 0,
+        skipped: 0, // em exclusão item a item na mesma hora
+        protected: 0, // em contas ou sites protegidos (OneDrive/SharePoint): pulados
+        notTried: 0, // numa pasta com falhas seguidas: não tentados neste lote
         running: true,
         cancelled: false,
         by,
@@ -671,6 +711,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
 
   /** Encerramento do CLEAN: interrompe os lotes e espera (com prazo) o arquivo em exclusão terminar. */
   router.stopBulk = async (timeoutMs = 15000) => {
+    closing = true; // um lote ainda em preparação também não começa
     const running = [...bulkJobs.values()].filter((job) => job.running);
     for (const job of running) {
       job.halted ||= 'encerramento do CLEAN';
@@ -698,13 +739,22 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         return false;
       }
     };
-    let failures = 0; // seguidas
+    // Falhas seguidas: numa pasta, os demais arquivos dela ficam para outro lote (ex.: uma pasta sem
+    // permissão); em várias pastas seguidas, o lote para (ex.: a conta do CLEAN sem permissão alguma).
+    let failures = 0;
+    const folderFailures = new Map(); // pasta -> falhas seguidas nela
     try {
       for (const item of records) {
-        if (job.cancelled) break;
+        if (job.cancelled || closing) break;
         if (failures >= BULK_FAILURES) {
-          job.halted = `${BULK_FAILURES} falhas seguidas (a última: ${job.lastError}) — confira as permissões e o cadastro do repositório`;
+          job.halted = `${BULK_FAILURES} falhas seguidas em várias pastas (a última: ${job.lastError}) — confira as permissões e o cadastro do repositório`;
           break;
+        }
+        const folder = folderOf(item);
+        if ((folderFailures.get(folder) || 0) >= FOLDER_FAILURES) {
+          job.notTried++;
+          job.done++;
+          continue;
         }
         const key = `${scan.id}:${item.id}`;
         // O mesmo arquivo sendo excluído pelo relatório, item a item, neste momento: fica de fora.
@@ -717,21 +767,30 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         const confirmed = job.methods[item.repositoryId];
         let result;
         let method = confirmed || (item.cloud ? 'trash' : 'file');
+        let kept = null;
         try {
-          ({ result, method } = await removeFile(scan, item, { signal: job.abort.signal, cache, expectMethod: confirmed }));
+          ({ result, method, protected: kept } = await removeFile(scan, item, { signal: job.abort.signal, cache, expectMethod: confirmed, skipProtected: true }));
         } catch (err) {
           // O cadastro mudou durante o lote (ex.: "Permitir exclusão" desligada): falha com o motivo.
           result = { status: 'failed', error: err instanceof HttpError ? err.message : friendlyError(err) };
         } finally {
           deleting.delete(key);
         }
+        if (kept) {
+          // Conta ou site protegido por um repositório sem "Permitir exclusão": pulado (não é uma falha).
+          job.protected++;
+          job.done++;
+          continue;
+        }
         job[result.status === 'deleted' ? 'deleted' : result.status === 'missing' ? 'missing' : result.status === 'changed' ? 'changed' : 'failed']++;
         job.done++;
         if (result.status === 'failed') {
           failures++;
+          folderFailures.set(folder, (folderFailures.get(folder) || 0) + 1);
           job.lastError = result.error;
         } else {
           failures = 0;
+          folderFailures.set(folder, 0);
         }
         if (!(await record(deletionEvent(item.id, result, { mode: 'manual', method, by: `${job.by} (exclusão em lote)`, item: item.path })))) {
           // Sem o registro, nada mais é excluído: uma exclusão não pode ficar sem rastro.
@@ -754,6 +813,8 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         job.missing ? `${job.missing} já não existia(m)` : '',
         job.changed ? `${job.changed} mantido(s) por terem mudado depois da análise` : '',
         job.failed ? `${job.failed} falha(s)` : '',
+        job.notTried ? `${job.notTried} não tentado(s) em pastas com ${FOLDER_FAILURES} falhas seguidas` : '',
+        job.protected ? `${job.protected} em contas ou sites protegidos (pulados)` : '',
         job.skipped ? `${job.skipped} em exclusão item a item` : '',
       ].filter(Boolean);
       store.appendLog(scan.id, {

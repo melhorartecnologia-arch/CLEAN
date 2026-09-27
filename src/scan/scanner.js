@@ -273,7 +273,8 @@ export class Scanner {
     if (this.stats.deleteProtected) {
       this.log('info', `${this.stats.deleteProtected} arquivo(s) ${found} em locais protegidos (repositórios sem "Permitir exclusão" dentro dos analisados, contas ou sites protegidos, pastas do CLEAN) não foram excluídos.`);
     }
-    this.log('info', `${this.cancelled ? 'Análise cancelada' : 'Análise concluída'} em ${seconds}s: ${this.stats.filesSeen} arquivo(s) verificados, ${this.stats.filesMatched} ${found}.`);
+    const noun = this.typeSearch ? 'Busca' : 'Análise';
+    this.log('info', `${noun} ${this.cancelled ? 'cancelada' : 'concluída'} em ${seconds}s: ${this.stats.filesSeen} arquivo(s) verificados, ${this.stats.filesMatched} ${found}.`);
     this.emit({ type: 'done', stats: { ...this.stats }, cancelled: this.cancelled });
     return this.stats;
   }

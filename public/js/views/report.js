@@ -73,14 +73,14 @@ const DELETION_WORDS = {
     removed: 'A conexão desta mensagem foi removida do cadastro: a exclusão pelo relatório não está disponível.',
   },
 };
-const CHANGED_REPO = 'O cadastro do repositório mudou depois da análise (tipo, locatário, contas ou sites): faça uma nova análise para excluir.';
+const changedRepo = (noun) => `O cadastro do repositório mudou depois da ${noun} (tipo, locatário, contas ou sites): faça uma nova ${noun} para excluir.`;
 const EXCLUDED_REPO = 'O arquivo está numa pasta (ou tem um nome) que o repositório passou a ignorar: a exclusão pelo relatório não está disponível.';
 
-function deletionLabel(status, o) {
+function deletionLabel(status, o, scanNoun = 'análise') {
   const labels = {
     deleted: `Excluíd${o}`,
     missing: `Não encontrad${o} (já excluíd${o} ou movid${o})`,
-    changed: `Não excluíd${o}: alterad${o} depois da análise`,
+    changed: `Não excluíd${o}: alterad${o} depois da ${scanNoun}`,
     failed: 'Falha na exclusão',
   };
   return labels[status] || status;
@@ -108,7 +108,7 @@ function deletionChip(r, o, retention = false) {
 }
 
 /** Situação da exclusão e botão "Excluir" no detalhe de um item. */
-function deletionBlock(r, noun, { active, deleting, bulk = false }) {
+function deletionBlock(r, noun, { active, deleting, bulk = false, scanNoun = 'análise' }) {
   const w = DELETION_WORDS[noun];
   const d = r.deletion;
   const how = d
@@ -117,12 +117,12 @@ function deletionBlock(r, noun, { active, deleting, bulk = false }) {
         ? d.by // já diz a política e quem a executou ou confirmou
         : `exclusão pela política de retenção${d.by ? `, iniciada por ${d.by}` : ''}`
       : d.mode === 'auto'
-        ? `exclusão automática da análise${d.by ? ` iniciada por ${d.by}` : ''}`
+        ? `exclusão automática da ${scanNoun}${d.by ? ` iniciada por ${d.by}` : ''}`
         : `exclusão manual${d.by ? ` por ${d.by}` : ''}`
     : '';
   const where = d?.status === 'deleted' ? (d.note ? ` (${d.note})` : d.method === 'trash' ? ` (movid${w.o} para a lixeira)` : '') : '';
   const status = d
-    ? html`<p class="small ${d.status === 'failed' ? 'danger-text' : ''}"><b>${deletionLabel(d.status, w.o)}</b> em ${fmtDateTime(d.at)}${where} — ${how}${d.status === 'failed' && d.error ? html`<br />${d.error}` : ''}</p>`
+    ? html`<p class="small ${d.status === 'failed' ? 'danger-text' : ''}"><b>${deletionLabel(d.status, w.o, scanNoun)}</b> em ${fmtDateTime(d.at)}${where} — ${how}${d.status === 'failed' && d.error ? html`<br />${d.error}` : ''}</p>`
     : html`<p class="muted small">Não excluíd${w.o}.</p>`;
   let action = '';
   if (deleting.has(r.id) || r.deleting) {
@@ -132,8 +132,8 @@ function deletionBlock(r, noun, { active, deleting, bulk = false }) {
   } else if (r.canDelete) {
     action = html`<button type="button" class="btn small danger" data-action="delete-item" data-rid="${r.id}">${icon('trash')} ${d && !isGone(d) ? 'Tentar excluir de novo' : `Excluir ${noun}`}</button>`;
   } else if (!isGone(d)) {
-    const blocked = { removed: w.removed, changed: CHANGED_REPO, excluded: EXCLUDED_REPO };
-    const why = active ? 'A exclusão manual fica disponível ao fim da análise.' : blocked[r.deleteBlocked] || w.notAllowed;
+    const blocked = { removed: w.removed, changed: changedRepo(scanNoun), excluded: EXCLUDED_REPO };
+    const why = active ? `A exclusão manual fica disponível ao fim da ${scanNoun}.` : blocked[r.deleteBlocked] || w.notAllowed;
     action = html`<p class="muted small">${why}</p>`;
   }
   return html`<h4 class="spaced">Exclusão</h4>${status}${action}`;
@@ -1057,18 +1057,20 @@ const BULK_BLOCKED = {
   'not-allowed': (n) => `${plural(n, 'arquivo', 'arquivos')} em repositórios sem "Permitir exclusão"`,
   protected: (n) => `${plural(n, 'arquivo', 'arquivos')} em locais protegidos (repositório sem "Permitir exclusão" dentro do analisado ou pastas do CLEAN)`,
   removed: (n) => `${plural(n, 'arquivo', 'arquivos')} de repositórios removidos do cadastro`,
-  changed: (n) => `${plural(n, 'arquivo', 'arquivos')} de repositórios com o cadastro alterado depois da análise`,
+  changed: (n, scanNoun = 'análise') => `${plural(n, 'arquivo', 'arquivos')} de repositórios com o cadastro alterado depois da ${scanNoun}`,
   excluded: (n) => `${plural(n, 'arquivo', 'arquivos')} em pastas (ou com nomes) que o repositório passou a ignorar`,
 };
 
 /** Resultado de uma exclusão em lote, em uma linha. */
-function bulkOutcome(job, retention) {
+function bulkOutcome(job, retention, scanNoun = 'análise') {
   const s = (n) => (n > 1 ? 's' : '');
   return [
     `${fmtNum(job.deleted)} excluído${job.deleted === 1 ? '' : 's'}`,
     job.missing ? `${fmtNum(job.missing)} já não existia${job.missing > 1 ? 'm' : ''}` : '',
-    job.changed ? `${fmtNum(job.changed)} mantido${s(job.changed)} (alterado${s(job.changed)}${retention ? ` ou não mais expirado${s(job.changed)}` : ''} depois da análise)` : '',
+    job.changed ? `${fmtNum(job.changed)} mantido${s(job.changed)} (alterado${s(job.changed)}${retention ? ` ou não mais expirado${s(job.changed)}` : ''} depois da ${scanNoun})` : '',
     job.failed ? plural(job.failed, 'falha', 'falhas') : '',
+    job.notTried ? `${fmtNum(job.notTried)} não tentado${s(job.notTried)} (pasta${s(job.notTried)} com falhas seguidas)` : '',
+    job.protected ? `${fmtNum(job.protected)} em contas ou sites protegidos` : '',
     job.skipped ? `${fmtNum(job.skipped)} em exclusão item a item` : '',
   ]
     .filter(Boolean)
@@ -1079,26 +1081,27 @@ function bulkOutcome(job, retention) {
  * Corpo do diálogo de confirmação da exclusão em lote (a partir da prévia do servidor). outside:
  * escolhidos que já foram excluídos (ou não encontrados); filtersText: os filtros usados.
  */
-function bulkPreviewBody(preview, outside, retention, filtersText = '') {
+function bulkPreviewBody(preview, outside, retention, filtersText = '', scanNoun = 'análise') {
   const blocked = Object.entries(preview.blocked || {}).filter(([, n]) => n > 0);
   const blockedTotal = blocked.reduce((sum, [, n]) => sum + n, 0);
   const tooMany = preview.tooMany || preview.ready > preview.max;
   const windows = preview.repositories.some((g) => g.method === 'file');
   if (preview.tooMany) {
     return html`${filtersText ? html`<p class="small">Filtros: <b>${filtersText}</b></p>` : ''}
-      <div class="alert error">${icon('alert')}<div>São ${fmtNum(preview.total)} arquivos: exclua no máximo ${fmtNum(preview.max)} por vez. Filtre o relatório (por tipo, repositório, extensão...) e exclua em partes.</div></div>`;
+      <div class="alert error">${icon('alert')}<div>São ${fmtNum(preview.total)} arquivos: exclua no máximo ${fmtNum(preview.max)} por vez. Filtre o relatório e exclua em partes.</div></div>`;
   }
   return html`${filtersText ? html`<p class="small">Filtros: <b>${filtersText}</b></p>` : ''}
     ${preview.ready
       ? html`<p>${preview.ready === 1 ? 'Será excluído' : 'Serão excluídos'} <b>${plural(preview.ready, 'arquivo', 'arquivos')}</b>, um de cada vez, em segundo plano:</p>
           <ul class="bulk-repos">${preview.repositories.map((g) => html`<li><b>${g.name}</b>: ${plural(g.count, 'arquivo', 'arquivos')} — ${BULK_METHOD[g.method] || g.method}</li>`)}</ul>`
       : html`<p><b>Nenhum dos arquivos escolhidos pode ser excluído.</b></p>`}
-    ${blocked.length ? html`<p class="small">${blockedTotal === 1 ? 'Fica' : 'Ficam'} de fora: ${blocked.map(([key, n]) => (BULK_BLOCKED[key] ? BULK_BLOCKED[key](n) : `${fmtNum(n)} (${key})`)).join('; ')}.</p>` : ''}
+    ${blocked.length ? html`<p class="small">${blockedTotal === 1 ? 'Fica' : 'Ficam'} de fora: ${blocked.map(([key, n]) => (BULK_BLOCKED[key] ? BULK_BLOCKED[key](n, scanNoun) : `${fmtNum(n)} (${key})`)).join('; ')}.</p>` : ''}
+    ${preview.byContent ? html`<p class="small"><b>${preview.byContent === 1 ? '1 deles foi encontrado' : `${fmtNum(preview.byContent)} deles foram encontrados`} só pelo tipo real (conteúdo)</b>, uma pista: confira-${preview.byContent === 1 ? 'o' : 'os'} no relatório (filtro <i>Encontrado por</i>) antes de excluir.</p>` : ''}
     ${outside > 0 ? html`<p class="small muted">${outside === 1 ? '1 arquivo já excluído (ou não encontrado) fica de fora.' : `${fmtNum(outside)} arquivos já excluídos (ou não encontrados) ficam de fora.`}</p>` : ''}
     ${tooMany ? html`<div class="alert error">${icon('alert')}<div>Exclua no máximo ${fmtNum(preview.max)} arquivos por vez: filtre o relatório.</div></div>` : ''}
     ${preview.ready && !tooMany
       ? html`<div class="alert error">${icon('alert')}<div>
-          ${windows ? html`<b>Exclusão sem volta nas pastas do Windows.</b> ` : ''}Antes de excluir, cada arquivo é conferido: os alterados depois da análise${retention ? ' (ou que deixaram de estar expirados)' : ''} são mantidos. Cada exclusão fica registrada (quem confirmou, quando e o resultado); acompanhe o andamento no relatório, que permite parar o lote.
+          ${windows ? html`<b>Exclusão sem volta nas pastas do Windows.</b> ` : ''}Antes de excluir, cada arquivo é conferido: os alterados depois da ${scanNoun}${retention ? ' (ou que deixaram de estar expirados)' : ''} são mantidos. Cada exclusão fica registrada (quem confirmou, quando e o resultado); acompanhe o andamento no relatório, que permite parar o lote.
           <label class="field"><span>Digite EXCLUIR para confirmar</span><input type="text" name="confirmDelete" autocomplete="off" spellcheck="false" /></label>
         </div></div>`
       : ''}`;
@@ -1129,6 +1132,8 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   let bulk = null;
   let bulkTimer = null;
   let shownCriteria = null; // filtros da lista exibida (a seleção só vale para ela)
+  let previewing = false; // prévia da exclusão em lote em andamento: a barra fica parada
+  let loadFailed = false; // a última recarga da lista falhou (a barra oferece tentar de novo)
   let selectionNote = ''; // "Seleção limpa", anunciado junto com a nova lista
   // "análise" ou "busca" (busca por tipo de arquivo) nos textos da execução.
   const noun = P.scanNoun || 'análise';
@@ -1154,7 +1159,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     html`<div data-head></div>
       <div data-alerts></div>
       <div data-progress></div>
-      <section class="tiles" data-tiles aria-label="Números da análise"></section>
+      <section class="tiles" data-tiles aria-label="Números da ${noun}"></section>
       <div class="tabs" role="tablist">
         <button type="button" role="tab" data-tab="arquivos">${P.resultsTitle}</button>
         <button type="button" role="tab" data-tab="erros">Erros <span data-error-count></span></button>
@@ -1286,7 +1291,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         summary?.deletedBytes ? `${fmtBytes(summary.deletedBytes)} excluíd${o}s` : '',
         t.missing ? `${fmtNum(t.missing)} já não existia${t.missing > 1 ? 'm' : ''}` : '',
         t.changed
-          ? `${fmtNum(t.changed)} mantid${o}${t.changed > 1 ? 's' : ''} (alterad${o}${t.changed > 1 ? 's' : ''}${P.retention && scan.kind !== 'mail' ? ' ou não mais expirad' + o + (t.changed > 1 ? 's' : '') : ''} depois da ${P.retention ? 'listagem' : 'análise'})`
+          ? `${fmtNum(t.changed)} mantid${o}${t.changed > 1 ? 's' : ''} (alterad${o}${t.changed > 1 ? 's' : ''}${P.retention && scan.kind !== 'mail' ? ' ou não mais expirad' + o + (t.changed > 1 ? 's' : '') : ''} depois da ${P.retention ? 'listagem' : noun})`
           : '',
         t.failed ? `${fmtNum(t.failed)} com falha` : '',
         // Retenção: expirados além do limite de exclusões da execução (só listados).
@@ -1380,7 +1385,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   /** A lista exibida é a dos filtros atuais? (Enquanto a nova lista carrega, nada pode ser selecionado.) */
   const inSync = () => Boolean(results) && shownCriteria === JSON.stringify(criteriaOnly());
   /** O item pode ser selecionado para a exclusão em lote? */
-  const selectable = (r) => canBulk && inSync() && !isActive(scan) && !bulk?.running && Boolean(r.canDelete);
+  const selectable = (r) => canBulk && inSync() && !previewing && !isActive(scan) && !bulk?.running && Boolean(r.canDelete);
   /** Foco no primeiro controle encontrado quando o que tinha o foco sumiu (ex.: um botão trocado ou desativado). */
   const keepFocus = (...selectors) => {
     const active = document.activeElement;
@@ -1414,7 +1419,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         html`<section class="card bulk-bar running" aria-label="Exclusão em lote" tabindex="-1">
           <div class="bulk-status">
             <b>${bulk.cancelled ? 'Parando a exclusão em lote…' : 'Exclusão em lote em andamento'}</b>
-            <span class="muted small">${fmtNum(bulk.done)} de ${fmtNum(bulk.total)} · ${bulkOutcome(bulk, P.retention)}</span>
+            <span class="muted small">${fmtNum(bulk.done)} de ${fmtNum(bulk.total)} · ${bulkOutcome(bulk, P.retention, noun)}</span>
           </div>
           <div class="bulk-progress" role="progressbar" aria-label="Exclusão em lote" aria-valuemin="0" aria-valuemax="${bulk.total}" aria-valuenow="${bulk.done}"><span data-w="${pct}"></span></div>
           <button type="button" class="btn small" data-action="bulk-cancel" ${bulk.cancelled ? 'disabled' : ''}>${icon('stop')} Parar a exclusão</button>
@@ -1438,12 +1443,21 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     }
     const marked = onPage.filter((r) => selection.has(r.id)).length;
     const filtered = P.criteria.some((k) => filters[k]);
-    const off = (on) => (busy || !on ? 'disabled' : '');
+    const off = (on) => (busy || previewing || !on ? 'disabled' : '');
+    const status = previewing
+      ? 'Calculando a prévia…'
+      : busy
+        ? loadFailed
+          ? html`Não foi possível atualizar a lista. <button type="button" class="btn small" data-action="reload">Tentar de novo</button>`
+          : 'Atualizando a lista…'
+        : selection.size
+          ? plural(selection.size, 'arquivo selecionado', 'arquivos selecionados')
+          : `Selecione os arquivos a excluir ou exclua todos os ${filtered ? 'filtrados' : 'do relatório'} de uma vez.`;
     paint(
       box,
       html`<section class="card bulk-bar" aria-label="Exclusão em lote" tabindex="-1">
         <label class="check"><input type="checkbox" data-action="select-page" ${off(onPage.length)} ${onPage.length && marked === onPage.length ? 'checked' : ''} /><span>${results?.pages > 1 ? 'Selecionar os desta página' : 'Selecionar todos'}</span></label>
-        <span class="muted small">${busy ? 'Atualizando a lista…' : selection.size ? plural(selection.size, 'arquivo selecionado', 'arquivos selecionados') : `Selecione os arquivos a excluir ou exclua todos os ${filtered ? 'filtrados' : 'do relatório'} de uma vez.`}</span>
+        <span class="muted small">${status}</span>
         <div class="inline">
           <button type="button" class="btn small danger" data-action="bulk-selected" ${off(selection.size)}>${icon('trash')} Excluir selecionados${selection.size ? ` (${fmtNum(selection.size)})` : ''}</button>
           <button type="button" class="btn small danger" data-action="bulk-all" ${off(true)}>${icon('trash')} ${filtered ? 'Excluir todos os filtrados' : 'Excluir todos os arquivos'}</button>
@@ -1478,6 +1492,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       return;
     }
     if (!wasRunning) return;
+    redraw(root, drawBulk); // sai do "em andamento" já (a recarga da lista vem depois)
     if (!bulk) {
       // O lote sumiu do servidor: o CLEAN foi reiniciado no meio (o que já foi excluído está registrado).
       announce('Exclusão em lote interrompida.');
@@ -1486,8 +1501,8 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       const stoppedAt = `interrompida depois de ${fmtNum(bulk.done)} de ${fmtNum(bulk.total)}`;
       announce(`Exclusão em lote ${bulk.halted || bulk.cancelled ? 'interrompida' : 'concluída'}.`);
       toast(
-        `Exclusão em lote ${bulk.halted ? `${stoppedAt} por ${bulk.halted}` : bulk.cancelled ? stoppedAt : 'concluída'}: ${bulkOutcome(bulk, P.retention)}.`,
-        bulk.failed ? 'warn' : 'success',
+        `Exclusão em lote ${bulk.halted ? `${stoppedAt} por ${bulk.halted}` : bulk.cancelled ? stoppedAt : 'concluída'}: ${bulkOutcome(bulk, P.retention, noun)}.`,
+        bulk.failed || bulk.halted ? 'warn' : 'success',
       );
     }
     try {
@@ -1511,21 +1526,42 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       keepFocus('[data-action="bulk-cancel"]');
       return;
     }
+    // O recorte (ou a seleção) do clique: se mudar até a confirmação, nada é enviado.
+    const shownText = filtersText();
+    const sameTarget = () =>
+      target.ids ? JSON.stringify([...selection].sort((a, b) => a - b)) === JSON.stringify([...target.ids].sort((a, b) => a - b)) : inSync() && JSON.stringify(criteriaOnly()) === JSON.stringify(target.filters);
     let preview;
+    previewing = true;
+    redraw(root, () => {
+      drawBulk();
+      drawResults();
+    });
     try {
       preview = await post(`/api/scans/${id}/bulk-delete/preview`, target);
     } catch (err) {
       toast(err.message, 'error');
       return;
+    } finally {
+      previewing = false;
+      if (!stopped) {
+        redraw(root, () => {
+          drawBulk();
+          drawResults();
+        });
+      }
     }
     if (stopped) return;
+    if (!sameTarget()) {
+      toast(target.ids ? 'A seleção mudou durante a prévia: confira e escolha de novo.' : 'Os filtros mudaram durante a prévia: confira a lista e escolha de novo.', 'info');
+      return;
+    }
     const filtered = Boolean(target.filters && Object.keys(target.filters).length);
     // Os já excluídos (ou não encontrados) entre os escolhidos, contados pelo servidor.
     const outside = preview.gone ?? Math.max(0, (target.ids ? target.ids.length : results?.total || 0) - preview.total);
     const ok = preview.ready > 0 && preview.ready <= preview.max;
     const job = await openDialog({
       title: target.ids ? 'Excluir os arquivos selecionados' : filtered ? 'Excluir os arquivos filtrados' : 'Excluir todos os arquivos',
-      body: bulkPreviewBody(preview, outside, P.retention, filtered ? filtersText() : ''),
+      body: bulkPreviewBody(preview, outside, P.retention, filtered ? shownText : '', noun),
       submitLabel: ok ? `Excluir ${plural(preview.ready, 'arquivo', 'arquivos')}` : 'Fechar',
       cancelLabel: ok ? 'Cancelar' : '',
       danger: ok,
@@ -1533,11 +1569,13 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         if (!ok) return true;
         const confirmDelete = String(form.elements.confirmDelete?.value || '');
         if (confirmDelete.trim().toUpperCase() !== 'EXCLUIR') throw new Error('Digite EXCLUIR para confirmar a exclusão.');
+        // Uma busca digitada antes (aplicada com a confirmação aberta) mudou o recorte: começa de novo.
+        if (!sameTarget()) throw new Error('Os filtros ou a seleção mudaram depois da prévia: feche e comece de novo.');
         // A forma de exclusão mostrada vai junto: se o cadastro mudou, o servidor recusa (409).
         const methods = Object.fromEntries(preview.repositories.map((g) => [g.id, g.method]));
         try {
           // expected: se mais arquivos puderem ser excluídos do que a prévia mostrou, o servidor recusa.
-          return await post(`/api/scans/${id}/bulk-delete`, { ...target, confirmDelete, methods, expected: preview.ready });
+          return await post(`/api/scans/${id}/bulk-delete`, { ...target, confirmDelete, methods, expected: preview.ready, token: preview.token });
         } catch (err) {
           throw new Error(['method-changed', 'preview-changed'].includes(err.code) ? `${err.message} Feche e comece de novo para ver a prévia atual.` : err.message);
         }
@@ -1600,7 +1638,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
                     <td class="row-controls">${selectBox(r)}<button type="button" class="icon-btn" data-action="toggle" aria-label="${open ? 'Ocultar' : 'Mostrar'} detalhes de ${P.rowLabel(r)}" aria-expanded="${expandedText}"><span class="row-toggle">${icon('chevron')}</span></button></td>
                     ${P.row(r)}
                   </tr>
-                  ${open ? html`<tr class="detail"><td colspan="${P.columns || 5}">${P.detail(r, { active: isActive(scan), deleting: deletingNow, bulk: Boolean(bulk?.running) })}</td></tr>` : ''}`;
+                  ${open ? html`<tr class="detail"><td colspan="${P.columns || 5}">${P.detail(r, { active: isActive(scan), deleting: deletingNow, bulk: Boolean(bulk?.running), scanNoun: noun })}</td></tr>` : ''}`;
               })}
             </tbody>
           </table>
@@ -1684,6 +1722,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       results = res;
       summary = sum;
       shownCriteria = requested;
+      loadFailed = false;
       drawTiles();
       if (results.page !== Number(filters.page || 1)) filters.page = results.page > 1 ? String(results.page) : '';
       stale.results = false;
@@ -1698,7 +1737,10 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       announce(`${selectionNote}${plural(results.total, `${one} encontrad${one === 'mensagem' ? 'a' : 'o'}`, `${many} encontrad${one === 'mensagem' ? 'as' : 'os'}`)}.`);
       selectionNote = '';
     } catch (err) {
-      if (!stopped) toast(err.message, 'error');
+      if (stopped || loading !== request) return;
+      toast(err.message, 'error');
+      loadFailed = true;
+      redraw(root, drawBulk);
     } finally {
       if (loading === request) busy.forEach((el) => el.classList.remove('is-loading'));
     }
@@ -1829,6 +1871,10 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       announce(selection.size ? `${plural(selection.size, 'arquivo selecionado', 'arquivos selecionados')}.` : 'Nenhum arquivo selecionado.');
       return;
     }
+    if (action === 'reload') {
+      await loadResults();
+      return;
+    }
     if (action === 'bulk-clear') {
       selection.clear();
       root.querySelectorAll('[data-results] input[data-action="select"]').forEach((box) => {
@@ -1928,7 +1974,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           res = await send(false);
         } catch (err) {
           if (err.code !== 'changed') throw err;
-          const title = P.retention ? 'Arquivo alterado ou não mais expirado' : 'Arquivo alterado depois da análise';
+          const title = P.retention ? 'Arquivo alterado ou não mais expirado' : `Arquivo alterado depois da ${noun}`;
           if (!(await confirmDialog(err.message, { title, confirmLabel: 'Excluir mesmo assim' }))) return;
           res = await send(true);
         }

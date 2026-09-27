@@ -501,7 +501,9 @@ export class Scheduler {
     const complete = (h) => h.outcome?.status === 'completed' && !h.outcome.gaps && h.outcome.startedAt && (schedule.action !== 'delete' || (h.outcome.deleting !== false && !h.outcome.deleteSkipped));
     const baseline = runs.find((h) => h.base && complete(h));
     if (!baseline) {
-      return { from: null, full: true, base: true, text: 'análise completa (não há execução anterior concluída, sem falhas de acesso, com os mesmos locais, termos e opções).' };
+      const what = schedule.purpose === 'types' ? 'tipos' : 'termos';
+      const limit = schedule.action === 'delete' ? ' e sem itens deixados só na lista pelo limite de exclusões' : '';
+      return { from: null, full: true, base: true, text: `análise completa (não há execução anterior concluída, sem falhas de acesso${limit}, com os mesmos locais, ${what} e opções).` };
     }
     const every = p.fullEvery || 7;
     const lastFull = runs.findIndex((h) => h.full && complete(h));

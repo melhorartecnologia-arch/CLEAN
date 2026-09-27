@@ -156,14 +156,17 @@ export function limitWarning(
   { found = 'expirado', where = 'na política', owner = 'da política', later = 'Eles serão excluídos nas próximas execuções.' } = {},
 ) {
   if (!limit || !skipped) return null;
-  const items = kind === 'mail' ? `${skipped} mensagem(ns) ${found.replace(/o$/, 'a')}(s)` : `${skipped} arquivo(s) ${found}(s)`;
+  const mail = kind === 'mail';
+  const o = mail ? 'a' : 'o'; // "mensagens listadas", "arquivos listados"
+  const items = mail ? `${skipped} mensagem(ns) ${found.replace(/o$/, 'a')}(s)` : `${skipped} arquivo(s) ${found}(s)`;
   if (failures >= limit) {
-    return `${limit === 1 ? 'Uma falha' : `${limit} falhas`} de exclusão nesta execução (o limite ${owner}): as exclusões foram interrompidas e ${items} só foram listados. Confira a aba Erros (permissões, itens em uso, rótulos de retenção...).`;
+    return `${limit === 1 ? 'Uma falha' : `${limit} falhas`} de exclusão nesta execução (o limite ${owner}): as exclusões foram interrompidas e ${items} só foram listad${o}s. Confira a aba Erros (permissões, itens em uso, rótulos de retenção...).`;
   }
   if (deleted >= limit) {
-    return `Limite de ${limit} ${limit === 1 ? 'exclusão' : 'exclusões'} desta execução atingido: ${items} só foram listados. Confira o relatório e, se estiver certo, aumente o limite ${where}.`;
+    return `Limite de ${limit} ${limit === 1 ? 'exclusão' : 'exclusões'} desta execução atingido: ${items} só foram listad${o}s. Confira o relatório e, se estiver certo, aumente o limite ${where}.`;
   }
-  return `${items} não foram excluídos nesta execução: as vagas do limite ficaram reservadas para exclusões que falharam. ${later}`;
+  const next = mail ? later.replace('Eles serão excluídos', 'Elas serão excluídas') : later;
+  return `${items} não foram excluíd${o}s nesta execução: as vagas do limite ficaram reservadas para exclusões que falharam. ${next}`;
 }
 
 /** "5 anos", "1 mês", "30 dias". */

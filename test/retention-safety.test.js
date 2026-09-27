@@ -413,7 +413,7 @@ test('e-mail: aviso do limite pelos números finais e exclusão desligada durant
   assert.equal(stats.deleteErrors, 1000);
   const warns = messages.filter((m) => m.type === 'log' && m.level === 'warn').map((m) => m.message);
   assert.equal(warns.length, 1);
-  assert.match(warns[0], /^1000 falhas de exclusão nesta execução \(o limite da política\): as exclusões foram interrompidas e 2000 mensagem\(ns\) expirada\(s\) só foram listados/);
+  assert.match(warns[0], /^1000 falhas de exclusão nesta execução \(o limite da política\): as exclusões foram interrompidas e 2000 mensagem\(ns\) expirada\(s\) só foram listadas/);
 
   // Exclusão desligada durante a listagem: o que estava na fila não vira falha.
   messages = [];
