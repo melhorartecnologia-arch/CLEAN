@@ -1,5 +1,6 @@
-// Novo agendamento (#/agendamentos/novo?tipo=email) ou edição (#/agendamentos/<id>): o mesmo
-// formulário da nova análise de arquivos ou de e-mail, no modo de agendamento.
+// Novo agendamento (#/agendamentos/novo?tipo=email; ?busca=tipos para a busca por tipo de arquivo)
+// ou edição (#/agendamentos/<id>): o mesmo formulário da nova análise de arquivos ou de e-mail, no
+// modo de agendamento.
 import { get } from '../api.js';
 import * as scanNew from './scan-new.js';
 import * as mailScanNew from './mail-scan-new.js';

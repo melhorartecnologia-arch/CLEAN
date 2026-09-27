@@ -1330,6 +1330,104 @@ table.data.schedules td.actions {
   border-bottom: 0;
 }
 
+/* ---------- Busca por tipo de arquivo ---------- */
+
+.category-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+  margin: 6px 0 2px;
+}
+.category-grid .check {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.category-grid .check:hover {
+  background: var(--surface-2);
+}
+.category-grid .check:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.field-label.spaced,
+.form-grid.spaced {
+  margin-top: 14px;
+}
+details.extensions-list {
+  margin-top: 10px;
+  font-size: 13px;
+}
+details.extensions-list summary {
+  cursor: pointer;
+  color: var(--accent-ink);
+  font-weight: 500;
+}
+details.extensions-list dl {
+  margin-top: 8px;
+}
+.limit-field {
+  max-width: 380px;
+  margin: 10px 0 10px 24px;
+}
+
+/* Exclusão em lote nos relatórios de arquivos: caixas de seleção, barra de ações e andamento. */
+td.row-controls {
+  white-space: nowrap;
+}
+.row-select {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin: 0 6px 0 0;
+  vertical-align: middle;
+  accent-color: var(--accent);
+}
+.bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+}
+.bulk-bar .check {
+  align-items: center;
+}
+.bulk-bar .check input {
+  margin: 0;
+}
+.bulk-bar > .inline {
+  margin-left: auto;
+}
+.bulk-bar.running {
+  border-left: 3px solid var(--critical);
+}
+.bulk-status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bulk-progress {
+  flex: 1 1 200px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: var(--surface-2);
+}
+.bulk-progress span {
+  display: block;
+  height: 100%;
+  background: var(--critical);
+}
+.bulk-repos {
+  margin: 6px 0 10px;
+  padding-left: 20px;
+}
+.bulk-repos li {
+  margin-bottom: 4px;
+}
+
 /* ---------- Diálogos e avisos ---------- */
 
 dialog {
@@ -1450,6 +1548,21 @@ dialog::backdrop {
   }
   table.results tr:not(.detail) > td:first-child {
     grid-row: span 4;
+  }
+  table.results tr:not(.detail) > td:not(:first-child) {
+    grid-column: 2;
+  }
+  table.results tr:not(.detail) > td.row-controls {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+  table.results .row-select {
+    margin: 0;
+  }
+  .bulk-bar > .inline {
+    margin-left: 0;
   }
   .filters .field,
   .filters .field.grow {

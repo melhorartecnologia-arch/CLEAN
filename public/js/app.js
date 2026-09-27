@@ -2,6 +2,7 @@
 import { get } from './api.js';
 import { html, render, icon, setServerTimeZone } from './ui.js';
 import { setActiveNav } from './nav.js';
+import { setFileTypesCatalog } from './file-types.js';
 import * as dashboard from './views/dashboard.js';
 import * as scans from './views/scans.js';
 import * as scanNew from './views/scan-new.js';
@@ -43,6 +44,7 @@ async function loadInfo() {
   if (!ctx.info) {
     ctx.info = await get('/api/info');
     setServerTimeZone(ctx.info.timeZone);
+    setFileTypesCatalog(ctx.info.fileTypes);
   }
   return ctx.info;
 }

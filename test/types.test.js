@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { sanitizeFileTypes, typeMatcher, normalizeExtension, describeFileTypes, FileTypesError } from '../src/types/catalog.js';
-import { detectType } from '../src/types/signature.js';
+import { detectType, sameContainer } from '../src/types/signature.js';
 import { Scanner } from '../src/scan/scanner.js';
 import { Store } from '../src/store.js';
 import { ScanManager } from '../src/scan/manager.js';
@@ -64,7 +64,7 @@ test('catálogo: validação, extensões compostas, maiúsculas e descrição', 
   assert.equal(match('arquivo.gz'), null, '.gz sozinho não foi escolhido');
   assert.equal(match('.mp3'), null, 'arquivo oculto sem nome');
   assert.equal(match('sem-extensao'), null);
-  assert.equal(describeFileTypes(t), 'Vídeos, Músicas e áudio, .tar.gz e .xyz (acima de 1,5 MB)');
+  assert.equal(describeFileTypes(t), 'Vídeos, Músicas e áudio, .tar.gz e .xyz (a partir de 1,5 MB)');
 });
 
 test('tipo real pelo conteúdo: assinaturas e casos ambíguos', () => {
@@ -88,6 +88,16 @@ test('tipo real pelo conteúdo: assinaturas e casos ambíguos', () => {
   bmp.writeUInt32LE(64, 2);
   assert.equal(detectType(bmp, 64).category, 'image');
   assert.equal(detectType(bmp, 999), null, 'BMP só com o tamanho certo no cabeçalho');
+  // Textos não são confundidos com assinaturas curtas (nem o UTF-16, que começa com FF FE).
+  assert.equal(detectType(Buffer.from('\ufeffNome;Valor\r\n', 'utf16le')), null, 'texto UTF-16 não é MP3');
+  assert.equal(detectType(Buffer.from('MZ-2024: vendas do trimestre')), null, 'texto começando com MZ');
+  assert.equal(detectType(Buffer.from('ID3 tags da coleção')), null, 'texto começando com ID3');
+  // O formato próprio de outras extensões não é um arquivo renomeado.
+  const odd = detectType(zip('customXml/item1.xml'));
+  assert.equal(odd.category, 'archive');
+  assert.equal(sameContainer(odd, '.xlsx'), true);
+  assert.equal(sameContainer(odd, '.pdf'), false);
+  assert.equal(sameContainer(detectType(MP4), '.m4a'), true, 'um .m4a é MP4 por dentro');
 });
 
 async function runTypes(dir, fileTypes, { deleteMatches = false, keep = [] } = {}) {
@@ -121,6 +131,21 @@ test('motor: pela extensão, pelo tipo real, tamanho mínimo e exclusão automá
   run = await runTypes(dir, { categories: ['image'], checkContent: true });
   assert.deepEqual(run.records.map((r) => [r.name, r.typeMatch.by, r.typeMatch.format]), [['foto-renomeada.pdf', 'content', 'Imagem JPEG']]);
   assert.equal(run.stats.typesByContent, 1);
+
+  // Tipo real só nos arquivos sem extensão ou com a extensão de outro tipo conhecido: um .dll (fora do
+  // catálogo) é o que diz ser, e o formato próprio da extensão (.xlsx é ZIP, .m4a é MP4) não conta.
+  const other = fs.mkdtempSync(path.join(root, 'repo-'));
+  const oddZip = Buffer.concat([Buffer.from('504b0304', 'hex'), Buffer.alloc(200)]);
+  fs.writeFileSync(path.join(other, 'planilha.xlsx'), oddZip);
+  fs.writeFileSync(path.join(other, 'fotos.pdf'), oddZip);
+  fs.writeFileSync(path.join(other, 'biblioteca.dll'), Buffer.concat([Buffer.from('MZ\x90\x00', 'latin1'), Buffer.alloc(100)]));
+  fs.writeFileSync(path.join(other, 'musica.m4a'), MP4);
+  fs.writeFileSync(path.join(other, 'video-sem-extensao'), MP4);
+  run = await runTypes(other, { categories: ['video', 'archive', 'executable'], checkContent: true });
+  assert.deepEqual(run.records.map((r) => [r.name, r.typeMatch.category, r.typeMatch.by]).sort(), [
+    ['fotos.pdf', 'archive', 'content'],
+    ['video-sem-extensao', 'video', 'content'],
+  ]);
 
   // Tamanho mínimo: só o vídeo (30 KB) passa de 0,02 MB (cerca de 21 KB).
   run = await runTypes(dir, { categories: ['video', 'audio'], minSizeMB: 0.02 });

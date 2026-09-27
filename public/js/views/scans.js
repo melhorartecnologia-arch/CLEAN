@@ -2,6 +2,7 @@
 import { get, post, del } from '../api.js';
 import { html, render as paint, icon, toast, confirmDialog, fmtNum, fmtDateTime, fmtDuration, statusBadge } from '../ui.js';
 import { describeRetention } from '../retention.js';
+import { describeFileTypes } from '../file-types.js';
 
 const active = (s) => s.status === 'running' || s.status === 'queued';
 
@@ -14,7 +15,7 @@ function duration(scan) {
 const KINDS = {
   files: {
     title: 'Análises de arquivos',
-    sub: 'Cada análise percorre os repositórios escolhidos e gera um relatório com os arquivos em que algum termo foi encontrado.',
+    sub: 'Cada análise percorre os repositórios escolhidos e gera um relatório com os arquivos em que algum termo foi encontrado (ou, na busca por tipo, com os arquivos dos tipos escolhidos).',
     base: '#/analises',
     empty: 'Nenhuma análise de arquivos realizada ainda.',
     where: (s) => (s.summary?.repositories || []).map((r) => r.name).join(', '),
@@ -47,7 +48,10 @@ export async function render(root, { props = {} }) {
             <h1>${K.title}</h1>
             <div class="sub">${K.sub}</div>
           </div>
-          <div class="actions"><a class="btn primary" href="${K.base}/nova">${icon('play')} Nova análise</a></div>
+          <div class="actions">
+            ${kind === 'files' ? html`<a class="btn" href="${K.base}/nova?busca=tipos">${icon('search')} Buscar por tipo de arquivo</a>` : ''}
+            <a class="btn primary" href="${K.base}/nova">${icon('play')} Nova análise</a>
+          </div>
         </div>
         <section class="card">
           ${scans.length === 0
@@ -68,17 +72,17 @@ export async function render(root, { props = {} }) {
                         <td>
                           <a href="${K.base}/${s.id}"><b>${s.name}</b></a>${s.retention
                             ? html` <span class="chip" title="${s.scheduleId ? `Execução da política de retenção "${s.scheduleName}"` : 'Execução de uma política de retenção'}">${icon('clock')} retenção</span>`
-                            : s.scheduleId
-                              ? html` <span class="chip" title="Iniciada pelo agendamento &quot;${s.scheduleName}&quot;">${icon('clock')} agendada</span>`
-                              : ''}
-                          <div class="muted small">${K.where(s)} · ${s.retention ? describeRetention(s.retention, kind) : (s.summary?.lists || []).map((l) => l.name).join(', ')}</div>
+                            : html`${s.fileTypes ? html` <span class="chip">busca por tipo</span>` : ''}${s.scheduleId
+                                ? html` <span class="chip" title="Iniciada pelo agendamento &quot;${s.scheduleName}&quot;">${icon('clock')} agendada</span>`
+                                : ''}`}
+                          <div class="muted small">${K.where(s)} · ${s.retention ? describeRetention(s.retention, kind) : s.fileTypes ? describeFileTypes(s.fileTypes) : (s.summary?.lists || []).map((l) => l.name).join(', ')}</div>
                           ${active(s) ? html`<div class="progress-line" role="progressbar" aria-label="Análise em andamento"></div>` : ''}
                         </td>
                         <td>${statusBadge(s.status)}</td>
                         <td class="nowrap">${fmtDateTime(s.startedAt || s.createdAt)}</td>
                         <td class="nowrap">${duration(s)}</td>
                         <td class="num">${fmtNum(seen)}</td>
-                        <td class="num">${fmtNum(matched)}${s.retention ? html`<div class="muted small">expirad${kind === 'mail' ? 'as' : 'os'}</div>` : ''}</td>
+                        <td class="num">${fmtNum(matched)}${s.retention ? html`<div class="muted small">expirad${kind === 'mail' ? 'as' : 'os'}</div>` : s.fileTypes ? html`<div class="muted small">encontrados</div>` : ''}</td>
                         <td class="num">${fmtNum(s.stats?.errors)}</td>
                         <td class="actions">
                           <a class="icon-btn" href="${K.base}/${s.id}" aria-label="Abrir relatório de ${s.name}" title="Abrir relatório">${icon('file')}</a>

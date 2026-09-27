@@ -51,8 +51,9 @@ export async function render(root, { ctx }) {
       <td>
         <a href="#/agendamentos/${s.id}" data-action="open"><b>${s.name}</b></a>
         <span class="kind-badge">${KIND[s.kind]}</span>
+        ${s.purpose === 'types' ? html`<span class="chip">busca por tipo</span>` : ''}
         ${s.action === 'delete' ? html`<span class="chip danger">exclusão automática</span>` : ''}
-        <div class="muted small">${s.targets.map((t) => t.name).join(', ')} · ${s.lists.map((l) => l.name).join(', ')}</div>
+        <div class="muted small">${s.targets.map((t) => t.name).join(', ')} · ${s.purpose === 'types' ? s.typesText : s.lists.map((l) => l.name).join(', ')}</div>
         ${s.problems.map((p) => html`<div class="small danger-text">${icon('alert')} ${p}</div>`)}
       </td>
       <td>
@@ -86,11 +87,12 @@ export async function render(root, { ctx }) {
     html`<div class="page-head">
         <div>
           <h1>Agendamentos</h1>
-          <div class="sub">Análises executadas automaticamente nos dias e horários definidos, com os mesmos locais, listas e opções de uma análise comum.</div>
+          <div class="sub">Análises executadas automaticamente nos dias e horários definidos, com os mesmos locais, listas (ou tipos de arquivo) e opções de uma análise comum.</div>
         </div>
         <div class="actions">
           <a class="btn primary" href="#/agendamentos/novo">${icon('plus')} Agendar arquivos</a>
           <a class="btn primary" href="#/agendamentos/novo?tipo=email">${icon('plus')} Agendar e-mails</a>
+          <a class="btn" href="#/agendamentos/novo?busca=tipos">${icon('plus')} Agendar busca por tipo</a>
         </div>
       </div>
       <div class="alert info">${icon('info')}<div>${zoneNote(ctx.info)} Os agendamentos só são executados com o CLEAN em execução (instale-o como serviço do Windows). Se a execução anterior de um agendamento ainda estiver em andamento, a nova é pulada.</div></div>
@@ -109,6 +111,7 @@ export async function render(root, { ctx }) {
               <div class="inline">
                 <a class="btn primary" href="#/agendamentos/novo" data-action="new-files">${icon('plus')} Agendar arquivos</a>
                 <a class="btn" href="#/agendamentos/novo?tipo=email" data-action="new-mail">${icon('plus')} Agendar e-mails</a>
+                <a class="btn" href="#/agendamentos/novo?busca=tipos" data-action="new-types">${icon('plus')} Agendar busca por tipo</a>
               </div>
             </div>`
           : html`<div class="table-wrap">

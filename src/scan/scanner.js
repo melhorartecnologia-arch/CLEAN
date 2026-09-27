@@ -12,8 +12,8 @@ import { friendlyError, withTimeout } from './errors.js';
 import { deleteFile, deletionEvent, isWithin, isCloudRepo, guardFor } from './delete.js';
 import { DrivesConnector, person, keptCloudTarget, cloudTarget } from '../cloud/drives.js';
 import { fileDate, cloudDate, ageDays, patternMatcher, limitWarning } from '../retention/policy.js';
-import { typeMatcher, describeFileTypes } from '../types/catalog.js';
-import { detectType, HEADER_BYTES } from '../types/signature.js';
+import { typeMatcher, describeFileTypes, categoryOfExtension } from '../types/catalog.js';
+import { detectType, sameContainer, HEADER_BYTES } from '../types/signature.js';
 
 // Tempo máximo para ler um arquivo (o que passar disso é registrado como erro e a análise segue).
 const FILE_TIMEOUT = 5 * 60 * 1000;
@@ -619,11 +619,16 @@ export class Scanner {
       return;
     }
     let detected = null;
-    if (!found && !small && t.checkContent && st.size > 0) {
+    const extension = path.extname(entry.name).toLowerCase();
+    // Tipo real: só nos arquivos sem extensão ou com a extensão de outro tipo conhecido. Os de
+    // extensão fora do catálogo são o que dizem ser (um .dll é um executável, um .ai do Illustrator
+    // é um PDF, um .lrcat do Lightroom é SQLite), e o formato próprio de uma extensão não é um
+    // arquivo renomeado (um .docx é ZIP, um .m4a é MP4).
+    if (!found && !small && t.checkContent && st.size > 0 && (!extension || categoryOfExtension(extension))) {
       const real = await this.readType(entry.path, st.size);
-      if (real?.category && t.categories.includes(real.category)) {
+      if (real?.category && t.categories.includes(real.category) && !sameContainer(real, extension)) {
         detected = real;
-        found = { category: real.category, extension: path.extname(entry.name).toLowerCase() };
+        found = { category: real.category, extension };
       }
     }
     if (!found) return;
@@ -637,7 +642,7 @@ export class Scanner {
       path: entry.path,
       relativePath: entry.relativePath,
       name: entry.name,
-      extension: path.extname(entry.name).toLowerCase(),
+      extension,
       size: st.size,
       created: iso(st.birthtime),
       modified: iso(st.mtime),

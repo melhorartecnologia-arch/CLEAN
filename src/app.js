@@ -17,6 +17,7 @@ import { DEFAULT_OPTIONS } from './scan/scanner.js';
 import { DEFAULT_EXCLUDES } from './scan/walker.js';
 import { MAIL_DEFAULT_OPTIONS } from './mail/scanner.js';
 import { MAIL_TYPES } from './mail/connectors.js';
+import { CATEGORIES, CUSTOM, DEFAULT_MAX_DELETIONS } from './types/catalog.js';
 
 // Versão exibida na interface (lida do package.json).
 const VERSION = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')).version;
@@ -151,6 +152,12 @@ export function createApp({ store, manager, config, scheduler = new Scheduler({ 
       defaultExcludes: DEFAULT_EXCLUDES,
       mailDefaults: MAIL_DEFAULT_OPTIONS,
       mailTypes: MAIL_TYPES,
+      // Busca por tipo: as categorias (na ordem da tela) e o limite padrão de exclusões automáticas.
+      fileTypes: {
+        categories: Object.entries(CATEGORIES).map(([key, c]) => ({ key, label: c.label, extensions: c.extensions, work: Boolean(c.work) })),
+        customLabel: CUSTOM.label,
+        defaultMaxDeletions: DEFAULT_MAX_DELETIONS,
+      },
     });
   });
   api.use('/repositories', repositoriesRouter({ store, manager, scheduler, endpoints: config.mailEndpoints }));

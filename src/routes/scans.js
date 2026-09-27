@@ -641,7 +641,9 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       ...(scan.fileTypes ? { types: summarizeTypes(list) } : {}),
     }));
     const options = memo.get(`${scan.id}|${records.length}|o`, () => model.options(records));
-    res.json({ ...summary, options, deletions: deletionTotals(records) });
+    // Espaço dos itens já excluídos (automática, item a item ou em lote).
+    const deletedBytes = records.reduce((sum, r) => sum + (r.deletion?.status === 'deleted' ? Number(r.size) || 0 : 0), 0);
+    res.json({ ...summary, options, deletions: deletionTotals(records), deletedBytes });
   });
 
   router.get('/:id/errors', async (req, res) => {

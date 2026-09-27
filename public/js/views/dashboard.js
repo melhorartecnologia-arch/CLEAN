@@ -24,12 +24,14 @@ export async function render(root, { ctx }) {
   // Os problemas aparecem na lista (e não no formulário de edição).
   const listLink = (s) => (isPolicy(s) ? '#/retencao' : '#/agendamentos');
   const terms = lists.reduce((sum, l) => sum + l.termCount, 0);
-  // Os números de ocorrências vêm das análises por termos (as execuções da retenção não têm termos).
-  const lastFiles = scans.find((s) => !isMail(s) && !s.retention && s.status === 'completed');
+  // Os números de ocorrências vêm das análises por termos (as execuções da retenção e as buscas por
+  // tipo não têm termos).
+  const lastFiles = scans.find((s) => !isMail(s) && !s.retention && !s.fileTypes && s.status === 'completed');
   const lastMail = scans.find((s) => isMail(s) && !s.retention && s.status === 'completed');
   const active = scans.filter(running);
-  // Pronto para usar: com locais cadastrados e uma lista com termos (ou uma política de retenção).
-  const ready = (repos.length > 0 || sources.length > 0) && (terms > 0 || policies.length > 0);
+  // Pronto para usar: com locais cadastrados e uma lista com termos (ou uma política de retenção ou
+  // uma busca por tipo de arquivo).
+  const ready = (repos.length > 0 || sources.length > 0) && (terms > 0 || policies.length > 0 || scans.some((s) => s.fileTypes) || schedules.some((s) => s.purpose === 'types'));
   const link = (s) => `${isMail(s) ? '#/email/analises' : '#/analises'}/${s.id}`;
 
   paint(
@@ -37,11 +39,12 @@ export async function render(root, { ctx }) {
     html`<div class="page-head">
         <div>
           <h1>Painel</h1>
-          <div class="sub">Procure os termos das listas de referência em arquivos e caixas de e-mail e veja quem interagiu com cada item encontrado.</div>
+          <div class="sub">Procure os termos das listas de referência em arquivos e caixas de e-mail (ou arquivos por tipo, como vídeos e músicas) e veja quem interagiu com cada item encontrado.</div>
         </div>
         <div class="actions">
           <a class="btn primary" href="#/analises/nova">${icon('play')} Analisar arquivos</a>
           <a class="btn primary" href="#/email/analises/nova">${icon('play')} Analisar e-mails</a>
+          <a class="btn" href="#/analises/nova?busca=tipos">${icon('search')} Buscar por tipo de arquivo</a>
         </div>
       </div>
 
@@ -78,8 +81,8 @@ export async function render(root, { ctx }) {
               </li>
               <li>
                 <b>Rode a análise</b>
-                <p class="muted small">O relatório mostra o que foi encontrado, onde e quem interagiu: o último usuário de cada arquivo ou o remetente e a caixa de cada mensagem.</p>
-                <a href="#/analises/nova">Analisar arquivos</a> · <a href="#/email/analises/nova">Analisar e-mails</a>
+                <p class="muted small">O relatório mostra o que foi encontrado, onde e quem interagiu: o último usuário de cada arquivo ou o remetente e a caixa de cada mensagem. Para liberar espaço, busque arquivos por tipo (vídeos, músicas, executáveis...), sem lista de referência.</p>
+                <a href="#/analises/nova">Analisar arquivos</a> · <a href="#/email/analises/nova">Analisar e-mails</a> · <a href="#/analises/nova?busca=tipos">Buscar por tipo de arquivo</a>
               </li>
             </ol>
           </section>`}
@@ -101,7 +104,7 @@ export async function render(root, { ctx }) {
                       <span class="nowrap"><b>${fmtServerDateTime(s.nextRunAt)}</b></span>
                       <a href="${editLink(s)}">${s.name}</a>
                       <span class="kind-badge">${s.kind === 'mail' ? 'E-mail' : 'Arquivos'}</span>
-                      ${isPolicy(s) ? html`<span class="chip">retenção</span>` : ''}
+                      ${isPolicy(s) ? html`<span class="chip">retenção</span>` : s.purpose === 'types' ? html`<span class="chip">busca por tipo</span>` : ''}
                       ${s.action === 'delete' ? html`<span class="chip danger">${isPolicy(s) ? `exclui ${s.kind === 'mail' ? 'as expiradas' : 'os expirados'}` : 'exclusão automática'}</span>` : ''}
                     </li>`,
                   )}
@@ -126,11 +129,11 @@ export async function render(root, { ctx }) {
                   ${scans.slice(0, 8).map(
                     (s) => html`<tr>
                       <td><a href="${link(s)}">${s.name}</a></td>
-                      <td><span class="kind-badge">${isMail(s) ? 'E-mail' : 'Arquivos'}</span>${s.retention ? html` <span class="chip">retenção</span>` : ''}</td>
+                      <td><span class="kind-badge">${isMail(s) ? 'E-mail' : 'Arquivos'}</span>${s.retention ? html` <span class="chip">retenção</span>` : s.fileTypes ? html` <span class="chip">busca por tipo</span>` : ''}</td>
                       <td>${statusBadge(s.status)}</td>
                       <td class="nowrap">${fmtDateTime(s.startedAt || s.createdAt)}</td>
                       <td class="num">${fmtNum(isMail(s) ? s.stats?.messagesSeen : s.stats?.filesSeen)}</td>
-                      <td class="num">${fmtNum(isMail(s) ? s.stats?.messagesMatched : s.stats?.filesMatched)}${s.retention ? html`<div class="muted small">expirad${isMail(s) ? 'as' : 'os'}</div>` : ''}</td>
+                      <td class="num">${fmtNum(isMail(s) ? s.stats?.messagesMatched : s.stats?.filesMatched)}${s.retention ? html`<div class="muted small">expirad${isMail(s) ? 'as' : 'os'}</div>` : s.fileTypes ? html`<div class="muted small">encontrados</div>` : ''}</td>
                     </tr>`,
                   )}
                 </tbody>

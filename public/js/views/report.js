@@ -1,5 +1,6 @@
 // Relatório de uma análise (de arquivos ou de e-mail): progresso, indicadores, gráficos, filtros,
-// resultados e exportações. O que muda entre os dois tipos fica nos perfis FILES e MAIL.
+// resultados, exclusão (item a item ou em lote) e exportações. O que muda entre os tipos fica nos
+// perfis FILES e MAIL (e nos das políticas de retenção e das buscas por tipo de arquivo).
 import { get, post } from '../api.js';
 import {
   html,
@@ -7,6 +8,7 @@ import {
   icon,
   toast,
   confirmDialog,
+  openDialog,
   fmtNum,
   fmtCompact,
   fmtDateTime,
@@ -22,6 +24,7 @@ import {
 } from '../ui.js';
 import { replaceQuery, setActiveNav } from '../nav.js';
 import { FILE_CRITERIA, MAIL_CRITERIA, describeRetention, ageText, deletionModeText, deletionsText } from '../retention.js';
+import { categoryLabel, describeFileTypes } from '../file-types.js';
 
 const CONTENT_STATUS = {
   ok: 'Analisado',
@@ -604,6 +607,42 @@ const groupTable = (head, noun) => ({
   tableRow: (r) => html`<tr><td>${r.label}</td><td class="num">${fmtNum(r.raw.count)}</td><td class="num">${fmtBytes(r.raw.bytes)}</td></tr>`,
 });
 
+/** Dados do arquivo no detalhe dos relatórios sem termos (retenção e busca por tipo). */
+function fileFacts(r) {
+  const c = r.cloud;
+  const link = c && /^https:\/\//i.test(c.webUrl || '') ? c.webUrl : null;
+  return html`<dl class="kv">
+    ${c
+      ? html`<dt>${CLOUD_KIND[c.kind]}</dt><dd>${c.accountName && c.accountName !== c.account ? html`${c.accountName} <span class="muted small">${c.account}</span>` : c.account} › ${c.library}</dd>`
+      : ''}
+    <dt>${c ? 'Endereço' : 'Caminho'}</dt>
+    <dd><span class="mono">${r.path}</span> <button type="button" class="btn small" data-action="copy" data-copy="${c?.webUrl || r.path}" data-copied="${c ? 'Endereço copiado.' : 'Caminho copiado.'}">${icon('copy')} Copiar</button></dd>
+    ${link ? html`<dt>Abrir</dt><dd><a href="${link}" target="_blank" rel="noopener noreferrer">Abrir no ${CLOUD_KIND[c.kind]}</a> <span class="muted small">(exige acesso ao arquivo)</span></dd>` : ''}
+    <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
+    <dt>Criado em</dt><dd>${fmtDateTime(r.created)}</dd>
+    <dt>Modificado em</dt><dd>${fmtDateTime(r.modified)}</dd>
+    ${c ? '' : html`<dt>Último acesso</dt><dd>${r.accessed ? fmtDateTime(r.accessed) : '—'}</dd>`}
+  </dl>`;
+}
+
+/** Quem interagiu com o arquivo (último usuário, auditoria, Microsoft 365 e proprietário). */
+function peopleFacts(r) {
+  const c = r.cloud;
+  const a = r.audit;
+  return html`<dl class="kv">
+    <dt>Último usuário</dt><dd><b>${r.lastUser || 'não identificado'}</b>${r.lastUserSource ? html`<br /><span class="muted small">fonte: ${SOURCE[r.lastUserSource]}</span>` : ''}</dd>
+    ${a ? html`<dt>Último acesso (auditoria)</dt><dd>${a.user} · ${a.action} · ${fmtDateTime(a.time)}</dd>` : ''}
+    ${a?.lastWrite ? html`<dt>Última alteração (auditoria)</dt><dd>${a.lastWrite.user} · ${a.lastWrite.action} · ${fmtDateTime(a.lastWrite.time)}</dd>` : ''}
+    ${c?.lastModifiedBy ? html`<dt>Alterado por último por</dt><dd>${personText(c.lastModifiedBy)} <span class="muted small">em ${fmtDateTime(r.modified)}</span></dd>` : ''}
+    ${c?.createdBy ? html`<dt>Criado por</dt><dd>${personText(c.createdBy)} <span class="muted small">em ${fmtDateTime(r.created)}</span></dd>` : ''}
+    ${c
+      ? c.kind === 'onedrive'
+        ? html`<dt>Dono do OneDrive</dt><dd>${r.owner || '—'}</dd>`
+        : ''
+      : html`<dt>Proprietário (NTFS)</dt><dd>${r.owner || html`<span class="muted">${r.ownerError ? `não obtido: ${r.ownerError}` : 'não verificado'}</span>`}</dd>`}
+  </dl>`;
+}
+
 const RETENTION_FILES = {
   ...FILES,
   nav: 'retencao',
@@ -695,24 +734,11 @@ const RETENTION_FILES = {
     <td class="num nowrap">${fmtBytes(r.size)}</td>`,
 
   detail: (r, ctx) => {
-    const c = r.cloud;
-    const link = c && /^https:\/\//i.test(c.webUrl || '') ? c.webUrl : null;
     const criterion = FILE_CRITERIA[r.retention?.criterion] || FILE_CRITERIA.used;
     return html`<div class="detail-grid two">
       <div>
         <h4>Arquivo</h4>
-        <dl class="kv">
-          ${c
-            ? html`<dt>${CLOUD_KIND[c.kind]}</dt><dd>${c.accountName && c.accountName !== c.account ? html`${c.accountName} <span class="muted small">${c.account}</span>` : c.account} › ${c.library}</dd>`
-            : ''}
-          <dt>${c ? 'Endereço' : 'Caminho'}</dt>
-          <dd><span class="mono">${r.path}</span> <button type="button" class="btn small" data-action="copy" data-copy="${c?.webUrl || r.path}" data-copied="${c ? 'Endereço copiado.' : 'Caminho copiado.'}">${icon('copy')} Copiar</button></dd>
-          ${link ? html`<dt>Abrir</dt><dd><a href="${link}" target="_blank" rel="noopener noreferrer">Abrir no ${CLOUD_KIND[c.kind]}</a> <span class="muted small">(exige acesso ao arquivo)</span></dd>` : ''}
-          <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
-          <dt>Criado em</dt><dd>${fmtDateTime(r.created)}</dd>
-          <dt>Modificado em</dt><dd>${fmtDateTime(r.modified)}</dd>
-          ${c ? '' : html`<dt>Último acesso</dt><dd>${r.accessed ? fmtDateTime(r.accessed) : '—'}</dd>`}
-        </dl>
+        ${fileFacts(r)}
         ${deletionBlock(r, 'arquivo', ctx)}
       </div>
       <div>
@@ -723,16 +749,7 @@ const RETENTION_FILES = {
           <dt>Idade</dt><dd>${ageText(r.retention?.ageDays)} <span class="muted small">(${plural(r.retention?.ageDays || 0, 'dia', 'dias')} no dia da análise)</span></dd>
         </dl>
         <h4 class="spaced">Quem interagiu com o arquivo</h4>
-        <dl class="kv">
-          <dt>Último usuário</dt><dd><b>${r.lastUser || 'não identificado'}</b>${r.lastUserSource ? html`<br /><span class="muted small">fonte: ${SOURCE[r.lastUserSource]}</span>` : ''}</dd>
-          ${c?.lastModifiedBy ? html`<dt>Alterado por último por</dt><dd>${personText(c.lastModifiedBy)} <span class="muted small">em ${fmtDateTime(r.modified)}</span></dd>` : ''}
-          ${c?.createdBy ? html`<dt>Criado por</dt><dd>${personText(c.createdBy)} <span class="muted small">em ${fmtDateTime(r.created)}</span></dd>` : ''}
-          ${c
-            ? c.kind === 'onedrive'
-              ? html`<dt>Dono do OneDrive</dt><dd>${r.owner || '—'}</dd>`
-              : ''
-            : html`<dt>Proprietário (NTFS)</dt><dd>${r.owner || html`<span class="muted">${r.ownerError ? `não obtido: ${r.ownerError}` : 'não verificado'}</span>`}</dd>`}
-        </dl>
+        ${peopleFacts(r)}
       </div>
     </div>`;
   },
@@ -741,6 +758,153 @@ const RETENTION_FILES = {
     filtered: 'Nenhum arquivo corresponde aos filtros.',
     running: 'Nenhum arquivo expirado encontrado até agora.',
     none: 'Nenhum arquivo expirado: todos os arquivos verificados estão dentro do prazo da política.',
+  },
+};
+
+// ---------------------------------------------------------------------------------------------
+// Buscas por tipo de arquivo: os arquivos das categorias e extensões escolhidas (sem termos)
+
+const FOUND_BY = { extension: 'Extensão', content: 'Tipo real (conteúdo)' };
+
+const TYPES_FILES = {
+  ...FILES,
+  types: true,
+  filterKeys: ['q', 'type', 'found', 'user', 'repository', 'extension', 'deletion', 'sort', 'page'],
+  criteria: ['q', 'type', 'found', 'user', 'repository', 'extension', 'deletion'],
+  descSorts: new Set(['modified', 'size']),
+  defaultSort: 'size',
+  resultsTitle: 'Arquivos encontrados',
+  views: { types: 'chart', extensions: 'chart', users: 'chart', repositories: 'chart' },
+  columns: 6,
+
+  subtitle: (scan) => `${(scan.summary?.repositories || []).map((r) => r.name).join(', ')} · ${describeFileTypes(scan.fileTypes)}`,
+
+  filterFields: (filters, scan) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Caminho ou usuário" /></label>
+    <label class="field"><span>Tipo</span><select name="type"><option value="">Todos</option></select></label>
+    ${scan.fileTypes?.checkContent
+      ? html`<label class="field"><span>Encontrado por</span>
+          <select name="found">
+            <option value="">Extensão ou conteúdo</option>
+            ${Object.entries(FOUND_BY).map(([value, label]) => option(value, label, filters.found))}
+          </select>
+        </label>`
+      : ''}
+    <label class="field"><span>Último usuário</span><select name="user"><option value="">Todos</option></select></label>
+    <label class="field"><span>Repositório</span><select name="repository"><option value="">Todos</option></select></label>
+    <label class="field"><span>Extensão</span><select name="extension"><option value="">Todas</option></select></label>
+    ${deletionFilter(filters, 'o')}
+    ${sortField(filters, [
+      ['size', 'Maiores arquivos'],
+      ['path', 'Caminho'],
+      ['modified', 'Modificados recentemente'],
+      ['lastUser', 'Último usuário'],
+    ])}`,
+
+  fillOptions: (form, options, filters, fill, scan) => {
+    const o = options || { users: [], extensions: [] };
+    const t = scan.fileTypes || {};
+    fill(form.elements.type, [...(t.categories || []), ...(t.extensions?.length ? ['custom'] : [])], filters.type, categoryLabel);
+    fill(form.elements.user, o.users, filters.user);
+    fill(form.elements.extension, o.extensions, filters.extension);
+    const repos = new Map((scan.summary?.repositories || []).map((r) => [r.id, r.name]));
+    fill(form.elements.repository, [...repos.keys()], filters.repository, (v) => repos.get(v) || v);
+  },
+
+  progress: (st) => html`<span><b>${fmtNum(st.filesSeen)}</b> arquivos verificados</span>
+    <span><b>${fmtNum(st.directories)}</b> pastas</span>
+    ${st.libraries ? html`<span><b>${fmtNum(st.libraries)}</b> bibliotecas (OneDrive/SharePoint)</span>` : ''}
+    <span><b>${fmtNum(st.filesMatched)}</b> encontrados (${fmtBytes(st.bytesFound)})</span>
+    <span><b>${fmtNum(st.errors)}</b> erros</span>
+    <span>repositório <b>${Math.min((st.repositoriesDone || 0) + 1, st.repositoriesTotal || 1)}</b> de <b>${st.repositoriesTotal || 1}</b></span>`,
+
+  tiles: (st, scan) => {
+    const pct = st.filesSeen ? Math.round((st.filesMatched / st.filesSeen) * 1000) / 10 : 0;
+    const extra = [st.filesSkippedByDate ? `${fmtNum(st.filesSkippedByDate)} fora do período` : '', st.filesSkippedBySize ? `${fmtNum(st.filesSkippedBySize)} abaixo do tamanho mínimo` : ''].filter(Boolean);
+    return html`<div class="tile"><div class="label">Arquivos verificados</div><div class="value">${fmtCompact(st.filesSeen)}</div><div class="detail">em ${plural(st.directories || 0, 'pasta', 'pastas')}${st.libraries ? ` · ${plural(st.libraries, 'biblioteca', 'bibliotecas')}` : ''}${st.accountsSkipped ? ` · ${plural(st.accountsSkipped, 'conta sem OneDrive', 'contas sem OneDrive')}` : ''}</div></div>
+      <div class="tile"><div class="label">Arquivos encontrados</div><div class="value">${fmtCompact(st.filesMatched)}</div><div class="detail">${pct.toLocaleString('pt-BR')}% dos verificados${extra.length ? ` · ${extra.join(' · ')}` : ''}</div></div>
+      <div class="tile"><div class="label">Espaço dos encontrados</div><div class="value">${fmtBytes(st.bytesFound || 0)}</div><div class="detail">somando os arquivos encontrados</div></div>
+      ${scan.fileTypes?.checkContent
+        ? html`<div class="tile"><div class="label">Pelo tipo real</div><div class="value">${fmtCompact(st.typesByContent)}</div><div class="detail">com uma extensão de outro tipo (renomeados)</div></div>`
+        : ''}
+      <div class="tile"><div class="label">Erros de acesso ou leitura</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`;
+  },
+
+  charts: (summary, barChart) => {
+    const t = summary.types || { byType: [], byExtension: [], byUser: [], byRepository: [] };
+    const noun = ['arquivo', 'arquivos'];
+    return html`${barChart({
+      key: 'types',
+      title: 'Tipos encontrados',
+      subtitle: 'Arquivos de cada tipo procurado. Clique para filtrar.',
+      rows: groupRows(t.byType, { label: (g) => g.label || categoryLabel(g.key), noun }),
+      filterKey: 'type',
+      emptyText: 'Nenhum arquivo encontrado.',
+      ...groupTable('Tipo', 'Arquivos'),
+    })}
+    ${barChart({
+      key: 'extensions',
+      title: 'Espaço por extensão',
+      subtitle: 'Tamanho dos arquivos encontrados de cada extensão. Clique para filtrar.',
+      rows: groupRows(t.byExtension, { label: (g) => g.key || '(sem extensão)', bySize: true, noun }),
+      filterKey: 'extension',
+      emptyText: 'Nenhum arquivo encontrado.',
+      ...groupTable('Extensão', 'Arquivos'),
+    })}
+    ${barChart({
+      key: 'users',
+      title: 'Últimos usuários',
+      subtitle: 'Quem interagiu por último com os arquivos encontrados. Clique para filtrar.',
+      rows: groupRows(t.byUser, { label: (g) => g.key || '(não identificado)', filter: (g) => (g.identified ? g.key : ''), noun }),
+      filterKey: 'user',
+      emptyText: 'Nenhum arquivo encontrado.',
+      ...groupTable('Usuário', 'Arquivos'),
+    })}
+    ${barChart({
+      key: 'repositories',
+      title: 'Espaço por repositório',
+      subtitle: 'Tamanho dos arquivos encontrados em cada repositório. Clique para filtrar.',
+      rows: groupRows(t.byRepository, { label: (g) => g.name, bySize: true, noun }),
+      filterKey: 'repository',
+      emptyText: 'Nenhum arquivo encontrado.',
+      ...groupTable('Repositório', 'Arquivos'),
+    })}`;
+  },
+
+  tableHead: html`<tr><th><span class="sr-only">Seleção e detalhes</span></th><th>Arquivo</th><th>Tipo</th><th>Último usuário</th><th>Modificado em</th><th class="num">Tamanho</th></tr>`,
+
+  row: (r) => html`<td><div class="name">${r.name}</div>${deletionChip(r, 'o')}<div class="path">${folderOf(r)}</div></td>
+    <td>${categoryLabel(r.typeMatch?.category)}${r.typeMatch?.by === 'content' ? html`<div><span class="chip" title="Encontrado pelo conteúdo: a extensão é de outro tipo">tipo real: ${r.typeMatch.format}</span></div>` : ''}</td>
+    <td>${r.lastUser ? html`${r.lastUser}<div><span class="chip source">${SOURCE_SHORT[r.lastUserSource]}</span></div>` : html`<span class="muted">não identificado</span>`}</td>
+    <td class="nowrap">${fmtDateTime(r.modified)}</td>
+    <td class="num nowrap">${fmtBytes(r.size)}</td>`,
+
+  detail: (r, ctx) => {
+    const m = r.typeMatch || {};
+    return html`<div class="detail-grid two">
+      <div>
+        <h4>Arquivo</h4>
+        ${fileFacts(r)}
+        ${deletionBlock(r, 'arquivo', ctx)}
+      </div>
+      <div>
+        <h4>Tipo</h4>
+        <dl class="kv">
+          <dt>Tipo</dt><dd><b>${categoryLabel(m.category)}</b></dd>
+          <dt>Encontrado por</dt>
+          <dd>${m.by === 'content'
+            ? html`tipo real no conteúdo: <b>${m.format}</b><br /><span class="muted small">A extensão ${r.extension || '(nenhuma)'} é de outro tipo: o arquivo pode ter sido renomeado.</span>`
+            : html`extensão <b>${m.extension || r.extension}</b>`}</dd>
+        </dl>
+        <h4 class="spaced">Quem interagiu com o arquivo</h4>
+        ${peopleFacts(r)}
+      </div>
+    </div>`;
+  },
+
+  empty: {
+    filtered: 'Nenhum arquivo corresponde aos filtros.',
+    running: 'Nenhum arquivo dos tipos procurados encontrado até agora.',
+    none: 'Nenhum arquivo dos tipos procurados foi encontrado nos repositórios.',
   },
 };
 
@@ -873,7 +1037,59 @@ const RETENTION_MAIL = {
 
 function profileOf(scan) {
   if (scan.retention) return scan.kind === 'mail' ? RETENTION_MAIL : RETENTION_FILES;
+  if (scan.fileTypes) return TYPES_FILES;
   return scan.kind === 'mail' ? MAIL : FILES;
+}
+
+// ---------- Exclusão em lote (relatórios de arquivos) ----------
+
+/** Forma de exclusão de cada repositório, na confirmação da exclusão em lote. */
+const BULK_METHOD = {
+  file: 'exclusão definitiva: arquivos excluídos pela rede não vão para a Lixeira',
+  trash: 'para a lixeira do OneDrive ou do site (pode ser restaurado)',
+  permanent: 'exclusão definitiva: o arquivo não fica na lixeira',
+};
+/** Por que parte dos arquivos escolhidos não pode ser excluída. */
+const BULK_BLOCKED = {
+  'not-allowed': (n) => `${plural(n, 'arquivo', 'arquivos')} em repositórios sem "Permitir exclusão"`,
+  protected: (n) => `${plural(n, 'arquivo', 'arquivos')} em locais protegidos (repositório sem "Permitir exclusão" dentro do analisado ou pastas do CLEAN)`,
+  removed: (n) => `${plural(n, 'arquivo', 'arquivos')} de repositórios removidos do cadastro`,
+  changed: (n) => `${plural(n, 'arquivo', 'arquivos')} de repositórios com o cadastro alterado depois da análise`,
+  excluded: (n) => `${plural(n, 'arquivo', 'arquivos')} em pastas (ou com nomes) que o repositório passou a ignorar`,
+};
+
+/** Resultado de uma exclusão em lote, em uma linha. */
+function bulkOutcome(job, retention) {
+  const s = (n) => (n > 1 ? 's' : '');
+  return [
+    `${fmtNum(job.deleted)} excluído${job.deleted === 1 ? '' : 's'}`,
+    job.missing ? `${fmtNum(job.missing)} já não existia${job.missing > 1 ? 'm' : ''}` : '',
+    job.changed ? `${fmtNum(job.changed)} mantido${s(job.changed)} (alterado${s(job.changed)}${retention ? ` ou não mais expirado${s(job.changed)}` : ''} depois da análise)` : '',
+    job.failed ? plural(job.failed, 'falha', 'falhas') : '',
+    job.skipped ? `${fmtNum(job.skipped)} em exclusão item a item` : '',
+  ]
+    .filter(Boolean)
+    .join(', ');
+}
+
+/** Corpo do diálogo de confirmação da exclusão em lote (a partir da prévia do servidor). */
+function bulkPreviewBody(preview, outside, retention) {
+  const blocked = Object.entries(preview.blocked || {}).filter(([, n]) => n > 0);
+  const tooMany = preview.ready > preview.max;
+  const windows = preview.repositories.some((g) => g.method === 'file');
+  return html`${preview.ready
+      ? html`<p>Serão excluídos <b>${plural(preview.ready, 'arquivo', 'arquivos')}</b>, um de cada vez, em segundo plano:</p>
+          <ul class="bulk-repos">${preview.repositories.map((g) => html`<li><b>${g.name}</b>: ${plural(g.count, 'arquivo', 'arquivos')} — ${BULK_METHOD[g.method] || g.method}</li>`)}</ul>`
+      : html`<p><b>Nenhum dos arquivos escolhidos pode ser excluído.</b></p>`}
+    ${blocked.length ? html`<p class="small">Ficam de fora: ${blocked.map(([key, n]) => (BULK_BLOCKED[key] ? BULK_BLOCKED[key](n) : `${fmtNum(n)} (${key})`)).join('; ')}.</p>` : ''}
+    ${outside > 0 ? html`<p class="small muted">${outside === 1 ? '1 arquivo já excluído (ou não encontrado) fica de fora.' : `${fmtNum(outside)} arquivos já excluídos (ou não encontrados) ficam de fora.`}</p>` : ''}
+    ${tooMany ? html`<div class="alert error">${icon('alert')}<div>Exclua no máximo ${fmtNum(preview.max)} arquivos por vez: filtre o relatório.</div></div>` : ''}
+    ${preview.ready && !tooMany
+      ? html`<div class="alert error">${icon('alert')}<div>
+          ${windows ? html`<b>Exclusão sem volta nas pastas do Windows.</b> ` : ''}Antes de excluir, cada arquivo é conferido: os alterados depois da análise${retention ? ' (ou que deixaram de estar expirados)' : ''} são mantidos. A exclusão fica registrada com o seu nome; acompanhe o andamento no relatório (dá para cancelar).
+          <label class="field"><span>Digite EXCLUIR para confirmar</span><input type="text" name="confirmDelete" autocomplete="off" spellcheck="false" /></label>
+        </div></div>`
+      : ''}`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -894,6 +1110,12 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   let errors = null;
   const expanded = new Set();
   const deletingNow = new Set(); // itens com exclusão manual em andamento nesta tela
+  // Exclusão em lote (relatórios de arquivos): os itens marcados (mantidos entre as páginas, até os
+  // filtros mudarem) e o andamento da exclusão no servidor.
+  const canBulk = scan.kind !== 'mail';
+  const selection = new Set();
+  let bulk = null;
+  let bulkTimer = null;
   const chartView = { ...P.views };
   let stopped = false;
   let timer = null;
@@ -923,10 +1145,11 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       </div>
       <div data-panel="arquivos">
         <form class="filters" data-filters role="search">
-          ${P.filterFields(filters)}
+          ${P.filterFields(filters, scan)}
           <button type="button" class="btn" data-action="clear-filters">Limpar filtros</button>
         </form>
         <div class="grid-2" data-charts></div>
+        <div data-bulk></div>
         <section class="card" data-results></section>
       </div>
       <p class="sr-only" aria-live="polite" data-live></p>
@@ -964,6 +1187,14 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           ? ` · ${mode}${limit}${scan.deletionRevoked ? ` · exclusão interrompida: ${scan.deletionRevoked}` : ''}`
           : blocked || ' · simulação: nada é excluído'}</div>`
       : '';
+    // Busca por tipo: exclusão automática (com o limite) ou só a busca, com a revisão pelo relatório.
+    const typesLine = P.types
+      ? html`<div class="sub">${scan.options?.deleteMatches
+          ? `Exclusão automática dos arquivos encontrados${scan.fileTypes?.maxDeletions ? `, até ${deletionsText(scan.fileTypes.maxDeletions)} por execução` : ', sem limite por execução'}${scan.deletionRevoked ? ` · exclusão interrompida: ${scan.deletionRevoked}` : ''}`
+          : scan.deletionBlocked
+            ? `Exclusão automática desativada nesta execução: ${scan.deletionBlocked}`
+            : 'Somente procurar: revise e exclua pelo relatório (item a item, os selecionados ou todos os filtrados).'}</div>`
+      : '';
     const badge = scan.options?.deleteMatches
       ? html`<span class="badge deleting">${P.retention ? `exclui ${P.o === 'a' ? 'as expiradas' : 'os expirados'}` : 'com exclusão automática'}</span>`
       : P.retention
@@ -978,7 +1209,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           ${scan.scheduleId || period
             ? html`<div class="sub">${scan.scheduleId ? schedule : ''}${scan.scheduleId && period ? ' · ' : ''}${period}</div>`
             : ''}
-          ${cutoff}
+          ${cutoff}${typesLine}
         </div>
         <div class="actions">
           ${isActive(scan) ? html`<button type="button" class="btn danger" data-action="cancel">${icon('stop')} Cancelar análise</button>` : ''}
@@ -1035,6 +1266,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const o = P.o;
     const detail =
       [
+        summary?.deletedBytes ? `${fmtBytes(summary.deletedBytes)} excluíd${o}s` : '',
         t.missing ? `${fmtNum(t.missing)} já não existia${t.missing > 1 ? 'm' : ''}` : '',
         t.changed
           ? `${fmtNum(t.changed)} mantid${o}${t.changed > 1 ? 's' : ''} (alterad${o}${t.changed > 1 ? 's' : ''}${P.retention && scan.kind !== 'mail' ? ' ou não mais expirad' + o + (t.changed > 1 ? 's' : '') : ''} depois da ${P.retention ? 'listagem' : 'análise'})`
@@ -1056,7 +1288,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       const why = scan.deletionBlocked ? `exclusão desativada nesta execução: ${scan.deletionBlocked}` : 'simulação: nada foi excluído';
       tile = html`<div class="tile"><div class="label">Excluíd${o}s</div><div class="value">0</div><div class="detail">${why}</div></div>`;
     }
-    paint($('[data-tiles]'), html`${P.tiles(st)}${tile}`);
+    paint($('[data-tiles]'), html`${P.tiles(st, scan)}${tile}`);
     $('[data-error-count]').textContent = st.errors ? `(${fmtNum(st.errors)})` : '';
   };
 
@@ -1123,6 +1355,132 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     paint($('[data-charts]'), P.charts(summary, barChart));
   };
 
+  // ---------- Exclusão em lote (relatórios de arquivos) ----------
+
+  /** O item pode ser selecionado para a exclusão em lote? */
+  const selectable = (r) => canBulk && !isActive(scan) && !bulk?.running && Boolean(r.canDelete);
+  const criteriaOnly = () => Object.fromEntries(P.criteria.filter((k) => filters[k]).map((k) => [k, filters[k]]));
+
+  const drawBulk = () => {
+    const box = $('[data-bulk]');
+    if (bulk?.running) {
+      const pct = bulk.total ? Math.round((bulk.done / bulk.total) * 100) : 0;
+      paint(
+        box,
+        html`<section class="card bulk-bar running" aria-label="Exclusão em lote">
+          <div class="bulk-status">
+            <b>${bulk.cancelled ? 'Parando a exclusão em lote…' : 'Exclusão em lote em andamento'}</b>
+            <span class="muted small">${fmtNum(bulk.done)} de ${fmtNum(bulk.total)} · ${bulkOutcome(bulk, P.retention)}</span>
+          </div>
+          <div class="bulk-progress" role="progressbar" aria-label="Exclusão em lote" aria-valuemin="0" aria-valuemax="${bulk.total}" aria-valuenow="${bulk.done}"><span data-w="${pct}"></span></div>
+          <button type="button" class="btn small" data-action="bulk-cancel" ${bulk.cancelled ? 'disabled' : ''}>${icon('stop')} Parar a exclusão</button>
+        </section>`,
+      );
+      return;
+    }
+    const onPage = results ? results.items.filter(selectable) : [];
+    // Sem itens que possam ser excluídos nesta página (e sem seleção), a barra não aparece.
+    if (!onPage.length && !selection.size) {
+      paint(box, '');
+      return;
+    }
+    const marked = onPage.filter((r) => selection.has(r.id)).length;
+    const filtered = P.criteria.some((k) => filters[k]);
+    paint(
+      box,
+      html`<section class="card bulk-bar" aria-label="Exclusão em lote">
+        <label class="check"><input type="checkbox" data-action="select-page" ${onPage.length ? '' : 'disabled'} ${onPage.length && marked === onPage.length ? 'checked' : ''} /><span>${results.pages > 1 ? 'Selecionar os desta página' : 'Selecionar todos'}</span></label>
+        <span class="muted small">${selection.size ? plural(selection.size, 'arquivo selecionado', 'arquivos selecionados') : `Selecione os arquivos a excluir ou exclua todos os ${filtered ? 'filtrados' : 'do relatório'} de uma vez.`}</span>
+        <div class="inline">
+          <button type="button" class="btn small danger" data-action="bulk-selected" ${selection.size ? '' : 'disabled'}>${icon('trash')} Excluir selecionados${selection.size ? ` (${fmtNum(selection.size)})` : ''}</button>
+          <button type="button" class="btn small" data-action="bulk-all">${icon('trash')} ${filtered ? 'Excluir todos os filtrados' : 'Excluir todos os arquivos'}</button>
+          ${selection.size ? html`<button type="button" class="btn small" data-action="bulk-clear">Limpar seleção</button>` : ''}
+        </div>
+      </section>`,
+    );
+    const page = box.querySelector('[data-action="select-page"]');
+    if (page) page.indeterminate = marked > 0 && marked < onPage.length;
+  };
+
+  /** Acompanha a exclusão em lote no servidor; ao terminar, atualiza o relatório. */
+  const pollBulk = async () => {
+    clearTimeout(bulkTimer);
+    if (stopped || !canBulk) return;
+    let latest;
+    try {
+      latest = await get(`/api/scans/${id}/bulk-delete`);
+    } catch {
+      if (!stopped && bulk?.running) bulkTimer = setTimeout(pollBulk, 3000);
+      return;
+    }
+    if (stopped) return;
+    const wasRunning = Boolean(bulk?.running);
+    bulk = latest;
+    if (bulk?.running) {
+      redraw(root, () => {
+        drawBulk();
+        if (!wasRunning) drawResults(); // as caixas de seleção somem durante a exclusão
+      });
+      bulkTimer = setTimeout(pollBulk, 1500);
+      return;
+    }
+    if (!wasRunning || !bulk) return;
+    announce(`Exclusão em lote ${bulk.cancelled ? 'interrompida' : 'concluída'}.`);
+    toast(
+      `Exclusão em lote ${bulk.cancelled ? `interrompida depois de ${fmtNum(bulk.done)} de ${fmtNum(bulk.total)}` : 'concluída'}: ${bulkOutcome(bulk, P.retention)}.`,
+      bulk.failed ? 'warn' : 'success',
+    );
+    try {
+      scan = await get(`/api/scans/${id}`);
+      if (!stopped) drawScan();
+    } catch {
+      // mantém a tela como está
+    }
+    if (!stopped) await loadResults();
+  };
+
+  /** Prévia, confirmação (EXCLUIR) e início da exclusão em lote. target: { ids } ou { all, filters }. */
+  const startBulk = async (target) => {
+    let preview;
+    try {
+      preview = await post(`/api/scans/${id}/bulk-delete/preview`, target);
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+    if (stopped) return;
+    const chosen = target.ids ? target.ids.length : results?.total || 0;
+    const ok = preview.ready > 0 && preview.ready <= preview.max;
+    const job = await openDialog({
+      title: target.ids ? 'Excluir os arquivos selecionados' : target.filters && Object.keys(target.filters).length ? 'Excluir os arquivos filtrados' : 'Excluir todos os arquivos',
+      body: bulkPreviewBody(preview, Math.max(0, chosen - preview.total), P.retention),
+      submitLabel: ok ? `Excluir ${plural(preview.ready, 'arquivo', 'arquivos')}` : 'Fechar',
+      cancelLabel: ok ? 'Cancelar' : '',
+      danger: ok,
+      onSubmit: async (form) => {
+        if (!ok) return true;
+        const confirmDelete = String(form.elements.confirmDelete?.value || '');
+        if (confirmDelete.trim().toUpperCase() !== 'EXCLUIR') throw new Error('Digite EXCLUIR para confirmar a exclusão.');
+        // A forma de exclusão mostrada vai junto: se o cadastro mudou, o servidor recusa (409).
+        const methods = Object.fromEntries(preview.repositories.map((g) => [g.id, g.method]));
+        try {
+          return await post(`/api/scans/${id}/bulk-delete`, { ...target, confirmDelete, methods });
+        } catch (err) {
+          throw new Error(err.code === 'method-changed' ? `${err.message} Feche e comece de novo para ver a forma atual.` : err.message);
+        }
+      },
+    });
+    if (!job || job === true || stopped) return;
+    bulk = job;
+    selection.clear();
+    toast(`Exclusão em lote iniciada: ${plural(job.total, 'arquivo', 'arquivos')}.`, 'success');
+    redraw(root, () => {
+      drawBulk();
+      drawResults();
+    });
+    bulkTimer = setTimeout(pollBulk, 1000);
+  };
+
   // ---------- Tabela de resultados ----------
 
   const drawResults = () => {
@@ -1141,6 +1499,15 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       paint(box, html`${heading}<div class="empty">${filtered ? P.empty.filtered : isActive(scan) ? P.empty.running : P.empty.none}</div>`);
       return;
     }
+    // Caixa de seleção (exclusão em lote) nos itens que podem ser excluídos; um espaço vazio nos
+    // demais, para os botões de detalhes ficarem alinhados.
+    const anySelectable = results.items.some(selectable);
+    const selectBox = (r) =>
+      selectable(r)
+        ? html`<input type="checkbox" class="row-select" data-action="select" data-rid="${r.id}" aria-label="Selecionar ${P.rowLabel(r)}" ${selection.has(r.id) ? 'checked' : ''} />`
+        : anySelectable
+          ? html`<span class="row-select" aria-hidden="true"></span>`
+          : '';
     paint(
       box,
       html`${heading}
@@ -1152,10 +1519,10 @@ export async function render(root, { params, query, isCurrent = () => true }) {
                 const open = expanded.has(r.id);
                 const expandedText = open ? 'true' : 'false';
                 return html`<tr data-id="${r.id}" aria-expanded="${expandedText}" class="${isGone(r.deletion) ? 'is-deleted' : ''}">
-                    <td><button type="button" class="icon-btn" data-action="toggle" aria-label="${open ? 'Ocultar' : 'Mostrar'} detalhes de ${P.rowLabel(r)}" aria-expanded="${expandedText}"><span class="row-toggle">${icon('chevron')}</span></button></td>
+                    <td class="row-controls">${selectBox(r)}<button type="button" class="icon-btn" data-action="toggle" aria-label="${open ? 'Ocultar' : 'Mostrar'} detalhes de ${P.rowLabel(r)}" aria-expanded="${expandedText}"><span class="row-toggle">${icon('chevron')}</span></button></td>
                     ${P.row(r)}
                   </tr>
-                  ${open ? html`<tr class="detail"><td colspan="5">${P.detail(r, { active: isActive(scan), deleting: deletingNow })}</td></tr>` : ''}`;
+                  ${open ? html`<tr class="detail"><td colspan="${P.columns || 5}">${P.detail(r, { active: isActive(scan), deleting: deletingNow })}</td></tr>` : ''}`;
               })}
             </tbody>
           </table>
@@ -1240,10 +1607,12 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       drawTiles();
       if (results.page !== Number(filters.page || 1)) filters.page = results.page > 1 ? String(results.page) : '';
       stale.results = false;
+      for (const r of results.items) if (selection.has(r.id) && !selectable(r)) selection.delete(r.id);
       drawFilterOptions();
       redraw(root, () => {
         drawCharts();
         drawResults();
+        drawBulk();
       });
       const [one, many] = P.noun;
       announce(`${plural(results.total, `${one} encontrad${one === 'mensagem' ? 'a' : 'o'}`, `${many} encontrad${one === 'mensagem' ? 'as' : 'os'}`)}.`);
@@ -1305,6 +1674,11 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     if (stopped) return;
     Object.assign(filters, changes);
     if (!('page' in changes)) filters.page = '';
+    // Outro recorte dos resultados: a seleção da exclusão em lote recomeça.
+    if (Object.keys(changes).some((k) => P.criteria.includes(k)) && selection.size) {
+      selection.clear();
+      announce('Seleção limpa: os filtros mudaram.');
+    }
     syncUrl();
     drawHead();
     loadResults();
@@ -1343,6 +1717,61 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const el = event.target.closest('[data-action]');
     if (!el) return;
     const action = el.dataset.action;
+    if (action === 'select' || action === 'select-page') {
+      if (!results) return;
+      if (action === 'select') {
+        const rid = Number(el.dataset.rid);
+        if (el.checked) selection.add(rid);
+        else selection.delete(rid);
+      } else {
+        const onPage = results.items.filter(selectable);
+        const all = onPage.every((r) => selection.has(r.id));
+        for (const r of onPage) {
+          if (all) selection.delete(r.id);
+          else selection.add(r.id);
+        }
+        root.querySelectorAll('[data-results] input[data-action="select"]').forEach((box) => {
+          box.checked = selection.has(Number(box.dataset.rid));
+        });
+      }
+      redraw(root, drawBulk);
+      announce(selection.size ? `${plural(selection.size, 'arquivo selecionado', 'arquivos selecionados')}.` : 'Nenhum arquivo selecionado.');
+      return;
+    }
+    if (action === 'bulk-clear') {
+      selection.clear();
+      root.querySelectorAll('[data-results] input[data-action="select"]').forEach((box) => {
+        box.checked = false;
+      });
+      redraw(root, drawBulk);
+      announce('Nenhum arquivo selecionado.');
+      return;
+    }
+    if (action === 'bulk-selected') {
+      if (selection.size) await startBulk({ ids: [...selection] });
+      return;
+    }
+    if (action === 'bulk-all') {
+      await startBulk({ all: true, filters: criteriaOnly() });
+      return;
+    }
+    if (action === 'bulk-cancel') {
+      const stop = await openDialog({
+        title: 'Parar a exclusão em lote',
+        body: html`<p>Parar a exclusão em lote? O arquivo que está sendo excluído agora termina; os demais ficam como estão.</p>`,
+        submitLabel: 'Parar a exclusão',
+        cancelLabel: 'Continuar excluindo',
+      });
+      if (!stop || stopped) return;
+      try {
+        bulk = await post(`/api/scans/${id}/bulk-delete/cancel`);
+        redraw(root, drawBulk);
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+      pollBulk();
+      return;
+    }
     if (action === 'toggle') {
       const rid = Number(el.closest('tr').dataset.id);
       if (expanded.has(rid)) expanded.delete(rid);
@@ -1464,11 +1893,14 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   if (tab === 'arquivos') await loadResults();
   if (tab === 'erros') await loadErrors();
   if (isActive(scan)) timer = setTimeout(poll, 2000);
+  // Exclusão em lote iniciada antes (nesta ou em outra tela): mostra o andamento.
+  if (canBulk) pollBulk();
 
   return () => {
     stopped = true;
     onSearch.cancel();
     clearTimeout(timer);
+    clearTimeout(bulkTimer);
     root.removeEventListener('click', onClick);
   };
 }

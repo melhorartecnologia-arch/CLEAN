@@ -12,58 +12,77 @@ const startsWith = (buf, bytes, offset = 0) => buf.length >= offset + bytes.leng
 const FTYP_AUDIO = new Set(['M4A ', 'M4B ', 'M4P ', 'F4A ', 'F4B ']);
 const FTYP_IMAGE = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'mif1', 'msf1', 'avif', 'avis']);
 
-/** MP3 sem marca ID3: cabeçalho de quadro MPEG válido (sincronismo, versão, camada e taxas). */
+/**
+ * O início do arquivo parece texto (sem caracteres de controle além de tabulação, quebras de linha
+ * e ESC)? Nesse caso, só o PDF é reconhecido: assinaturas curtas em texto ("MZ", "ID3", "BZh"...)
+ * seriam coincidência.
+ */
+function looksLikeText(buf) {
+  for (const b of buf) if (b < 0x09 || (b > 0x0d && b < 0x20 && b !== 0x1b)) return false;
+  return true;
+}
+
+/**
+ * MP3 sem marca ID3: cabeçalho de quadro MPEG válido (sincronismo, versão, camada II ou III e
+ * taxas). A camada I fica de fora: "FF FE" é também o início de um texto em UTF-16.
+ */
 function mp3Frame(buf) {
   if (buf.length < 4 || buf[0] !== 0xff || (buf[1] & 0xe0) !== 0xe0) return false;
   const version = (buf[1] >> 3) & 0x03;
   const layer = (buf[1] >> 1) & 0x03;
   const bitrate = (buf[2] >> 4) & 0x0f;
   const rate = (buf[2] >> 2) & 0x03;
-  return version !== 1 && layer !== 0 && bitrate !== 0x0f && bitrate !== 0 && rate !== 3;
+  return version !== 1 && (layer === 1 || layer === 2) && bitrate !== 0x0f && bitrate !== 0 && rate !== 3;
 }
+
+/** Marca ID3 (MP3 e outros áudios): versão 2.2 a 2.4 e tamanho em bytes de 7 bits. */
+const id3 = (buf) => ascii(buf, 0, 3) === 'ID3' && buf.length >= 10 && [2, 3, 4].includes(buf[3]) && buf[4] !== 0xff && [6, 7, 8, 9].every((i) => buf[i] < 0x80);
 
 /** Arquivo ZIP: o primeiro item diz se é um documento do Office, um Java ou um Android. */
 function zipKind(buf) {
-  if (buf.length < 30) return { category: 'archive', format: 'ZIP' };
+  const zip = { category: 'archive', format: 'ZIP', container: 'zip' };
+  if (buf.length < 30) return zip;
   const nameLength = buf.readUInt16LE(26);
   const name = ascii(buf, 30, 30 + nameLength);
-  if (name === '[Content_Types].xml' || /^(_rels|docProps|word|xl|ppt)\//.test(name)) return { category: null, format: 'Documento do Office (OOXML)' };
-  if (name === 'mimetype') return { category: null, format: 'OpenDocument ou EPUB' };
-  if (name === 'AndroidManifest.xml' || name === 'classes.dex' || name === 'resources.arsc') return { category: 'executable', format: 'Aplicativo Android (APK)' };
-  if (name.startsWith('META-INF/')) return { category: 'executable', format: 'Java (JAR)' };
-  return { category: 'archive', format: 'ZIP' };
+  if (name === '[Content_Types].xml' || /^(_rels|docProps|word|xl|ppt)\//.test(name)) return { category: null, format: 'Documento do Office (OOXML)', container: 'zip' };
+  if (name === 'mimetype') return { category: null, format: 'OpenDocument ou EPUB', container: 'zip' };
+  if (name === 'AndroidManifest.xml' || name === 'classes.dex' || name === 'resources.arsc') return { category: 'executable', format: 'Aplicativo Android (APK)', container: 'zip' };
+  if (name.startsWith('META-INF/')) return { category: 'executable', format: 'Java (JAR)', container: 'zip' };
+  return zip;
 }
 
 /**
- * Categoria e formato pelo conteúdo ({ category, format }), ou null se o formato não for
- * reconhecido. category null: formato reconhecido, mas sem categoria confiável (ex.: Office).
- * size: tamanho do arquivo (confere o BMP).
+ * Categoria e formato pelo conteúdo ({ category, format, container? }), ou null se o formato não
+ * for reconhecido. category null: formato reconhecido, mas sem categoria confiável (ex.: Office).
+ * container: formato que outros tipos também usam por dentro (ver sameContainer). size: tamanho do
+ * arquivo (confere o BMP).
  */
 export function detectType(buf, size = null) {
   if (!buf || buf.length < 4) return null;
+  if (looksLikeText(buf)) return ascii(buf, 0, 5) === '%PDF-' ? { category: 'document', format: 'PDF' } : null;
   // Vídeo e áudio
   if (ascii(buf, 4, 8) === 'ftyp') {
     const brand = ascii(buf, 8, 12);
-    if (FTYP_AUDIO.has(brand)) return { category: 'audio', format: 'Áudio MPEG-4 (M4A)' };
+    if (FTYP_AUDIO.has(brand)) return { category: 'audio', format: 'Áudio MPEG-4 (M4A)', container: 'mp4' };
     if (FTYP_IMAGE.has(brand)) return { category: 'image', format: 'Imagem HEIF/HEIC' };
-    if (brand.startsWith('3g')) return { category: 'video', format: 'Vídeo 3GP' };
-    if (brand === 'qt  ') return { category: 'video', format: 'Vídeo QuickTime (MOV)' };
-    return { category: 'video', format: 'Vídeo MPEG-4 (MP4)' };
+    if (brand.startsWith('3g')) return { category: 'video', format: 'Vídeo 3GP', container: 'mp4' };
+    if (brand === 'qt  ') return { category: 'video', format: 'Vídeo QuickTime (MOV)', container: 'mp4' };
+    return { category: 'video', format: 'Vídeo MPEG-4 (MP4)', container: 'mp4' };
   }
-  if (startsWith(buf, [0x1a, 0x45, 0xdf, 0xa3])) return { category: 'video', format: 'Vídeo Matroska/WebM' };
+  if (startsWith(buf, [0x1a, 0x45, 0xdf, 0xa3])) return { category: 'video', format: 'Vídeo Matroska/WebM', container: 'matroska' };
   if (ascii(buf, 0, 4) === 'RIFF') {
     const kind = ascii(buf, 8, 12);
     if (kind === 'AVI ') return { category: 'video', format: 'Vídeo AVI' };
     if (kind === 'WAVE') return { category: 'audio', format: 'Áudio WAV' };
     if (kind === 'WEBP') return { category: 'image', format: 'Imagem WebP' };
   }
-  if (startsWith(buf, [0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11])) return { category: 'video', format: 'Windows Media (WMV/WMA)' };
+  if (startsWith(buf, [0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11])) return { category: 'video', format: 'Windows Media (WMV/WMA)', container: 'asf' };
   if (ascii(buf, 0, 3) === 'FLV' && buf[3] === 0x01) return { category: 'video', format: 'Vídeo Flash (FLV)' };
   if (startsWith(buf, [0x00, 0x00, 0x01, 0xba]) || startsWith(buf, [0x00, 0x00, 0x01, 0xb3])) return { category: 'video', format: 'Vídeo MPEG' };
   if (buf.length > 376 && buf[0] === 0x47 && buf[188] === 0x47 && buf[376] === 0x47) return { category: 'video', format: 'Vídeo MPEG-TS' };
-  if (ascii(buf, 0, 3) === 'ID3' || mp3Frame(buf)) return { category: 'audio', format: 'Áudio MP3' };
+  if (id3(buf) || mp3Frame(buf)) return { category: 'audio', format: 'Áudio MP3' };
   if (ascii(buf, 0, 4) === 'fLaC') return { category: 'audio', format: 'Áudio FLAC' };
-  if (ascii(buf, 0, 4) === 'OggS') return { category: 'audio', format: 'Áudio/vídeo Ogg' };
+  if (ascii(buf, 0, 4) === 'OggS') return { category: 'audio', format: 'Áudio/vídeo Ogg', container: 'ogg' };
   if (ascii(buf, 0, 4) === 'MThd') return { category: 'audio', format: 'MIDI' };
   if (ascii(buf, 0, 6) === '#!AMR') return { category: 'audio', format: 'Áudio AMR' };
   // Imagens
@@ -85,7 +104,7 @@ export function detectType(buf, size = null) {
   if (startsWith(buf, [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])) return { category: 'archive', format: 'XZ' };
   if (ascii(buf, 0, 4) === 'MSCF') return { category: 'archive', format: 'CAB' };
   if (startsWith(buf, [0x28, 0xb5, 0x2f, 0xfd])) return { category: 'archive', format: 'Zstandard' };
-  if (ascii(buf, 257, 262) === 'ustar') return { category: 'archive', format: 'TAR' };
+  if (ascii(buf, 257, 262) === 'ustar') return { category: 'archive', format: 'TAR', container: 'tar' };
   // Imagens de disco e máquinas virtuais
   if (ascii(buf, 0, 8) === 'vhdxfile') return { category: 'disk', format: 'Disco virtual (VHDX)' };
   if (ascii(buf, 0, 8) === 'conectix') return { category: 'disk', format: 'Disco virtual (VHD)' };
@@ -99,3 +118,23 @@ export function detectType(buf, size = null) {
   if (/^Standard (Jet|ACE) DB/.test(ascii(buf, 4, 19))) return { category: 'database', format: 'Microsoft Access' };
   return null;
 }
+
+/**
+ * Extensões de outros tipos que usam o mesmo formato por dentro: não são arquivos renomeados (um
+ * .m4a é MP4, um .mka é Matroska, um .docx ou um .jar é ZIP, um .ova é TAR).
+ */
+const SAME_CONTAINER = {
+  mp4: ['.mp4', '.m4v', '.mov', '.3gp', '.3g2', '.f4v', '.m4a', '.m4b', '.m4p', '.m4r', '.aac', '.alac', '.3ga'],
+  matroska: ['.mkv', '.webm', '.mka'],
+  ogg: ['.ogg', '.oga', '.ogv', '.opus', '.spx'],
+  asf: ['.asf', '.wmv', '.wma'],
+  zip: [
+    ...['.docx', '.docm', '.dotx', '.dotm', '.xlsx', '.xlsm', '.xlsb', '.xltx', '.xltm', '.pptx', '.pptm', '.ppsx', '.ppsm', '.potx', '.potm', '.vsdx', '.xps', '.oxps'],
+    ...['.odt', '.ods', '.odp', '.odg', '.ott', '.ots', '.otp', '.epub', '.pages', '.numbers', '.key'],
+    ...['.jar', '.war', '.ear', '.apk', '.aab', '.appx', '.appxbundle', '.msix', '.msixbundle', '.xpi', '.vsix', '.nupkg', '.kmz', '.3mf'],
+  ],
+  tar: ['.ova'],
+};
+
+/** O conteúdo reconhecido é o formato próprio da extensão (e não um arquivo renomeado)? */
+export const sameContainer = (detected, extension) => Boolean(detected?.container && SAME_CONTAINER[detected.container]?.includes(extension));

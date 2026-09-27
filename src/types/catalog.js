@@ -145,11 +145,16 @@ export function typeMatcher(fileTypes) {
 
 export const categoryLabel = (key) => (key === 'custom' ? CUSTOM.label : CATEGORIES[key]?.label || key);
 
-/** Descrição em português, ex.: "Vídeos, Músicas e áudio e .xyz (acima de 100 MB)". */
+const BY_EXTENSION = new Map(Object.entries(CATEGORIES).flatMap(([key, c]) => c.extensions.map((e) => [e, key])));
+
+/** Categoria de uma extensão no catálogo (ex.: ".pdf" -> "document"), ou null se não estiver nele. */
+export const categoryOfExtension = (extension) => BY_EXTENSION.get(extension) || null;
+
+/** Descrição em português, ex.: "Vídeos, Músicas e áudio e .xyz (a partir de 100 MB)". */
 export function describeFileTypes(fileTypes) {
   if (!fileTypes) return '';
   const parts = [...(fileTypes.categories || []).map((c) => CATEGORIES[c]?.label || c), ...(fileTypes.extensions || [])];
   const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} e ${parts.at(-1)}` : parts[0] || '';
-  const extras = [fileTypes.minSizeMB ? `acima de ${String(fileTypes.minSizeMB).replace('.', ',')} MB` : '', fileTypes.checkContent ? 'conferindo o tipo real' : ''].filter(Boolean);
+  const extras = [fileTypes.minSizeMB ? `a partir de ${String(fileTypes.minSizeMB).replace('.', ',')} MB` : '', fileTypes.checkContent ? 'conferindo o tipo real' : ''].filter(Boolean);
   return `${list}${extras.length ? ` (${extras.join('; ')})` : ''}`;
 }
