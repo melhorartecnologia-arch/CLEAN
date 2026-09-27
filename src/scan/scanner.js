@@ -117,8 +117,9 @@ export function newStats(repositoriesTotal = 0) {
     gaps: 0, // repositórios, contas ou sites que não puderam ser lidos (a análise ficou incompleta)
     bytesExpired: 0, // retenção: tamanho dos arquivos expirados
     retentionUnknown: 0, // retenção: arquivos sem a data do critério (não expiram)
-    deleteSkipped: 0, // retenção: expirados não excluídos por causa do limite da execução
+    deleteSkipped: 0, // retenção e busca por tipo: não excluídos por causa do limite da execução
     deleteProtected: 0, // retenção e busca por tipo: itens em locais protegidos (não são excluídos)
+    deleteReview: 0, // busca por tipo: encontrados pelo tipo real (conteúdo), só listados para a revisão
     bytesFound: 0, // busca por tipo: tamanho dos arquivos encontrados
     typesByContent: 0, // busca por tipo: encontrados pelo tipo real (conteúdo), com outra extensão
     filesSkippedBySize: 0, // busca por tipo: abaixo do tamanho mínimo
@@ -176,9 +177,9 @@ export class Scanner {
     this.typeSearch = t ? { ...t, match: typeMatcher(t), minBytes: Math.round((t.minSizeMB || 0) * 1048576) } : null;
     // Retenção e busca por tipo: exclusão com limite por execução (e o texto dos avisos).
     this.selection = this.retention
-      ? { mode: 'retention', limit: this.retention.maxDeletions || 0, found: 'expirado', where: 'na política' }
+      ? { mode: 'retention', limit: this.retention.maxDeletions || 0, found: 'expirado', where: 'na política', owner: 'da política', later: 'Eles serão excluídos nas próximas execuções.' }
       : this.typeSearch
-        ? { mode: 'auto', limit: this.typeSearch.maxDeletions || 0, found: 'encontrado', where: 'nas opções da busca' }
+        ? { mode: 'auto', limit: this.typeSearch.maxDeletions || 0, found: 'encontrado', where: 'nas opções da busca', owner: 'da busca', later: 'Exclua-os pelo relatório ou numa próxima execução.' }
         : null;
     // Limite de exclusões da execução: vagas em uso (exclusões feitas ou em andamento) e falhas.
     this.deleteAttempts = 0;
@@ -266,6 +267,9 @@ export class Scanner {
     // Aviso do limite pelos números finais (as exclusões em andamento podiam falhar).
     const warning = sel ? limitWarning({ limit: sel.limit, deleted: this.stats.deleted, failures: this.deleteFailures, skipped: this.stats.deleteSkipped }, 'files', sel) : null;
     if (warning) this.log('warn', warning);
+    if (this.stats.deleteReview) {
+      this.log('info', `${this.stats.deleteReview} arquivo(s) encontrado(s) pelo tipo real (conteúdo) não foram excluídos automaticamente: revise-os no relatório e exclua o que for o caso.`);
+    }
     if (this.stats.deleteProtected) {
       this.log('info', `${this.stats.deleteProtected} arquivo(s) ${found} em locais protegidos (repositórios sem "Permitir exclusão" dentro dos analisados, contas ou sites protegidos, pastas do CLEAN) não foram excluídos.`);
     }
@@ -598,6 +602,7 @@ export class Scanner {
   /** Busca por tipo: campos do registro, sem termos (o conteúdo não é analisado). */
   typedFields(found, detected) {
     return {
+      extension: found.extension, // a extensão procurada (inclusive composta, como .tar.gz)
       contentType: null,
       contentStatus: 'not-requested',
       contentNote: null,
@@ -624,9 +629,9 @@ export class Scanner {
     // extensão fora do catálogo são o que dizem ser (um .dll é um executável, um .ai do Illustrator
     // é um PDF, um .lrcat do Lightroom é SQLite), e o formato próprio de uma extensão não é um
     // arquivo renomeado (um .docx é ZIP, um .m4a é MP4).
-    if (!found && !small && t.checkContent && st.size > 0 && (!extension || categoryOfExtension(extension))) {
+    if (!found && !small && t.checkContent && t.categories.length && st.size > 0 && (!extension || categoryOfExtension(extension))) {
       const real = await this.readType(entry.path, st.size);
-      if (real?.category && t.categories.includes(real.category) && !sameContainer(real, extension)) {
+      if (real?.category && t.categories.includes(real.category) && !sameContainer(real, extension, categoryOfExtension(extension))) {
         detected = real;
         found = { category: real.category, extension };
       }
@@ -906,6 +911,12 @@ export class Scanner {
    */
   async deleteSelected(record, repo, method) {
     if (!repo?.allowDelete) return;
+    // Busca por tipo: o tipo real é uma pista (um formato pode ser usado por outros programas); os
+    // arquivos encontrados só por ele ficam no relatório para a revisão e não são excluídos sozinhos.
+    if (record.typeMatch?.by === 'content') {
+      this.stats.deleteReview++;
+      return;
+    }
     const cloud = Boolean(record.cloud);
     const connector = cloud ? this.cloudConnector(repo) : null;
     let kept;

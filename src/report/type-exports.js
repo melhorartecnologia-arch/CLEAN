@@ -54,6 +54,7 @@ export function typeInfoRows(scan) {
         extra: [
           ['Não excluídos (limite da execução)', s.deleteSkipped ?? 0],
           ['Em locais protegidos (não excluídos)', s.deleteProtected ?? 0],
+          ['Encontrados pelo tipo real (não excluídos automaticamente: para revisão)', s.deleteReview ?? 0],
         ],
       },
     }),

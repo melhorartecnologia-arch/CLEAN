@@ -63,6 +63,30 @@ export function guardFor(guards, target) {
   return guards.find((g) => isWithin(g.path, target) && !(g.except || []).some((e) => isWithin(e, target))) || null;
 }
 
+/**
+ * O mesmo que guardFor, para conferir muitos arquivos com as mesmas pastas protegidas (a exclusão
+ * em lote): os caminhos são normalizados uma vez e comparados como prefixos. Devolve
+ * (target) => pasta protegida | null.
+ */
+export function guardMatcher(guards) {
+  const norm = (p) => {
+    const resolved = path.resolve(p);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  // A própria pasta ou algo dentro dela (o prefixo com a barra no fim é calculado uma vez).
+  const folder = (p) => {
+    const root = norm(p);
+    return { root, prefix: root.endsWith(path.sep) ? root : `${root}${path.sep}` };
+  };
+  const within = (f, target) => target === f.root || target.startsWith(f.prefix);
+  const list = guards.map((g) => ({ g, folder: folder(g.path), except: (g.except || []).map(folder) }));
+  return (target) => {
+    const t = norm(target);
+    for (const { g, folder: f, except } of list) if (within(f, t) && !except.some((e) => within(e, t))) return g;
+    return null;
+  };
+}
+
 async function realOrSame(p) {
   try {
     return await fs.realpath(p);

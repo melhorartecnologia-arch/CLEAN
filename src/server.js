@@ -43,6 +43,8 @@ async function shutdown(signal) {
   console.log(`[CLEAN] Encerrando (${signal})...`);
   server.close();
   await scheduler.stop().catch(() => {});
+  // Exclusões em lote: o arquivo em exclusão termina (e é registrado); os demais ficam.
+  await app.locals.stopBulkDeletions?.().catch(() => {});
   await manager.shutdown().catch(() => {});
   process.exit(0);
 }

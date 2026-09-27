@@ -57,9 +57,9 @@ function stubManager(store) {
       active.add(scan.id);
       return scan;
     },
-    finish(id, { status = 'completed', startedAt, errors = 0, gaps = 0 } = {}) {
+    finish(id, { status = 'completed', startedAt, errors = 0, gaps = 0, deleteSkipped = 0 } = {}) {
       active.delete(id);
-      store.updateScan(id, { status, startedAt: startedAt.toISOString(), finishedAt: startedAt.toISOString(), stats: { filesMatched: 2, errors, gaps } });
+      store.updateScan(id, { status, startedAt: startedAt.toISOString(), finishedAt: startedAt.toISOString(), stats: { filesMatched: 2, errors, gaps, deleteSkipped } });
     },
   };
 }
@@ -249,6 +249,15 @@ test('período: últimos N dias e incremental com análise completa periódica',
   manager.finish(off, { startedAt: at(2026, 10, 5, 2, 0, 6) });
   await run(at(2026, 10, 6, 2, 0, 5));
   assert.equal(from(10), null, 'a exclusão não valeu na anterior: esta é completa');
+  // Uma execução que deixou itens só listados por causa do limite de exclusões não serve de base:
+  // as incrementais seguintes não veriam esses itens (que não mudaram).
+  manager.finish(store.getSchedule(inc.schedule.id).history[0].scanId, { startedAt: at(2026, 10, 6, 2, 0, 6), deleteSkipped: 40 });
+  await run(at(2026, 10, 7, 2, 0, 5));
+  assert.equal(from(11), null, 'a anterior parou no limite: esta é completa');
+  assert.equal(store.getSchedule(inc.schedule.id).history[1].outcome.deleteSkipped, 40);
+  manager.finish(store.getSchedule(inc.schedule.id).history[0].scanId, { startedAt: at(2026, 10, 7, 2, 0, 6) });
+  await run(at(2026, 10, 8, 2, 0, 5));
+  assert.equal(from(12), new Date(+at(2026, 10, 7, 2, 0, 6) - INCREMENTAL_MARGIN_MS).toISOString(), 'a completa sem sobras volta a ser a base');
 });
 
 test('exclusão automática só com o que foi confirmado ao salvar', async () => {

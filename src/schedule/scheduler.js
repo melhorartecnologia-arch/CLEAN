@@ -18,7 +18,8 @@ import { ScanError, sanitizeOptions, sanitizeMailOptions } from '../scan/manager
 import { deletionScope, mailDeletionScope, isCloudRepo, keptPaths } from '../scan/delete.js';
 import { keptCloud } from '../cloud/drives.js';
 import { sanitizeRetention } from '../retention/policy.js';
-import { sanitizeFileTypes } from '../types/catalog.js';
+import { sanitizeFileTypes, CATEGORIES } from '../types/catalog.js';
+import { SIGNATURE_VERSION } from '../types/signature.js';
 
 const TICK_MS = 15000;
 // Atraso tolerado (servidor ocupado): acima disso, o horário conta como perdido.
@@ -55,6 +56,15 @@ const WORDS = {
     removed: 'o agendamento foi excluído',
     paused: 'o agendamento foi pausado',
   },
+  types: {
+    the: 'o agendamento',
+    title: 'Agendamento',
+    edit: 'edite o agendamento',
+    analyze: 'Somente procurar',
+    confirmed: 'a exclusão automática foi confirmada neste agendamento',
+    removed: 'o agendamento foi excluído',
+    paused: 'o agendamento foi pausado',
+  },
   retention: {
     the: 'a política',
     title: 'Política de retenção',
@@ -65,7 +75,7 @@ const WORDS = {
     paused: 'a política de retenção foi pausada',
   },
 };
-export const wordsOf = (schedule) => (schedule?.purpose === 'retention' ? WORDS.retention : WORDS.terms);
+export const wordsOf = (schedule) => WORDS[schedule?.purpose] || WORDS.terms;
 const upper = (text) => `${text[0].toUpperCase()}${text.slice(1)}`;
 
 /** Repositório (arquivos) ou conexão de e-mail (mail) do agendamento, ou null. */
@@ -109,8 +119,11 @@ export function deletionCriteria(store, { kind, targetIds = [], listIds = [], fi
     const kept = [Boolean(keep.all), keep.accounts.map((k) => k.value).sort(), keep.sites.map((k) => k.value).sort()];
     return [id, t.exclude || [], t.cloud?.exclude || [], kept];
   });
-  // Busca por tipo: os tipos e extensões confirmados também (sem eles, o valor dos agendamentos antigos não muda).
-  return hash([kind, terms, places, ...(fileTypes ? [fileTypes] : [])]);
+  // Busca por tipo: os tipos confirmados com as extensões de cada um e a versão do reconhecimento
+  // pelo conteúdo (sem eles, o valor dos agendamentos antigos não muda). Uma atualização do CLEAN que
+  // mude o que um tipo abrange pede nova confirmação.
+  const types = fileTypes ? [[fileTypes, (fileTypes.categories || []).map((c) => [c, CATEGORIES[c]?.extensions || []]), fileTypes.checkContent ? SIGNATURE_VERSION : 0]] : [];
+  return hash([kind, terms, places, ...types]);
 }
 
 /** Quantas execuções ainda faltam no término "depois de N execuções" (sem esse término: infinitas). */
@@ -182,7 +195,8 @@ export function scheduleProblems(store, schedule) {
     }
     if (targets.length === (schedule.targetIds || []).length && lists.length === (schedule.listIds || []).length && confirmation.criteria !== deletionCriteria(store, schedule)) {
       const what = schedule.kind === 'mail' ? 'as caixas ou pastas ignoradas' : 'as pastas ignoradas ou os locais protegidos por repositórios sem exclusão';
-      problems.push(`${retention ? upper(what) : `Os termos das listas de referência, ${what}`} mudaram depois que ${w.confirmed}. ${again}`);
+      const criteria = retention ? upper(what) : schedule.purpose === 'types' ? `Os tipos de arquivo (as extensões de cada tipo ou o reconhecimento pelo conteúdo, numa atualização do CLEAN), ${what}` : `Os termos das listas de referência, ${what}`;
+      problems.push(`${criteria} mudaram depois que ${w.confirmed}. ${again}`);
     }
   }
   return problems;
@@ -482,7 +496,9 @@ export class Scheduler {
     const runs = (schedule.history || []).filter((h) => h.status === 'started' && h.signature === signature);
     // Uma execução que não conseguiu ler um repositório, uma conta, um site ou uma caixa inteira
     // não serve de base: o que mudou antes dela ficaria de fora das próximas.
-    const complete = (h) => h.outcome?.status === 'completed' && !h.outcome.gaps && h.outcome.startedAt && (schedule.action !== 'delete' || h.outcome.deleting !== false);
+    // Com exclusão, também a que deixou itens só listados por causa do limite de exclusões: eles
+    // ficariam fora das incrementais seguintes (que só veem o que mudou) até a próxima completa.
+    const complete = (h) => h.outcome?.status === 'completed' && !h.outcome.gaps && h.outcome.startedAt && (schedule.action !== 'delete' || (h.outcome.deleting !== false && !h.outcome.deleteSkipped));
     const baseline = runs.find((h) => h.base && complete(h));
     if (!baseline) {
       return { from: null, full: true, base: true, text: 'análise completa (não há execução anterior concluída, sem falhas de acesso, com os mesmos locais, termos e opções).' };
@@ -522,6 +538,8 @@ export class Scheduler {
               finishedAt: scan.finishedAt,
               matched: (scan.kind === 'mail' ? scan.stats?.messagesMatched : scan.stats?.filesMatched) || 0,
               deleted: scan.stats?.deleted || 0,
+              // Itens só listados por causa do limite de exclusões (a execução não serve de base da incremental).
+              deleteSkipped: scan.stats?.deleteSkipped || 0,
               errors: scan.stats?.errors || 0,
               gaps: scan.stats?.gaps || 0,
               // Com exclusão: se ela valeu até o fim (não foi desligada na fila nem durante a execução).
@@ -604,7 +622,7 @@ export class Scheduler {
     if (!scan.scheduleCriteria || scan.scheduleCriteria !== schedule.deleteConfirmation?.criteria) {
       return schedule.purpose === 'retention'
         ? `a exclusão da política foi confirmada de novo com ${schedule.kind === 'mail' ? 'outras caixas ou pastas ignoradas' : 'outras pastas ignoradas ou outros locais protegidos'} depois que esta execução foi criada`
-        : 'a exclusão do agendamento foi confirmada de novo com outros termos, pastas ignoradas ou locais protegidos depois que esta execução foi criada';
+        : `a exclusão do agendamento foi confirmada de novo com outros ${schedule.purpose === 'types' ? 'tipos de arquivo' : 'termos'}, pastas ignoradas ou locais protegidos depois que esta execução foi criada`;
     }
     const targets = scan.kind === 'mail' ? scan.sourceIds : scan.repositoryIds;
     if (!sameIds(targets, schedule.targetIds) || !sameIds(scan.listIds, schedule.listIds)) {

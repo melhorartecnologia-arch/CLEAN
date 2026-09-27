@@ -163,7 +163,10 @@ export function createApp({ store, manager, config, scheduler = new Scheduler({ 
   api.use('/repositories', repositoriesRouter({ store, manager, scheduler, endpoints: config.mailEndpoints }));
   api.use('/lists', listsRouter({ store, scheduler }));
   api.use('/mail-sources', mailSourcesRouter({ store, manager, scheduler, endpoints: config.mailEndpoints }));
-  api.use('/scans', scansRouter({ store, manager, endpoints: config.mailEndpoints }));
+  const scans = scansRouter({ store, manager, endpoints: config.mailEndpoints });
+  api.use('/scans', scans);
+  // Encerramento do servidor: interrompe as exclusões em lote (server.js).
+  app.locals.stopBulkDeletions = scans.stopBulk;
   api.use('/schedules', schedulesRouter({ store, manager, scheduler }));
   api.use((req, res, next) => next(new HttpError(404, 'Rota não encontrada.')));
   // eslint-disable-next-line no-unused-vars

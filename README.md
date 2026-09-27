@@ -520,13 +520,17 @@ expirados) **são mantidos** e aparecem como alterados. Se a forma de exclusão 
 mudar entre a prévia e a confirmação, o CLEAN recusa e pede para começar de novo; se mudar durante
 o lote, os arquivos daquele repositório falham em vez de serem excluídos de outra forma. Depois de 20
 falhas seguidas (sem permissão de modificação, por exemplo), o lote para sozinho e o motivo aparece
-no relatório. Cada exclusão é
-registrada na hora, como manual, com quem confirmou e a indicação *(exclusão em lote)*; o
-**Registro** da análise mostra o início e o resultado de cada lote. Um lote por relatório de cada
-vez, com até 100.000 arquivos (filtre o relatório para excluir mais); enquanto ele roda, o relatório
-não pode ser excluído. Se o CLEAN for encerrado no meio, o lote para (o que já foi excluído fica
-registrado) e pode ser iniciado de novo com os arquivos que restaram. Nos relatórios de e-mail, a
-exclusão continua item a item.
+no relatório. Cada exclusão é registrada na hora, como manual, com quem confirmou e a indicação
+*(exclusão em lote)* — se a gravação do registro falhar (disco cheio, por exemplo), o lote para: uma
+exclusão não fica sem rastro. O **Registro** da análise mostra o início e o resultado de cada lote.
+Um lote por relatório de cada vez (um segundo pedido, de outra aba, é recusado), com até 100.000
+arquivos (filtre o relatório para excluir mais); enquanto ele roda, o relatório não pode ser
+excluído. A confirmação vale para o que a prévia mostrou: se mais arquivos passarem a poder ser
+excluídos nesse intervalo (uma pasta que deixou de ser ignorada, por exemplo), o CLEAN pede para
+começar de novo. Ao encerrar, o CLEAN espera o arquivo em exclusão terminar; o lote para ali (o
+que já foi excluído fica registrado, e o Registro da análise anota a interrupção) e pode ser
+iniciado de novo com os arquivos que restaram. Nos relatórios de e-mail, a exclusão continua item a
+item.
 
 ## Agendamentos
 
@@ -748,18 +752,24 @@ imagens de disco. Não há lista de referência: vale o tipo do arquivo.
   extensões compostas como `.tar.gz`;
 - **Tamanho mínimo** (MB): só os arquivos a partir desse tamanho — por exemplo, os vídeos de 100 MB
   ou mais. Os menores do tipo procurado são contados à parte no relatório;
-- **Conferir o tipo real pelo conteúdo** (pastas do Windows): acha arquivos **renomeados** — um
-  vídeo salvo como `relatorio.pdf`, uma foto sem extensão — lendo os primeiros 512 bytes dos
-  arquivos **sem extensão** ou com a extensão de **outro tipo da lista**. Reconhece vídeos, áudios,
-  imagens, executáveis, compactados, imagens de disco, PDF, arquivos de dados do Outlook e bancos de
-  dados SQLite e Access; planilhas, apresentações, textos, documentos antigos do Office e temporários
-  são achados só pela extensão. Para evitar falsos positivos, arquivos com extensões **fora da
-  lista** valem pelo que são (um `.dll` é um executável, um `.ai` do Illustrator é um PDF por
-  dentro, um `.lrcat` do Lightroom é um banco SQLite), o formato próprio de uma extensão não conta
-  como renomeado (um `.docx` é um ZIP, um `.m4a` é um MP4, um `.ova` é um TAR) e textos não são
-  confundidos com assinaturas. A conferência deixa a busca mais lenta (cada arquivo é aberto) e,
-  como a leitura do conteúdo nas análises por termos, pode atualizar o último acesso dos arquivos.
-  No OneDrive e no SharePoint vale só a extensão (o conteúdo não é baixado);
+- **Conferir o tipo real pelo conteúdo** (pastas do Windows, para os tipos marcados): acha arquivos
+  **renomeados** — um vídeo salvo como `relatorio.pdf`, uma foto sem extensão — lendo os primeiros
+  4 KB dos arquivos **sem extensão** ou com a extensão de **outro tipo da lista**. Reconhece vídeos,
+  áudios, imagens (inclusive HEIC e as fotos RAW da Canon, .CR3), executáveis, compactados, discos
+  virtuais (VHDX, VHD, VMDK, QCOW e VDI), PDF, arquivos de dados do Outlook e bancos de dados SQLite
+  e Access; planilhas, apresentações, textos, documentos antigos do Office, imagens ISO e
+  temporários são achados só pela extensão. Para evitar falsos positivos: arquivos com extensões
+  **fora da lista** valem pelo que são (um `.dll` é um executável, um `.ai` do Illustrator é um PDF
+  por dentro, um `.lrcat` do Lightroom é um banco SQLite); o formato próprio de uma extensão não conta
+  como renomeado (um `.docx` ou um `.doc` com conteúdo ZIP, um `.m4a`, um `.heic` ou um `.cr3` em
+  MPEG-4, um `.ova` em TAR — e, em geral, um contêiner de áudio e vídeo com a extensão de outro
+  áudio, vídeo ou imagem); as assinaturas curtas são conferidas com o que vem depois (o cabeçalho de
+  um executável, dois quadros seguidos de MP3, vários pacotes de vídeo MPEG-TS) e textos (inclusive
+  em UTF-16) não são confundidos com elas. Mesmo assim, o tipo real é uma pista: **os arquivos
+  encontrados só por ele nunca são excluídos automaticamente** — ficam no relatório (filtro
+  *Encontrado por: tipo real*) para a revisão. A conferência deixa a busca mais lenta (cada arquivo é
+  aberto) e, como a leitura do conteúdo nas análises por termos, pode atualizar o último acesso dos
+  arquivos. No OneDrive e no SharePoint vale só a extensão (o conteúdo não é baixado);
 - somente os arquivos alterados a partir de uma data, os repositórios, os arquivos processados em
   paralelo e o proprietário (NTFS), como numa análise por termos.
 
@@ -773,8 +783,9 @@ imagens de disco. Não há lista de referência: vale o tipo do arquivo.
   (*Permitir exclusão*, **EXCLUIR**, arquivos alterados depois de listados são mantidos, locais
   protegidos nunca são tentados) e um **limite de exclusões por execução** (1.000 por padrão; 0 = sem
   limite), que funciona como o das [políticas de retenção](#políticas-de-retenção): acima dele, os
-  arquivos encontrados ficam só no relatório e o CLEAN avisa. A tela avisa quando tipos de arquivos
-  de trabalho estão marcados junto com a exclusão automática.
+  arquivos encontrados ficam só no relatório e o CLEAN avisa. Os encontrados só pelo tipo real ficam
+  para a revisão (não são excluídos automaticamente). A tela avisa quando arquivos de trabalho (os
+  tipos ou as extensões digitadas) estão marcados junto com a exclusão automática.
 
 Rode primeiro *Somente procurar* e revise o relatório antes de ligar a exclusão automática — em
 especial com os arquivos de trabalho e com *Conferir o tipo real*.
@@ -782,9 +793,11 @@ especial com os arquivos de trabalho e com *Conferir o tipo real*.
 **Agendada:** em **Automação › Agendamentos › Agendar busca por tipo** (ou *Quando executar ›
 Agendar*), com a mesma recorrência, período (todos os arquivos, os alterados nos últimos dias ou
 incremental), histórico e relatórios guardados dos [agendamentos](#agendamentos). Na exclusão
-automática agendada, os tipos, as extensões, o tamanho mínimo e o limite ficam registrados na
-confirmação: se forem alterados, é preciso salvar e confirmar de novo (uma execução que esperou na
-fila procura sem excluir).
+automática agendada, os tipos, as extensões de cada tipo, o tamanho mínimo, o limite e a versão do
+reconhecimento pelo conteúdo ficam registrados na confirmação: se forem alterados (inclusive por uma
+atualização do CLEAN que mude o que um tipo abrange), é preciso salvar e confirmar de novo (uma
+execução que esperou na fila procura sem excluir). Na incremental, uma execução que parou no limite
+de exclusões não serve de base: a seguinte volta a procurar em tudo, para excluir o que ficou.
 
 **Relatório:** arquivos verificados e encontrados, o espaço ocupado pelos encontrados, quantos foram
 achados pelo tipo real e o espaço já excluído; gráficos por tipo, espaço por extensão, últimos

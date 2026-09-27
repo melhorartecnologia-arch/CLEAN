@@ -12,6 +12,7 @@ import { Store } from '../src/store.js';
 import { ScanManager } from '../src/scan/manager.js';
 import { Scheduler } from '../src/schedule/scheduler.js';
 import { createApp } from '../src/app.js';
+import { guardFor, guardMatcher } from '../src/scan/delete.js';
 
 let root;
 const stores = [];
@@ -27,6 +28,16 @@ after(async () => {
 
 const MP4 = Buffer.concat([Buffer.from('000000186674797069736f6d', 'hex'), Buffer.alloc(30 * 1024)]);
 const JPEG = Buffer.concat([Buffer.from('ffd8ffe000104a464946', 'hex'), Buffer.alloc(4096)]);
+/** Início de um arquivo MPEG-4 com a marca dada (ex.: "crx " das fotos CR3 da Canon). */
+const ftyp = (brand) => Buffer.concat([Buffer.from('00000018', 'hex'), Buffer.from(`ftyp${brand}`, 'latin1'), Buffer.alloc(2048)]);
+/** Executável do Windows: "MZ" e o cabeçalho PE no endereço indicado em 0x3C. */
+function peFile() {
+  const b = Buffer.alloc(1024);
+  b.write('MZ', 0, 'latin1');
+  b.writeUInt32LE(0x80, 0x3c);
+  b.write('PE\0\0', 0x80, 'latin1');
+  return b;
+}
 
 /** Pasta com arquivos de vários tipos (inclusive uma foto renomeada para .pdf). */
 function tree() {
@@ -71,7 +82,8 @@ test('tipo real pelo conteúdo: assinaturas e casos ambíguos', () => {
   assert.equal(detectType(MP4).category, 'video');
   assert.equal(detectType(JPEG).format, 'Imagem JPEG');
   assert.equal(detectType(Buffer.from('%PDF-1.4')).category, 'document');
-  assert.equal(detectType(Buffer.from('MZ\x90\x00', 'latin1')).category, 'executable');
+  assert.equal(detectType(peFile()).category, 'executable');
+  assert.equal(detectType(Buffer.concat([Buffer.from('MZ\x90\x00', 'latin1'), Buffer.alloc(200)])), null, 'só "MZ", sem o cabeçalho PE');
   const zip = (first) => {
     const b = Buffer.alloc(128);
     b.write('PK\x03\x04', 0, 'latin1');
@@ -92,12 +104,61 @@ test('tipo real pelo conteúdo: assinaturas e casos ambíguos', () => {
   assert.equal(detectType(Buffer.from('\ufeffNome;Valor\r\n', 'utf16le')), null, 'texto UTF-16 não é MP3');
   assert.equal(detectType(Buffer.from('MZ-2024: vendas do trimestre')), null, 'texto começando com MZ');
   assert.equal(detectType(Buffer.from('ID3 tags da coleção')), null, 'texto começando com ID3');
+  // Texto UTF-16 sem BOM com "G" a cada 188 bytes não é vídeo MPEG-TS.
+  const utf16 = Buffer.from('G'.padEnd(94, 'x').repeat(12), 'utf16le');
+  assert.equal(detectType(utf16), null);
   // O formato próprio de outras extensões não é um arquivo renomeado.
-  const odd = detectType(zip('customXml/item1.xml'));
+  const odd = detectType(zip('conteudo/relatorio.bin'));
   assert.equal(odd.category, 'archive');
   assert.equal(sameContainer(odd, '.xlsx'), true);
-  assert.equal(sameContainer(odd, '.pdf'), false);
-  assert.equal(sameContainer(detectType(MP4), '.m4a'), true, 'um .m4a é MP4 por dentro');
+  assert.equal(sameContainer(odd, '.doc', 'document'), true, 'um .doc com conteúdo ZIP é um .docx renomeado');
+  assert.equal(sameContainer(odd, '.pdf', 'document'), false);
+  const jar = detectType(zip('META-INF/MANIFEST.MF'));
+  assert.equal(sameContainer(jar, '.zip', 'archive'), true, 'um .zip assinado (META-INF) continua um .zip');
+  assert.equal(sameContainer(jar, '.docx', 'document'), false, 'um aplicativo Java renomeado para .docx');
+  assert.equal(sameContainer(detectType(MP4), '.m4a', 'audio'), true, 'um .m4a é MP4 por dentro');
+  assert.equal(sameContainer(detectType(MP4), '.mp3', 'audio'), true, 'áudio MP4 com a extensão errada de áudio');
+  assert.equal(sameContainer(detectType(MP4), '.pdf', 'document'), false);
+
+  // Marcas do MPEG-4: fotos CR3 e HEIF são imagens; marcas desconhecidas não têm categoria.
+  assert.deepEqual([detectType(ftyp('crx ')).category, detectType(ftyp('crx ')).format], ['image', 'Foto RAW da Canon (CR3)']);
+  assert.equal(detectType(ftyp('mif2')).category, 'image');
+  assert.equal(detectType(ftyp('M4A ')).category, 'audio');
+  assert.equal(detectType(ftyp('qt  ')).category, 'video');
+  assert.equal(detectType(ftyp('abcd')).category, null, 'marca desconhecida');
+  assert.equal(sameContainer(detectType(ftyp('crx ')), '.cr3', 'image'), true);
+
+  // MP3 sem ID3: dois quadros seguidos (MPEG-1, camada III, 128 kbit/s, 44,1 kHz: 417 bytes).
+  const frame = Buffer.concat([Buffer.from('fffb9064', 'hex'), Buffer.alloc(413)]);
+  assert.equal(detectType(Buffer.concat([frame, frame, frame])).format, 'Áudio MP3');
+  assert.equal(detectType(Buffer.concat([frame, Buffer.alloc(600, 0x55)])), null, 'um cabeçalho só é coincidência');
+  // GIF com 0x47 ("G") nos bytes 188 e 376 continua GIF.
+  const gif = Buffer.alloc(800, 0x01);
+  gif.write('GIF89a', 0, 'latin1');
+  gif[188] = 0x47;
+  gif[376] = 0x47;
+  assert.equal(detectType(gif).format, 'Imagem GIF');
+});
+
+test('exclusão em lote: a conferência rápida das pastas protegidas dá o mesmo resultado', () => {
+  const base = path.join(root, 'protegidas');
+  const guards = [
+    { path: path.join(base, 'Diretoria'), error: 'Diretoria' },
+    { path: path.join(base, 'CLEAN'), except: [path.join(base, 'CLEAN', 'demo')], error: 'CLEAN' },
+  ];
+  const match = guardMatcher(guards);
+  const cases = [
+    path.join(base, 'Diretoria', 'ata.docx'),
+    path.join(base, 'Diretoria'),
+    path.join(base, 'Diretoria2', 'ata.docx'), // mesmo começo de nome, outra pasta
+    path.join(base, 'CLEAN', 'data', 'db.json'),
+    path.join(base, 'CLEAN', 'demo', 'exemplo.pdf'),
+    path.join(base, 'Publico', '..', 'Diretoria', 'x.txt'),
+    path.join(base, 'Publico', 'video.mp4'),
+  ];
+  for (const target of cases) assert.equal(match(target)?.error ?? null, guardFor(guards, target)?.error ?? null, target);
+  assert.equal(match(cases[2]), null);
+  assert.equal(match(cases[5])?.error, 'Diretoria');
 });
 
 async function runTypes(dir, fileTypes, { deleteMatches = false, keep = [] } = {}) {
@@ -125,6 +186,7 @@ test('motor: pela extensão, pelo tipo real, tamanho mínimo e exclusão automá
   assert.deepEqual(run.records.map((r) => r.relativePath.replaceAll('\\', '/')).sort(), ['Filmes/ferias.mp4', 'Instaladores/setup.exe', 'Musicas/samba.MP3', 'backup.tar.gz']);
   assert.equal(run.stats.filesSeen, 7);
   assert.ok(run.records.every((r) => r.typeMatch.by === 'extension' && r.terms.length === 0));
+  assert.equal(run.records.find((r) => r.name === 'backup.tar.gz').extension, '.tar.gz', 'a extensão procurada, composta');
   assert.match(run.logs[0], /Busca por tipo iniciada em 1 repositório\(s\): Vídeos, Músicas e áudio, Imagens e fotos, Executáveis e instaladores e \.tar\.gz\./);
 
   // Tipo real: a foto renomeada para .pdf aparece (o PDF de verdade, não).
@@ -140,12 +202,22 @@ test('motor: pela extensão, pelo tipo real, tamanho mínimo e exclusão automá
   fs.writeFileSync(path.join(other, 'fotos.pdf'), oddZip);
   fs.writeFileSync(path.join(other, 'biblioteca.dll'), Buffer.concat([Buffer.from('MZ\x90\x00', 'latin1'), Buffer.alloc(100)]));
   fs.writeFileSync(path.join(other, 'musica.m4a'), MP4);
+  fs.writeFileSync(path.join(other, 'musica-convertida.mp3'), ftyp('mp42')); // áudio MP4 com extensão de MP3
+  fs.writeFileSync(path.join(other, 'IMG_0001.CR3'), ftyp('crx ')); // foto RAW da Canon (MPEG-4 por dentro)
+  fs.writeFileSync(path.join(other, 'IMG_0002.HEIC'), ftyp('mif2'));
   fs.writeFileSync(path.join(other, 'video-sem-extensao'), MP4);
   run = await runTypes(other, { categories: ['video', 'archive', 'executable'], checkContent: true });
   assert.deepEqual(run.records.map((r) => [r.name, r.typeMatch.category, r.typeMatch.by]).sort(), [
     ['fotos.pdf', 'archive', 'content'],
     ['video-sem-extensao', 'video', 'content'],
   ]);
+
+  // Exclusão automática: os encontrados só pelo tipo real ficam para a revisão (não são excluídos).
+  run = await runTypes(other, { categories: ['video', 'archive'], checkContent: true }, { deleteMatches: true });
+  assert.equal(run.stats.deleted, 0);
+  assert.equal(run.stats.deleteReview, 2);
+  assert.ok(fs.existsSync(path.join(other, 'video-sem-extensao')) && fs.existsSync(path.join(other, 'fotos.pdf')));
+  assert.ok(run.logs.some((l) => /2 arquivo\(s\) encontrado\(s\) pelo tipo real \(conteúdo\) não foram excluídos automaticamente/.test(l)));
 
   // Tamanho mínimo: só o vídeo (30 KB) passa de 0,02 MB (cerca de 21 KB).
   run = await runTypes(dir, { categories: ['video', 'audio'], minSizeMB: 0.02 });
@@ -257,9 +329,54 @@ test('API: busca por tipo, relatório, exportações, exclusão em lote e agenda
     assert.ok(events.every((e) => e.mode === 'manual' && /\(exclusão em lote\)$/.test(e.by)));
     scan = (await api('GET', `/api/scans/${scan.id}`)).data;
     assert.ok(scan.log.some((l) => /Exclusão em lote por acesso local concluída: 1 excluído\(s\), 1 mantido\(s\)/.test(l.message)));
-    // Já excluídos não entram de novo.
+    // Já excluídos não entram de novo (e a prévia diz quantos ficaram de fora por isso).
     preview = (await api('POST', `/api/scans/${scan.id}/bulk-delete/preview`, { all: true, filters: {} })).data;
-    assert.equal(preview.total, 2);
+    assert.deepEqual([preview.total, preview.gone], [2, 2]);
+    assert.equal((await api('GET', `/api/scans/${scan.id}/results`)).data.bulkCandidates, 2, 'os que ainda podem ser excluídos no recorte');
+    // Pedidos inválidos: filtro desconhecido (ampliaria o alvo), nenhum arquivo, mais do que a prévia mostrou.
+    assert.match((await api('POST', `/api/scans/${scan.id}/bulk-delete/preview`, { all: true, filters: { tipo: 'video' } })).data.error, /Filtro inválido: tipo/);
+    assert.match((await api('POST', `/api/scans/${scan.id}/bulk-delete/preview`, { ids: [] })).data.error, /Escolha ao menos um arquivo/);
+    res = await api('POST', `/api/scans/${scan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR', expected: 0 });
+    assert.deepEqual([res.status, res.data.code], [409, 'preview-changed']);
+
+    // Dois pedidos ao mesmo tempo (duas abas): só um lote começa.
+    const twice = fs.mkdtempSync(path.join(root, 'repo-'));
+    for (let i = 1; i <= 3; i++) fs.writeFileSync(path.join(twice, `clipe-${i}.mp4`), MP4);
+    const twiceRepo = (await api('POST', '/api/repositories', { name: 'Clipes', path: twice, allowDelete: true })).data;
+    res = await api('POST', '/api/scans', { repositoryIds: [twiceRepo.id], fileTypes: { categories: ['video'] }, options: { resolveOwner: false } });
+    const twiceScan = await waitScan(res.data.id);
+    const both = await Promise.all([1, 2].map(() => api('POST', `/api/scans/${twiceScan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR' })));
+    assert.deepEqual(both.map((r) => r.status).sort(), [202, 409]);
+    job = await waitBulk(twiceScan.id);
+    assert.equal(job.deleted, 3);
+
+    // Falha ao gravar o registro de exclusões (ex.: disco cheio): o lote para no primeiro arquivo.
+    const noLog = fs.mkdtempSync(path.join(root, 'repo-'));
+    for (let i = 1; i <= 3; i++) fs.writeFileSync(path.join(noLog, `filme-${i}.mp4`), MP4);
+    const noLogRepo = (await api('POST', '/api/repositories', { name: 'Filmes', path: noLog, allowDelete: true })).data;
+    res = await api('POST', '/api/scans', { repositoryIds: [noLogRepo.id], fileTypes: { categories: ['video'] }, options: { resolveOwner: false } });
+    const noLogScan = await waitScan(res.data.id);
+    const append = store.appendDeletions;
+    store.appendDeletions = async () => {
+      throw new Error('disco cheio');
+    };
+    try {
+      res = await api('POST', `/api/scans/${noLogScan.id}/bulk-delete`, { all: true, filters: {}, confirmDelete: 'EXCLUIR' });
+      assert.equal(res.status, 202);
+      job = await waitBulk(noLogScan.id);
+    } finally {
+      store.appendDeletions = append;
+    }
+    assert.deepEqual([job.done, job.deleted], [1, 1]);
+    assert.match(job.halted, /falha ao gravar o registro de exclusões/);
+    assert.equal(fs.readdirSync(noLog).length, 2, 'os demais não foram excluídos');
+    assert.ok((await api('GET', `/api/scans/${noLogScan.id}`)).data.log.some((l) => l.level === 'error' && /falha ao gravar o registro da exclusão de .*filme-\d\.mp4 \(deleted\): disco cheio/.test(l.message)));
+
+    // Um lote que não terminou porque o CLEAN foi encerrado fica anotado ao iniciar de novo.
+    store.updateScan(noLogScan.id, { bulkDeletion: { by: 'acesso local', startedAt: new Date().toISOString(), total: 3 } });
+    createApp({ store, manager, scheduler, config: { authUser: '', authPassword: '' } });
+    assert.equal(store.getScan(noLogScan.id).bulkDeletion, null);
+    assert.ok(store.getScan(noLogScan.id).log.some((l) => l.level === 'warn' && /Exclusão em lote por acesso local \(3 arquivo\(s\), iniciada em .*\) interrompida: o CLEAN foi encerrado antes do fim/.test(l.message)));
 
     // Falhas seguidas (aqui, cada arquivo virou uma pasta): o lote para em 20, sem tentar o resto.
     const many = fs.mkdtempSync(path.join(root, 'repo-'));

@@ -1082,8 +1082,12 @@ function bulkOutcome(job, retention) {
 function bulkPreviewBody(preview, outside, retention, filtersText = '') {
   const blocked = Object.entries(preview.blocked || {}).filter(([, n]) => n > 0);
   const blockedTotal = blocked.reduce((sum, [, n]) => sum + n, 0);
-  const tooMany = preview.ready > preview.max;
+  const tooMany = preview.tooMany || preview.ready > preview.max;
   const windows = preview.repositories.some((g) => g.method === 'file');
+  if (preview.tooMany) {
+    return html`${filtersText ? html`<p class="small">Filtros: <b>${filtersText}</b></p>` : ''}
+      <div class="alert error">${icon('alert')}<div>São ${fmtNum(preview.total)} arquivos: exclua no máximo ${fmtNum(preview.max)} por vez. Filtre o relatório (por tipo, repositório, extensão...) e exclua em partes.</div></div>`;
+  }
   return html`${filtersText ? html`<p class="small">Filtros: <b>${filtersText}</b></p>` : ''}
     ${preview.ready
       ? html`<p>${preview.ready === 1 ? 'Será excluído' : 'Serão excluídos'} <b>${plural(preview.ready, 'arquivo', 'arquivos')}</b>, um de cada vez, em segundo plano:</p>
@@ -1288,6 +1292,8 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         // Retenção: expirados além do limite de exclusões da execução (só listados).
         st.deleteSkipped ? `${fmtNum(st.deleteSkipped)} não excluíd${o}${st.deleteSkipped > 1 ? 's' : ''} (limite da execução)` : '',
         st.deleteProtected ? `${fmtNum(st.deleteProtected)} em locais protegidos` : '',
+        // Busca por tipo: os encontrados só pelo tipo real não são excluídos automaticamente.
+        st.deleteReview ? `${fmtNum(st.deleteReview)} pelo tipo real, para revisão` : '',
         st.alreadyInTrash ? `${fmtNum(st.alreadyInTrash)} já estava${st.alreadyInTrash > 1 ? 'm' : ''} na lixeira` : '',
         // Exclusão desligada durante a execução (política pausada ou alterada, "Permitir exclusão" desligada).
         scan.deletionRevoked ? `exclusão interrompida: ${scan.deletionRevoked}` : '',

@@ -180,6 +180,7 @@ export function filterRecords(records, filters = {}) {
     if (q && !haystack(r).includes(q)) return false;
     return true;
   });
+  if (filters.sort === 'none') return out; // sem ordenar (ex.: exclusão em lote de muitos arquivos)
   const sorter = Object.hasOwn(SORTERS, filters.sort || '') ? SORTERS[filters.sort] : SORTERS.path;
   out = out.slice().sort(sorter);
   if (filters.dir === 'desc') out.reverse();

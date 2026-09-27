@@ -76,11 +76,11 @@ function mailSnapshot(source) {
  * "Analisar e excluir": só com a exclusão permitida em todos os locais escolhidos e com a
  * confirmação digitada na tela ("EXCLUIR").
  */
-function checkDeletion(opts, body, targets, noun) {
+function checkDeletion(opts, body, targets, noun, { only = 'Somente analisar', action = 'analisar e excluir' } = {}) {
   if (!opts.deleteMatches) return;
   const blocked = targets.filter((t) => !t.allowDelete).map((t) => `"${t.name}"`);
-  if (blocked.length) throw new ScanError(`A exclusão não está permitida em ${blocked.join(', ')}. Ative "Permitir exclusão" no cadastro ${noun} ou escolha "Somente analisar".`);
-  if (String(body?.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') throw new ScanError('Para analisar e excluir, digite EXCLUIR na confirmação.');
+  if (blocked.length) throw new ScanError(`A exclusão não está permitida em ${blocked.join(', ')}. Ative "Permitir exclusão" no cadastro ${noun} ou escolha "${only}".`);
+  if (String(body?.confirmDelete || '').trim().toUpperCase() !== 'EXCLUIR') throw new ScanError(`Para ${action}, digite EXCLUIR na confirmação.`);
 }
 
 const ids = (value) => (Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string'))] : []);
@@ -292,7 +292,7 @@ export class ScanManager {
       throw new ScanError(err.message);
     }
     const opts = typeOptions(body.options);
-    checkDeletion(opts, body, targets, 'do repositório');
+    checkDeletion(opts, body, targets, 'do repositório', { only: 'Somente procurar', action: 'procurar e excluir' });
     const scan = this.store.createScan({
       kind: 'files',
       name: this.#scanName(body.name, 'Busca por tipo'),

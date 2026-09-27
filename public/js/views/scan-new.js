@@ -36,7 +36,7 @@ const MODE_TEXT = {
     analyze: ['Somente procurar', 'Gera o relatório para revisão. Depois, exclua pelo relatório: item a item, os selecionados ou todos os filtrados.'],
     delete: [
       'Procurar e excluir automaticamente',
-      'Todo arquivo dos tipos escolhidos é excluído durante a busca, sem confirmação item a item, até o limite de cada execução. Só para repositórios com "Permitir exclusão".',
+      'Todo arquivo dos tipos escolhidos é excluído durante a busca, sem confirmação item a item, até o limite de cada execução (os encontrados só pelo tipo real ficam para a revisão no relatório). Só para repositórios com "Permitir exclusão".',
     ],
     check: 'Confira os tipos escolhidos antes de continuar: todo arquivo encontrado será excluído.',
     namePlaceholder: ['Ex.: Vídeos e músicas nos compartilhamentos', 'Ex.: Limpeza semanal de vídeos e músicas'],
@@ -166,7 +166,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
               </label>
               <label class="check full">
                 <input type="checkbox" name="realType" ${chk(t.checkContent)} />
-                <span><b>Conferir o tipo real pelo conteúdo</b><br /><small class="muted">Acha arquivos renomeados (ex.: um vídeo salvo como .pdf) lendo o início dos arquivos sem extensão ou com a extensão de outro tipo da lista. Reconhece vídeos, áudios, imagens, executáveis, compactados, imagens de disco, PDF, arquivos de dados do Outlook e bancos de dados SQLite e Access; planilhas, apresentações, textos e temporários são achados só pela extensão. Extensões fora da lista (.dll, .ai...) valem pelo que são. Vale nas pastas do Windows (no OneDrive e no SharePoint, só a extensão) e deixa a busca mais lenta.</small></span>
+                <span><b>Conferir o tipo real pelo conteúdo</b><br /><small class="muted">Acha arquivos renomeados (ex.: um vídeo salvo como .pdf) lendo o início dos arquivos sem extensão ou com a extensão de outro tipo da lista. Reconhece vídeos, áudios, imagens, executáveis, compactados, imagens de disco, PDF, arquivos de dados do Outlook e bancos de dados SQLite e Access; planilhas, apresentações, textos e temporários são achados só pela extensão. Extensões fora da lista (.dll, .ai...) valem pelo que são. Vale para os tipos marcados, nas pastas do Windows (no OneDrive e no SharePoint, só a extensão), e deixa a busca mais lenta. Os encontrados só pelo tipo real nunca são excluídos automaticamente: ficam no relatório para a revisão.</small></span>
               </label>
             </div>
           </fieldset>
@@ -310,7 +310,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
       el.hidden = later;
     });
     form.querySelector('[data-name-label]').textContent = later ? 'Nome do agendamento' : types ? 'Nome da busca (opcional)' : 'Nome da análise (opcional)';
-    if (!fixed) form.querySelector('[data-title]').textContent = types ? 'Nova busca por tipo de arquivo' : 'Nova análise';
+    if (!fixed) root.querySelector('[data-title]').textContent = types ? 'Nova busca por tipo de arquivo' : 'Nova análise';
     form.elements.name.maxLength = later ? 120 : 200;
     form.elements.name.placeholder = T.namePlaceholder[later ? 1 : 0];
     submit.className = `btn ${deleting ? 'danger' : 'primary'}`;
