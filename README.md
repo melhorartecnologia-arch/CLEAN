@@ -28,6 +28,11 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   as pastas, assunto, corpo, nomes e conteúdo dos anexos (os mesmos formatos acima, inclusive
   e-mails encaminhados como anexo). O relatório mostra a caixa, a pasta, o remetente, os
   destinatários e a data de cada mensagem encontrada. Senhas e chaves ficam gravadas cifradas.
+- **OAuth 2.0 da Microsoft** em todas as formas usadas pelo Exchange Online e pelo Outlook.com:
+  aplicativo com **segredo do cliente**, aplicativo com **certificado** (gerado pelo próprio CLEAN)
+  ou **conta Microsoft conectada** (a pessoa entra com a conta pelo código de dispositivo; a
+  autorização é renovada sozinha) — também no **IMAP** do Exchange Online (XOAUTH2), que não aceita
+  mais senha.
 - **Busca por tipo de arquivo**: vídeos, músicas, imagens, executáveis, compactados, imagens de
   disco, temporários ou as extensões que você informar — com tamanho mínimo e a conferência do tipo
   real pelo conteúdo (acha um vídeo renomeado para .pdf), para revisão no relatório ou exclusão
@@ -54,6 +59,7 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
 7. [OneDrive e SharePoint](#onedrive-e-sharepoint)
 8. [Análise de caixas de e-mail](#análise-de-caixas-de-e-mail)
    - [Microsoft 365 (Exchange Online)](#microsoft-365-exchange-online)
+   - [Autenticação na Microsoft (OAuth 2.0)](#autenticação-na-microsoft-oauth-20)
    - [Google Workspace (Gmail)](#google-workspace-gmail)
    - [Servidores IMAP](#servidores-imap)
 9. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
@@ -242,8 +248,12 @@ Microsoft Graph, com as permissões de um **registro de aplicativo** (sem usuár
 
 Pode ser o mesmo das caixas de e-mail do Microsoft 365 — no formulário do repositório, escolha
 *Usar as credenciais da conexão* (as credenciais ficam ligadas à conexão de e-mail: um novo segredo
-salvo nela passa a valer também para o repositório). Em *Registros de aplicativo › (o aplicativo) ›
-Permissões de API › Adicionar › Microsoft Graph › Permissões de aplicativo*, inclua:
+ou certificado salvo nela passa a valer também para o repositório). Conexões com a **conta
+conectada** não servem para o OneDrive e o SharePoint (as permissões dela são só de e-mail): o
+repositório precisa das credenciais de um aplicativo, com segredo do cliente ou certificado.
+
+Em *Registros de aplicativo › (o aplicativo) › Permissões de API › Adicionar › Microsoft Graph ›
+Permissões de aplicativo*, inclua:
 
 | Permissão | Para quê |
 |---|---|
@@ -272,12 +282,15 @@ A seção **E-mail** procura os termos das listas de referência nas mensagens d
 cadastradas previamente:
 
 1. **Caixas de e-mail** — cadastre uma ou mais conexões. Cada conexão é de um tipo:
-   - **Microsoft 365** (Exchange Online): pela API Microsoft Graph, com um registro de aplicativo.
-     Analisa **todas as caixas do locatário** (inclusive caixas compartilhadas) ou só as informadas.
+   - **Microsoft 365** (Exchange Online; também contas pessoais do Outlook.com): pela API Microsoft
+     Graph, com OAuth 2.0 — um registro de aplicativo (segredo do cliente ou certificado), que
+     analisa **todas as caixas do locatário** (inclusive caixas compartilhadas) ou só as informadas,
+     ou uma **conta Microsoft conectada**, que analisa a caixa dela e as compartilhadas com ela.
    - **Google Workspace** (Gmail): pela API do Gmail, com uma conta de serviço com delegação em todo
      o domínio. Analisa **todas as caixas do domínio** ou só as informadas.
    - **IMAP**: qualquer servidor IMAP (Exchange local, Zimbra, Dovecot, provedores de hospedagem...),
-     com o login e a senha de cada caixa ou uma senha padrão de uma conta de serviço.
+     com o login e a senha de cada caixa ou uma senha padrão de uma conta de serviço — ou, no
+     Exchange Online e no Outlook.com, com o **OAuth 2.0 da Microsoft**.
 
    Em cada conexão é possível ignorar caixas (`noreply@*`) e pastas (`Pessoal`,
    `Caixa de Entrada/Newsletters`; aceita `*` e `?` e vale também para as subpastas). O botão
@@ -307,8 +320,18 @@ exclusão das mensagens encontradas é opcional e precisa ser liberada em cada c
 
 ### Microsoft 365 (Exchange Online)
 
-Crie um registro de aplicativo no Microsoft Entra ID (é preciso ser administrador global ou de
-aplicativos):
+O acesso é pela API Microsoft Graph, com **OAuth 2.0** do Microsoft Entra ID — a Microsoft não
+aceita senha. No formulário da conexão, em *Autenticação na Microsoft*, escolha uma das três formas
+(detalhes em [Autenticação na Microsoft](#autenticação-na-microsoft-oauth-20)):
+
+| Forma | Alcança | Quem autoriza |
+|---|---|---|
+| **Aplicativo com segredo do cliente** | Todas as caixas do locatário (ou as liberadas pelo RBAC para aplicativos). | Um administrador concede as permissões de aplicativo. |
+| **Aplicativo com certificado** | O mesmo; um certificado no lugar do segredo (recomendado pela Microsoft: não é um texto que possa vazar). | O mesmo. |
+| **Conta Microsoft conectada** | A caixa da conta que entrou e as caixas compartilhadas (ou de outras pessoas) às quais ela tem Acesso Total. Serve também para contas pessoais (Outlook.com, Hotmail). | A própria pessoa, ao entrar com a conta (ou o administrador, se a organização exigir). |
+
+Para o aplicativo (segredo ou certificado), crie um registro de aplicativo no Microsoft Entra ID (é
+preciso ser administrador global ou de aplicativos):
 
 1. Em [entra.microsoft.com](https://entra.microsoft.com), abra *Identidade › Aplicativos ›
    Registros de aplicativo › Novo registro*. Nome: `CLEAN`; tipos de conta: *somente contas deste
@@ -317,13 +340,17 @@ aplicativos):
    inclua **`Mail.Read`** e **`User.Read.All`** e clique em **Conceder consentimento do administrador**.
    (`Mail.Read` lê as mensagens; `User.Read.All` lista as caixas do locatário e encontra cada caixa
    pelo endereço de e-mail.)
-3. Em *Certificados e segredos › Novo segredo do cliente*, escolha a validade e copie o **Valor**
-   (ele só é exibido uma vez; não confunda com o *ID do segredo*). Anote a data de expiração: ao
-   vencer, gere outro e atualize a conexão no CLEAN.
+3. A credencial do aplicativo:
+   - **segredo**: em *Certificados e segredos › Novo segredo do cliente*, escolha a validade e copie
+     o **Valor** (ele só é exibido uma vez; não confunda com o *ID do segredo*). Anote a data de
+     expiração: ao vencer, gere outro e atualize a conexão no CLEAN;
+   - **certificado**: no CLEAN, clique em **Gerar certificado** e em **Baixar certificado (.cer)**;
+     no Entra ID, em *Certificados e segredos › Certificados › Carregar certificado*, envie o arquivo.
 4. Na página *Visão geral*, copie o **ID do aplicativo (cliente)** e o **ID do diretório
    (locatário)**.
-5. No CLEAN, em *Caixas de e-mail › Nova conexão › Microsoft 365*, informe os dois IDs e o segredo,
-   escolha *Todas as caixas do locatário* ou informe as caixas, e clique em *Testar conexão*.
+5. No CLEAN, em *Caixas de e-mail › Nova conexão › Microsoft 365*, informe os dois IDs e o segredo
+   (ou o certificado), escolha *Todas as caixas do locatário* ou informe as caixas, e clique em
+   *Testar conexão*.
 
 A permissão de aplicativo `Mail.Read` dá acesso de leitura a **todas** as caixas do locatário. Para
 limitar o CLEAN a algumas caixas, não conceda `Mail.Read` no Entra ID e use o **RBAC para
@@ -343,6 +370,70 @@ morto online** (In-Place Archive) não é acessível pela API; o Exchange Online
 simultâneos por caixa e, ao atingir o limite de requisições, o CLEAN espera o tempo indicado pelo
 serviço e continua (aviso no registro). Uma pasta que não pode ser lida vai para a aba *Erros* e as
 demais pastas da caixa continuam sendo analisadas.
+
+### Autenticação na Microsoft (OAuth 2.0)
+
+As três formas usam o protocolo OAuth 2.0 da plataforma de identidade da Microsoft; o CLEAN nunca
+recebe nem guarda a senha de ninguém. Os segredos, as chaves dos certificados e as autorizações das
+contas conectadas ficam gravados cifrados (veja *Credenciais e rede*) e não voltam para o navegador.
+
+**Aplicativo com segredo do cliente.** O fluxo *client credentials*: o CLEAN apresenta o ID do
+aplicativo e o segredo e recebe um token de acesso com as permissões de aplicativo concedidas pelo
+administrador. Simples de configurar, mas o segredo vence (no máximo em 2 anos) e precisa ser
+trocado no CLEAN.
+
+**Aplicativo com certificado.** O mesmo fluxo, com uma asserção assinada (JWT PS256) pela chave
+privada de um certificado no lugar do segredo — a forma recomendada pela Microsoft. **Gerar
+certificado** cria no servidor do CLEAN uma chave RSA de 2048 bits e um certificado autoassinado
+válido por 2 anos; a chave privada fica só no CLEAN (cifrada) e o arquivo `.cer` baixado tem só a
+parte pública, que é o que se envia ao registro do aplicativo. Para usar um certificado da própria
+empresa, escolha *Usar um certificado existente* e envie um arquivo PEM com o certificado e a chave
+privada sem senha (um `.pfx` pode ser convertido com
+`openssl pkcs12 -in certificado.pfx -out certificado.pem -nodes`). A tela mostra a impressão digital
+(a mesma exibida no Entra ID) e a validade, e a lista de conexões avisa quando faltam menos de 30
+dias para vencer. Os repositórios do OneDrive e do SharePoint ligados à conexão usam o mesmo
+certificado.
+
+**Conta Microsoft conectada.** Permissões delegadas: o CLEAN acessa o que a própria conta acessa.
+Configure o registro do aplicativo assim (pode ser o mesmo do aplicativo, com as permissões
+delegadas a mais):
+
+1. Em *Registros de aplicativo › Novo registro*, escolha os tipos de conta: *somente contas deste
+   diretório organizacional* (contas de trabalho ou escola) ou, para contas pessoais (Outlook.com,
+   Hotmail), *contas em qualquer diretório organizacional e contas Microsoft pessoais*.
+2. Em *Autenticação*, ative **Permitir fluxos de cliente público** (*Sim*) e salve — é o que permite
+   a entrada pelo código de dispositivo. Não é preciso URI de redirecionamento.
+3. Em *Permissões de API › Adicionar uma permissão › Microsoft Graph › Permissões delegadas*, inclua
+   **`User.Read`**, **`Mail.Read`** e **`Mail.Read.Shared`** (para a exclusão, **`Mail.ReadWrite`** e
+   **`Mail.ReadWrite.Shared`**). A própria pessoa autoriza essas permissões ao entrar; se a
+   organização não permitir que usuários autorizem aplicativos, o administrador clica em *Conceder
+   consentimento do administrador*.
+4. No CLEAN, informe o **ID do locatário** (o GUID ou o domínio; também `organizations`, para
+   qualquer conta de trabalho ou escola, ou `consumers`, para contas pessoais) e o **ID do
+   aplicativo**, clique em **Conectar conta** e siga as instruções: abra
+   [microsoft.com/devicelogin](https://microsoft.com/devicelogin) em qualquer navegador (inclusive no
+   celular), digite o código mostrado e entre com a conta. A tela mostra a conta conectada; salve a
+   conexão.
+
+Com a conta conectada, as caixas analisadas são as da lista: a caixa da própria conta (lida em
+`/me`) e caixas compartilhadas ou de outras pessoas às quais ela tenha **Acesso Total** no Exchange
+Online (em branco, só a caixa da conta). Caixas compartilhadas não existem em contas pessoais, e com
+`common` ou `consumers` a permissão `Mail.Read.Shared` não é pedida — para elas, informe o locatário.
+
+A Microsoft devolve um novo token de atualização a cada uso; o CLEAN grava o novo (cifrado) a cada
+análise, teste ou exclusão. A autorização vence depois de **90 dias sem uso** (ou antes, se a senha
+for trocada, as sessões forem encerradas ou o acesso condicional exigir nova verificação): nesse
+caso, o erro da análise pede para entrar de novo — edite a conexão e clique em *Conectar conta*.
+Para a exclusão das mensagens, a entrada precisa ter autorizado a escrita: marque *Permitir
+excluir* **antes** de clicar em *Conectar conta* (a tela avisa quando a conta conectada autorizou só
+a leitura). Trocar o locatário, o aplicativo ou o tipo da conexão exige conectar a conta de novo.
+Os repositórios do OneDrive e do SharePoint não usam a conta conectada (as permissões dela são só de
+e-mail).
+
+Mensagens comuns na entrada: *Permitir fluxos de cliente público* desativado (AADSTS7000218);
+aplicativo de um só locatário com `organizations`/`common` (AADSTS50194: informe o ID do
+locatário); permissões que precisam do administrador (AADSTS90094/65001); bloqueio por acesso
+condicional (AADSTS53003). Cada uma aparece na tela com a providência a tomar.
 
 ### Google Workspace (Gmail)
 
@@ -390,20 +481,54 @@ Com uma conta de serviço, não é preciso saber a senha de cada usuário:
 - **Provedores de hospedagem** e outros servidores: o login e a senha de cada caixa (ou uma senha de
   aplicativo, quando o provedor exige verificação em duas etapas).
 
-O Microsoft 365 e o Gmail não aceitam mais senha simples por IMAP: para eles, use os tipos próprios
-acima. No Gmail via IMAP, a pasta *Todos os e-mails* é analisada uma única vez (com os marcadores),
-sem repetir as mensagens de cada marcador.
+O Gmail não aceita mais senha simples por IMAP (use o tipo Google Workspace ou uma senha de
+aplicativo). No Gmail via IMAP, a pasta *Todos os e-mails* é analisada uma única vez (com os
+marcadores), sem repetir as mensagens de cada marcador.
+
+**Exchange Online e Outlook.com por IMAP (OAuth 2.0 da Microsoft).** A Microsoft desativou o login
+com senha no IMAP: em *Autenticação*, escolha **OAuth 2.0 da Microsoft**. O servidor é
+`outlook.office365.com` (porta 993, SSL/TLS) e o login de cada caixa é feito com um token da
+Microsoft (XOAUTH2), sem senha — com as mesmas três formas do Microsoft 365:
+
+- **conta conectada** (o mais comum): no registro do aplicativo, ative *Permitir fluxos de cliente
+  público* e inclua a permissão delegada **`IMAP.AccessAsUser.All`** (*Microsoft Graph › Permissões
+  delegadas*); clique em *Conectar conta* e entre com a conta. Analisa a caixa da conta e as caixas
+  a que ela tem Acesso Total (informe-as na lista; em branco, a caixa da conta);
+- **aplicativo** (segredo ou certificado): inclua a permissão de aplicativo **`IMAP.AccessAsApp`**
+  (*APIs que minha organização usa › Office 365 Exchange Online*), conceda o consentimento do
+  administrador e, no Exchange Online, registre o aplicativo e dê a ele Acesso Total a cada caixa:
+
+  ```powershell
+  Connect-ExchangeOnline
+  New-ServicePrincipal -AppId <ID do aplicativo> -ObjectId <ID de objeto> -DisplayName 'CLEAN'
+  Add-MailboxPermission -Identity financeiro@empresa.com.br -User <ID de objeto> -AccessRights FullAccess
+  ```
+
+O IMAP precisa estar habilitado nas caixas (centro de administração do Microsoft 365 › Usuários › a
+pessoa › Email › Gerenciar aplicativos de email). Por segurança, o CLEAN só envia o token da
+Microsoft aos servidores IMAP da Microsoft (`outlook.office365.com`, `outlook.office.com` e
+`imap-mail.outlook.com`), com o certificado do servidor verificado — em qualquer outro endereço, o
+token daria acesso à caixa a quem o recebesse. Com uma senha num desses servidores, o formulário e o
+erro da análise explicam como passar para o OAuth. Para o Exchange Online, o tipo **Microsoft 365**
+costuma ser a melhor escolha (identificadores que sobrevivem à mudança de pasta, links para o
+Outlook na Web e o tamanho de cada mensagem sem baixá-la).
 
 ### Credenciais e rede
 
-- Senhas, segredos do cliente e chaves privadas são gravados **cifrados** (AES-256-GCM) no
+- Senhas, segredos do cliente, chaves privadas (inclusive a dos certificados gerados pelo CLEAN) e
+  os tokens de atualização das contas Microsoft conectadas são gravados **cifrados** (AES-256-GCM) no
   `db.json`. A chave fica em `data\chave-segredos.key` (criada na primeira execução) ou na variável
   `CLEAN_SECRET_KEY`. **Faça cópia da chave junto com o backup da pasta `data`**: sem ela, as senhas
   precisam ser informadas de novo.
 - As credenciais nunca voltam para o navegador: nos formulários, deixar um campo de senha em branco
   mantém a senha salva. Ao trocar o servidor IMAP, as senhas salvas são descartadas (e precisam ser
   informadas de novo), para que não sejam enviadas a outro endereço.
-- O CLEAN precisa acessar `login.microsoftonline.com` e `graph.microsoft.com` (Microsoft 365) ou
+- A entrada de uma conta Microsoft pelo código acontece no navegador de quem entra
+  (`microsoft.com/devicelogin`, em qualquer computador ou celular): o servidor do CLEAN não precisa
+  de acesso a essa página, só ao `login.microsoftonline.com`. Uma entrada concluída fica na memória do
+  servidor por até 2 horas, e um certificado gerado por até 24 horas, até a conexão ser salva.
+- O CLEAN precisa acessar `login.microsoftonline.com` e `graph.microsoft.com` (Microsoft 365; no
+  IMAP com OAuth, também `outlook.office365.com` na porta 993) ou
   `oauth2.googleapis.com`, `gmail.googleapis.com` e `admin.googleapis.com` (Google) pela porta 443.
   Para o OneDrive e o SharePoint, também `*.sharepoint.com` (o conteúdo dos arquivos é baixado de
   lá; sem esse acesso, só os nomes são verificados).
@@ -476,7 +601,7 @@ Como cada tipo é excluído e a permissão necessária:
 | Onde | Exclusão | Permissão |
 |---|---|---|
 | Arquivos (pastas e compartilhamentos) | **Definitiva**: arquivos apagados pela rede não vão para a Lixeira do Windows. Arquivos somente leitura também são excluídos. | A conta do CLEAN precisa de permissão de **modificação** (NTFS e compartilhamento), não só de leitura. |
-| Microsoft 365 | *Excluir definitivamente* (a mensagem vai para a área de expurgo e some para o usuário) ou *Mover para a Lixeira* (Itens Excluídos), conforme a conexão. | **`Mail.ReadWrite`** (tipo Aplicativo) no lugar de `Mail.Read`; com o RBAC para aplicativos, a função `Application Mail.ReadWrite`. |
+| Microsoft 365 | *Excluir definitivamente* (a mensagem vai para a área de expurgo e some para o usuário) ou *Mover para a Lixeira* (Itens Excluídos), conforme a conexão. | Aplicativo: **`Mail.ReadWrite`** (tipo Aplicativo) no lugar de `Mail.Read`; com o RBAC para aplicativos, a função `Application Mail.ReadWrite`. Conta conectada: **`Mail.ReadWrite`** e **`Mail.ReadWrite.Shared`** (delegadas), autorizadas ao conectar a conta com *Permitir excluir* marcado. |
 | Google Workspace | Definitiva ou para a Lixeira, conforme a conexão. | Na delegação em todo o domínio, inclua o escopo `https://mail.google.com/` (definitiva) ou `https://www.googleapis.com/auth/gmail.modify` (lixeira). |
 | OneDrive e SharePoint | *Mover para a Lixeira* do site ou do OneDrive (padrão; o usuário ou o administrador do site pode restaurar por até 93 dias) ou *Excluir definitivamente*, conforme o repositório. Só se o arquivo continuar como foi analisado (mesma versão, mesmo nome e mesma pasta — conferido antes e, pelo cabeçalho If-Match, também na própria exclusão); arquivos abertos para edição, em check-out ou com rótulo de retenção (registro) não são excluídos. | **`Files.ReadWrite.All`** (ou `Sites.ReadWrite.All`; com `Sites.Selected`, permissão `Write` no site). |
 | IMAP | *Definitiva*: marca e expurga só as mensagens encontradas (UID EXPUNGE); o servidor precisa oferecer a extensão **UIDPLUS** — sem ela, a exclusão definitiva é recusada, porque um expurgo comum apagaria também as outras mensagens marcadas como excluídas na pasta. *Para a Lixeira*: move para a pasta Lixeira do servidor (MOVE; sem MOVE, copia, confere a cópia e só então expurga, o que também exige UIDPLUS); mensagens que já estão na Lixeira ficam lá. No **Gmail via IMAP**, a exclusão definitiva move para a Lixeira e expurga de lá (expurgar de outra pasta só tiraria o marcador). | A conta precisa poder alterar a caixa. |
@@ -866,7 +991,9 @@ lista, dados pessoais e senhas encontradas. Por isso:
   as decifra), por exemplo:
   `icacls C:\CLEAN\data /inheritance:r /grant:r "Administradores:(OI)(CI)F" "EMPRESA\svc-clean:(OI)(CI)M"`;
 - dê à conexão de e-mail apenas o acesso necessário (permissões de leitura; no Microsoft 365, de
-  preferência limitado às caixas analisadas pelo RBAC para aplicativos) e, no SharePoint, prefira
+  preferência limitado às caixas analisadas pelo RBAC para aplicativos, ou uma conta conectada que
+  só alcança as caixas dela e as compartilhadas com ela) e prefira o certificado ao segredo do
+  cliente (a chave privada fica só no servidor do CLEAN); no SharePoint, prefira
   `Sites.Selected` com os sites liberados um a um (`Files.Read.All` dá acesso a todos os arquivos do
   locatário); só conceda permissões de escrita e marque *Permitir exclusão* onde a exclusão for
   realmente usada;
@@ -922,6 +1049,9 @@ src/
     recurrence.js                          regras de recorrência: validação, próximas execuções e descrição
     scheduler.js                           agendador: horários, sobreposição, horários perdidos, período e retenção
   cloud/
+    microsoft-auth.js                      OAuth 2.0 da Microsoft: segredo, certificado (asserção PS256), conta conectada (código de dispositivo e renovação)
+    certificate.js                         certificado autoassinado (X.509) e importação em PEM
+    pending-credentials.js                 entradas de contas e certificados ainda não salvos (memória)
     graph-client.js                        cliente do Microsoft Graph (token, novas tentativas, paginação)
     drives.js                              OneDrive e SharePoint: contas, sites, bibliotecas, arquivos, exclusão
   scan/
@@ -947,5 +1077,6 @@ scripts/criar-dados-demo.js                dados de demonstração
 
 Os testes dos scripts PowerShell usam versões simuladas de `Get-Acl` e `Get-WinEvent` e rodam no
 Windows ou onde houver PowerShell 7 (`pwsh`); sem PowerShell, são ignorados. Os testes de e-mail usam
-servidores simulados do Microsoft Graph (inclusive OneDrive e SharePoint), das APIs do Google e de
-IMAP (`test/helpers`), sem acesso à internet.
+servidores simulados do Microsoft Entra ID (segredo, certificado, código de dispositivo e renovação
+dos tokens), do Microsoft Graph (inclusive OneDrive e SharePoint e o acesso delegado), das APIs do
+Google e de IMAP (com XOAUTH2) (`test/helpers`), sem acesso à internet.

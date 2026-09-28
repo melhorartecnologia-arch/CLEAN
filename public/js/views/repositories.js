@@ -18,7 +18,8 @@ function repoForm(repo, ctx, mailSources) {
   const cloud = repo?.cloud || {};
   const scope = cloud.scope || 'all';
   const defaults = (ctx.info?.defaultExcludes || []).join(', ');
-  const m365 = mailSources.filter((s) => s.type === 'graph');
+  // Conexões do Microsoft 365 com credenciais de aplicativo (a conta conectada só tem permissões de e-mail).
+  const m365 = mailSources.filter((s) => s.type === 'graph' && s.graph?.auth !== 'delegated');
   return html`<div class="form-grid">
     <label class="field full">
       <span>Nome</span>
@@ -53,9 +54,9 @@ function repoForm(repo, ctx, mailSources) {
             <span>Credenciais</span>
             <select name="credentialsFrom">
               <option value="">Informar manualmente</option>
-              ${m365.map((s) => html`<option value="${s.id}" ${repo?.credentialsFrom === s.id ? 'selected' : ''}>Usar as credenciais da conexão "${s.name}"</option>`)}
+              ${m365.map((s) => html`<option value="${s.id}" ${repo?.credentialsFrom === s.id ? 'selected' : ''}>Usar as credenciais da conexão "${s.name}"${s.graph?.auth === 'certificate' ? ' (certificado)' : ''}</option>`)}
             </select>
-            <small>O mesmo registro de aplicativo pode ler e-mails e arquivos (inclua nele as permissões de arquivos abaixo). As credenciais ficam ligadas à conexão: um novo segredo salvo nela também vale aqui.</small>
+            <small>O mesmo registro de aplicativo pode ler e-mails e arquivos (inclua nele as permissões de arquivos abaixo). As credenciais ficam ligadas à conexão: um novo segredo (ou certificado) salvo nela também vale aqui. Conexões com a conta conectada não aparecem: o OneDrive e o SharePoint precisam das permissões de um aplicativo.</small>
           </label>`
         : ''}
       <div class="form-grid" data-credentials>
