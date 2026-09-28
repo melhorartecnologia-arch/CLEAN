@@ -330,7 +330,7 @@ export function mailSourcesRouter({ store, manager = null, scheduler = null, end
         if (result.status === 'slow_down') flow.interval = Math.min(flow.interval + 5, 60);
         if (result.status === 'connected') await completeSignIn(flow, result.tokens);
       } catch (err) {
-        if (err?.retryable || err?.name === 'TimeoutError') flow.notice = `Falha momentânea ao consultar a Microsoft (${microsoftError(err)}). Tentando de novo…`;
+        if (err?.retryable || err?.name === 'TimeoutError') flow.notice = `Falha momentânea ao consultar a Microsoft (${microsoftError(err).replace(/\.$/, '')}). Tentando de novo…`;
         else Object.assign(flow, { status: 'failed', error: microsoftError(err), deviceCode: null });
       } finally {
         flow.nextPoll = Date.now() + flow.interval * 1000;

@@ -3,7 +3,7 @@
 // com contas de serviço, ex.: "DOMINIO\servico\caixa" no Exchange ou "caixa*mestre" no Dovecot).
 // No Exchange Online e no Outlook.com (que não aceitam mais senha), o login é por OAuth 2.0 da
 // Microsoft (XOAUTH2): com a conta conectada ou com um aplicativo (segredo do cliente ou certificado).
-import { ApiError } from './http.js';
+import { ApiError, sleep } from './http.js';
 import { folderMatcher, addressMatcher, normalizeAddress, deletionItems, normalizeMessageId } from './common.js';
 import { MicrosoftAuth, MICROSOFT_IMAP_HOSTS } from '../cloud/microsoft-auth.js';
 
@@ -17,12 +17,15 @@ const BATCH_BYTES = 32 * 1024 * 1024;
 // comando de alguns servidores (10 KB no Exchange).
 const DELETE_CHUNK = 200;
 // Login OAuth: o Exchange Online encerra a sessão IMAP quando o token vence. Cada sessão começa com um
-// token válido por ao menos 30 minutos, e é renovada antes de abrir uma pasta se faltarem menos de 5.
+// token válido por ao menos 30 minutos e é trocada por outra (aberta antes de fechar a atual) quando
+// faltam menos de 5 — entre as pastas e entre os lotes de mensagens de uma pasta.
 const OAUTH_SESSION_MIN_MS = 30 * 60 * 1000;
 const OAUTH_RENEW_MS = 5 * 60 * 1000;
-// Quedas da sessão numa mesma caixa (token vencido, rede): a leitura continua numa nova sessão, de onde
-// parou; depois de tantas quedas, o restante da caixa fica como erro.
-const MAX_SESSION_DROPS = 5;
+// Sessão que cai (token vencido, rede): a leitura continua numa nova sessão, de onde parou. Só desiste
+// da caixa depois de tantas falhas seguidas sem ler nenhuma mensagem (quedas ou reconexões recusadas),
+// com uma pausa crescente entre as tentativas.
+const MAX_FAILED_SESSIONS = 5;
+const reconnectPause = (failures) => Math.min(1000 * 2 ** (failures - 1), 15000);
 
 /** Problema da própria pasta (e não da sessão): não adianta tentar de novo em outra sessão. */
 const folderProblem = (message) => Object.assign(new ApiError(message), { folderProblem: true });
@@ -269,7 +272,47 @@ export class ImapConnector {
    */
   async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, onFolder } = {}) {
     let session = await this.connect(mailbox);
-    let drops = 0;
+    let read = 0; // mensagens entregues pela sessão atual
+    let failures = 0; // falhas seguidas sem ler nenhuma mensagem (quedas e reconexões recusadas)
+    // Troca planejada (token perto de vencer): a nova sessão é aberta antes de fechar a atual; se não
+    // abrir, a atual continua até cair (a queda é tratada como as outras).
+    const renewDue = () => session.expiresAt - Date.now() < OAUTH_RENEW_MS && !session.keep;
+    const renew = async () => {
+      try {
+        const next = await this.connect(mailbox);
+        await session.dispose();
+        session = next;
+        read = 0;
+        // Tokens que valem menos que a margem (política do locatário): trocar de novo não adianta.
+        if (renewDue()) session.keep = true;
+      } catch (err) {
+        if (this.signal?.aborted) throw this.signal.reason;
+        session.keep = true;
+      }
+    };
+    // A sessão caiu: abre outra (com pausas crescentes entre as tentativas). Devolve o erro que faz
+    // desistir da caixa, ou null.
+    const reconnect = async () => {
+      // A sessão que caiu depois de ler mensagens é reaberta na hora; quedas sem nenhuma leitura contam
+      // como falhas.
+      failures = read > 0 ? 0 : failures + 1;
+      await session.dispose();
+      for (;;) {
+        if (failures > MAX_FAILED_SESSIONS) {
+          return new ApiError(`A sessão com o servidor IMAP caiu (ou não pôde ser reaberta) ${MAX_FAILED_SESSIONS} vezes seguidas sem ler nenhuma mensagem: o restante da caixa não foi lido.`);
+        }
+        if (failures > 0) await sleep(reconnectPause(failures), this.signal);
+        try {
+          session = await this.connect(mailbox);
+          read = 0;
+          if (renewDue()) session.keep = true;
+          return null;
+        } catch (err) {
+          if (this.signal?.aborted) throw this.signal.reason;
+          failures++;
+        }
+      }
+    };
     try {
       const gmail = session.client.capabilities?.has?.('X-GM-EXT-1');
       for (const folder of await this.folders(session.client, { includeTrash, includeJunk })) {
@@ -278,26 +321,28 @@ export class ImapConnector {
         // Mensagens já entregues desta pasta (uma nova sessão continua sem repeti-las).
         const state = { validity: null, delivered: new Set() };
         for (;;) {
-          const dropped = !session.client.usable;
-          // Sessão perdida, ou token perto de vencer: abre outra antes de continuar.
-          if (dropped || session.expiresAt - Date.now() < OAUTH_RENEW_MS) {
-            if (dropped && ++drops > MAX_SESSION_DROPS) {
-              yield { folder: folder.display, id: null, raw: null, error: new ApiError(`A conexão com o servidor IMAP caiu ${MAX_SESSION_DROPS} vezes durante a leitura da caixa: o restante dela não foi lido.`) };
+          if (session.client.usable && renewDue()) await renew();
+          if (!session.client.usable) {
+            const stop = await reconnect();
+            if (stop) {
+              yield { folder: folder.display, id: null, raw: null, error: stop };
               return;
             }
-            await session.dispose();
-            session = await this.connect(mailbox);
           }
           let failure = null;
           try {
-            yield* this.folderMessages(session.client, folder, state, { gmail, since, before, headersOnly, maxBytes });
+            for await (const item of this.folderMessages(session.client, folder, state, { gmail, since, before, headersOnly, maxBytes, renewDue })) {
+              read++;
+              failures = 0;
+              yield item;
+            }
           } catch (err) {
             if (this.signal?.aborted) throw this.signal.reason;
             failure = err;
           }
           if (!failure) break;
-          // A sessão caiu no meio da pasta: continua a mesma pasta numa nova sessão.
-          if (!session.client.usable && !failure.folderProblem) continue;
+          // Token perto de vencer no meio da pasta, ou a sessão caiu: continua a mesma pasta em outra.
+          if (failure.renewSession || (!session.client.usable && !failure.folderProblem)) continue;
           yield { folder: folder.display, id: null, raw: null, error: this.error(failure) };
           break;
         }
@@ -310,9 +355,11 @@ export class ImapConnector {
   /**
    * As mensagens de uma pasta ainda não entregues (state.delivered), na sessão dada. Um erro da
    * sessão (conexão perdida) é lançado para messages() continuar em outra; um problema da própria
-   * pasta vem com folderProblem.
+   * pasta vem com folderProblem. renewDue(): o token da sessão está para vencer — entre um lote e
+   * outro, a leitura para (renewSession) e continua numa nova sessão.
    */
-  async *folderMessages(client, folder, state, { gmail, since, before, headersOnly, maxBytes }) {
+  async *folderMessages(client, folder, state, { gmail, since, before, headersOnly, maxBytes, renewDue = () => false }) {
+    const pause = () => Object.assign(new Error('Renovar a sessão IMAP.'), { renewSession: true });
     let lock;
     try {
       lock = await client.getMailboxLock(folder.path, { readOnly: true });
@@ -374,6 +421,7 @@ export class ImapConnector {
       });
       for (const batch of batches(small)) {
         if (this.signal?.aborted) return;
+        if (renewDue()) throw pause();
         const byUid = new Map(batch.map((m) => [m.uid, m]));
         const items = [];
         for await (const m of client.fetch(packUids(batch.map((b) => b.uid)), { uid: true, source: true }, { uid: true })) items.push(m);
@@ -381,6 +429,7 @@ export class ImapConnector {
       }
       for (const info of large) {
         if (this.signal?.aborted) return;
+        if (renewDue()) throw pause();
         const m = await client.fetchOne(String(info.uid), { uid: true, source: { start: 0, maxLength: maxBytes } }, { uid: true });
         // O Exchange informa um tamanho estimado: só está cortada se veio até o limite.
         if (m) yield deliver(info.uid, make(info, m.source, (m.source?.length || 0) >= maxBytes));

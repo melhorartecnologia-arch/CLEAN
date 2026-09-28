@@ -506,12 +506,14 @@ um token da Microsoft (XOAUTH2) no lugar da senha — com as mesmas três formas
 
 O IMAP precisa estar habilitado nas caixas (centro de administração do Microsoft 365 › Usuários › a
 pessoa › Email › Gerenciar aplicativos de email). O Exchange Online encerra a sessão IMAP quando o
-token vence: o CLEAN abre cada sessão com um token válido por ao menos 30 minutos, renova a sessão
-antes de abrir uma pasta quando o token está para vencer e, se a sessão cair no meio de uma pasta,
-continua a leitura numa nova sessão, de onde parou (sem repetir nem pular mensagens). Por segurança, o CLEAN só envia o token da
-Microsoft aos servidores IMAP da Microsoft (`outlook.office365.com`, `outlook.office.com` e
-`imap-mail.outlook.com`), com o certificado do servidor verificado — em qualquer outro endereço, o
-token daria acesso à caixa a quem o recebesse. Com uma senha num desses servidores, o formulário e o
+token vence: o CLEAN abre cada sessão com um token válido por ao menos 30 minutos e troca a sessão
+por outra quando o token está para vencer (entre as pastas e entre os lotes de mensagens); se a
+sessão cair assim mesmo, a leitura continua numa nova sessão, de onde parou (sem repetir nem pular
+mensagens), e só desiste da caixa depois de cinco falhas seguidas sem ler nenhuma mensagem.
+
+Por segurança, o CLEAN só envia o token da Microsoft aos servidores IMAP da Microsoft
+(`outlook.office365.com`, `outlook.office.com` e `imap-mail.outlook.com`), com o certificado do
+servidor verificado — em qualquer outro endereço, o token daria acesso à caixa a quem o recebesse. Com uma senha num desses servidores, o formulário e o
 erro da análise explicam como passar para o OAuth. Para o Exchange Online, o tipo **Microsoft 365**
 costuma ser a melhor escolha (identificadores que sobrevivem à mudança de pasta, links para o
 Outlook na Web e o tamanho de cada mensagem sem baixá-la).

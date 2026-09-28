@@ -173,11 +173,9 @@ export function toast(message, kind = 'info') {
 
 /**
  * Abre um formulário em diálogo modal. onSubmit(form) pode lançar erro (exibido no diálogo) ou
- * devolver false para manter o diálogo aberto.
- */
-/**
- * Diálogo com formulário. beforeClose(form): mensagem para avisar antes de fechar sem salvar (Esc,
- * Cancelar ou ×) — ex.: algo que só é guardado ao salvar; a segunda tentativa fecha. null: fecha direto.
+ * devolver false para manter o diálogo aberto. beforeClose(form): mensagem para avisar antes de fechar
+ * sem salvar (Esc, Cancelar ou ×) — ex.: algo que só é guardado ao salvar; repetir o pedido com o
+ * mesmo aviso fecha. null: fecha direto.
  */
 export function openDialog({ title, body, submitLabel = 'Salvar', cancelLabel = 'Cancelar', wide = false, danger = false, describe = true, onOpen, onSubmit, beforeClose }) {
   const dialog = document.getElementById('modal');
@@ -206,17 +204,19 @@ export function openDialog({ title, body, submitLabel = 'Salvar', cancelLabel = 
   const errorBox = dialog.querySelector('.dialog-error');
   return new Promise((resolve) => {
     let result = null;
-    let warned = false;
+    let warned = null; // o último aviso mostrado: pedir de novo com o mesmo aviso fecha
     const close = () => dialog.close();
     // Fechar sem salvar: com beforeClose, o primeiro pedido só avisa (o aviso aparece no lugar dos erros).
     const cancel = (event) => {
-      const message = !warned && beforeClose ? beforeClose(form) : null;
-      if (!message) {
+      // "cancel" também vem de dentro do diálogo (ex.: a janela de escolher arquivo fechada sem escolher).
+      if (event?.type === 'cancel' && event.target !== dialog) return;
+      const message = beforeClose ? beforeClose(form) : null;
+      if (!message || message === warned) {
         if (event?.type !== 'cancel') close();
         return;
       }
       event?.preventDefault();
-      warned = true;
+      warned = message;
       render(errorBox, html`<div class="alert" role="alert">${icon('alert')}<div>${message}</div></div>`);
       errorBox.hidden = false;
     };

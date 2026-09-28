@@ -88,9 +88,9 @@ function refreshTokenFor(user, scopes) {
   return token;
 }
 
-async function runMail(sources, endpoints = mocks.endpoints) {
+async function runMail(sources, endpoints = mocks.endpoints, options = {}) {
   const messages = [];
-  const scanner = new MailScanner({ sources, terms: TERMS, options: {}, endpoints }, (m) => messages.push(m));
+  const scanner = new MailScanner({ sources, terms: TERMS, options, endpoints }, (m) => messages.push(m));
   const stats = await scanner.run();
   return {
     stats,
@@ -360,6 +360,116 @@ test('IMAP com OAuth: a sessão que cai (token vencido) continua numa nova, sem 
     assert.equal(refreshes() - before, oauthLogins.length, 'cada sessão com um token novo (o guardado vale menos de 30 min)');
   } finally {
     graph.tokenLifetime = lifetime;
+    await server.close();
+  }
+});
+
+/** Conexão IMAP com OAuth (conta conectada) no servidor de teste dado. */
+const imapOAuthSource = (port) => ({
+  id: 'src-imap-sessoes',
+  name: 'IMAP sessões',
+  type: 'imap',
+  scope: 'list',
+  mailboxes: [{ address: 'ana@contoso.com' }],
+  excludeMailboxes: [],
+  excludeFolders: [],
+  imap: { host: '127.0.0.1', port, security: 'none', auth: 'oauth' },
+  graph: { tenantId: TENANT, clientId: CLIENT, auth: 'delegated', account: { username: 'ana@contoso.com', address: 'ana@contoso.com', scopes: [IMAP_SCOPE], grantId: 'g-sessoes' } },
+  secrets: { refreshToken: refreshTokenFor('ana@contoso.com', [IMAP_SCOPE]) },
+});
+const imapEndpoints = () => ({ ...mocks.endpoints, microsoftImap: { hosts: ['127.0.0.1'], insecure: true } });
+const bigMessage = (n) => ({ raw: mail(`Grande ${n}`, `confidencial ${'x'.repeat(1100000)}`), date: new Date('2026-09-20T10:00:00Z') });
+const smallMessage = (n) => ({ raw: mail(`Pequena ${n}`, 'confidencial'), date: new Date('2026-09-20T10:00:00Z') });
+
+test('IMAP com OAuth: só desiste depois de quedas seguidas sem leitura; reconexão recusada é tentada de novo', async () => {
+  const oauthLogins = [];
+  let attempts = 0;
+  // Cada sessão lê uma mensagem grande e cai (2 FETCH por sessão): 8 quedas, todas com leitura.
+  const server = await startFakeImap(
+    { 'ana@contoso.com': { password: 'x', folders: { INBOX: [1, 2, 3, 4, 5, 6, 7, 8].map(bigMessage), Arquivo: [smallMessage(1)] } } },
+    {
+      oauthLogins,
+      dropAfterFetches: 2,
+      // A 3ª tentativa de login é recusada uma vez (ex.: falha momentânea do Exchange Online).
+      oauth: (login, token) => ++attempts !== 3 && imapTokenUser(token) === login,
+    },
+  );
+  try {
+    // Limite de 1 MB: cada mensagem grande é baixada sozinha (um FETCH).
+    const { records, errors } = await runMail([imapOAuthSource(server.port)], imapEndpoints(), { maxMessageSizeMB: 1 });
+    assert.deepEqual(errors, []);
+    assert.equal(records.length, 9, 'todas, uma vez cada');
+    assert.equal(new Set(records.map((r) => r.subject)).size, 9);
+    assert.ok(oauthLogins.length >= 9, `uma sessão por mensagem grande (${oauthLogins.length})`);
+  } finally {
+    await server.close();
+  }
+  // Quedas seguidas sem ler nada: desiste da caixa, com a explicação.
+  const stuck = await startFakeImap({ 'ana@contoso.com': { password: 'x', folders: { INBOX: [smallMessage(1)] } } }, { dropAfterFetches: 1, oauth: (login, token) => imapTokenUser(token) === login });
+  try {
+    const started = Date.now();
+    const { records, errors } = await runMail([imapOAuthSource(stuck.port)], imapEndpoints());
+    assert.equal(records.length, 0);
+    assert.match(errors.at(-1).message, /caiu \(ou não pôde ser reaberta\) 5 vezes seguidas sem ler nenhuma mensagem/);
+    assert.ok(Date.now() - started > 5000, 'com pausas entre as tentativas');
+  } finally {
+    await stuck.close();
+  }
+});
+
+test('IMAP com OAuth: troca a sessão antes de o token vencer, e não fica trocando com tokens curtos', async () => {
+  const oauthLogins = [];
+  const server = await startFakeImap(
+    { 'ana@contoso.com': { password: 'x', folders: { INBOX: [smallMessage(1), smallMessage(2)], Arquivo: [smallMessage(3)] } } },
+    { oauthLogins, oauth: (login, token) => imapTokenUser(token) === login },
+  );
+  const lifetime = graph.tokenLifetime;
+  try {
+    // O 1º token vale 4 minutos (menos que a margem de 5): a sessão é trocada logo, com um token novo.
+    graph.tokenLifetimes = [240];
+    const renewed = await runMail([imapOAuthSource(server.port)], imapEndpoints());
+    assert.deepEqual(renewed.errors, []);
+    assert.equal(renewed.records.length, 3);
+    assert.equal(oauthLogins.length, 2, 'uma troca planejada, sem queda');
+    // Todos os tokens valem 4 minutos: trocar não adianta, e a leitura segue na mesma sessão.
+    oauthLogins.length = 0;
+    graph.tokenLifetime = 240;
+    const short = await runMail([imapOAuthSource(server.port)], imapEndpoints());
+    assert.deepEqual(short.errors, []);
+    assert.equal(short.records.length, 3);
+    assert.equal(oauthLogins.length, 2, 'uma troca só (o novo token também é curto)');
+  } finally {
+    graph.tokenLifetimes = null;
+    graph.tokenLifetime = lifetime;
+    await server.close();
+  }
+});
+
+test('IMAP: a leitura de uma pasta para entre os lotes para trocar a sessão e continua de onde parou', async () => {
+  const messages = Array.from({ length: 120 }, (_, i) => smallMessage(i + 1));
+  const server = await startFakeImap({ 'ana@contoso.com': { password: 'p', folders: { INBOX: messages } } });
+  const { ImapConnector } = await import('../src/mail/imap.js');
+  const connector = new ImapConnector({ imap: { host: '127.0.0.1', port: server.port, security: 'none' }, secrets: { defaultPassword: 'p' }, mailboxes: [] });
+  const folder = { path: 'INBOX', display: 'INBOX', all: false, inTrash: false };
+  const state = { validity: null, delivered: new Set() };
+  const options = { gmail: false, since: null, before: null, headersOnly: false, maxBytes: 50 * 1048576 };
+  try {
+    let session = await connector.connect({ address: 'ana@contoso.com' });
+    const first = [];
+    let batches = 0;
+    await assert.rejects(async () => {
+      // Depois do 1º lote (50 mensagens), o token "está para vencer".
+      for await (const item of connector.folderMessages(session.client, folder, state, { ...options, renewDue: () => batches++ > 0 })) first.push(item.id);
+    }, (err) => err.renewSession === true);
+    assert.equal(first.length, 50);
+    await session.dispose();
+    session = await connector.connect({ address: 'ana@contoso.com' });
+    const rest = [];
+    for await (const item of connector.folderMessages(session.client, folder, state, options)) rest.push(item.id);
+    await session.dispose();
+    assert.equal(rest.length, 70, 'as que faltavam');
+    assert.equal(new Set([...first, ...rest]).size, 120, 'sem repetir');
+  } finally {
     await server.close();
   }
 });

@@ -154,7 +154,8 @@ function drivesApi({ req, res, path, url, base, graph, find, json }) {
  *          publicClientDisabled?, declined?, revoked?, refreshTokens: { [token]: { user, scopes } }
  *          (tokens de atualização válidos; cada renovação devolve outro e o antigo continua valendo,
  *          como no Entra ID), issued: [tokens emitidos] },
- *          tokenLifetime? (segundos de validade dos tokens de acesso; padrão 3600) }
+ *          tokenLifetime? (segundos de validade dos tokens de acesso; padrão 3600), tokenLifetimes?:
+ *          [segundos] (validade de cada um dos próximos tokens, em ordem; depois, tokenLifetime) }
  * google: { publicKey, admin, users: [{ mail, name, disabled?, labels: [{ id, name, type }],
  *          messages: [{ id, raw, labelIds, internalDate }] }], flakyDelete? }
  */
@@ -234,6 +235,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
         if (tenant !== graph.tenant && !(delegatedGrant && ['organizations', 'common', 'consumers'].includes(tenant))) return json(res, 400, { error: 'invalid_request', error_description: 'AADSTS90002: Tenant not found.' });
         if (form.get('client_id') !== graph.clientId) return json(res, 400, { error: 'unauthorized_client', error_description: 'AADSTS700016: Application not found.' });
         (graph.tokenRequests ||= []).push({ endpoint: login[2], grant, scope: form.get('scope') || '' });
+        const lifetime = () => (graph.tokenLifetimes?.length ? graph.tokenLifetimes.shift() : graph.tokenLifetime || 3600);
         if (login[2] === 'devicecode') {
           const code = `device-${crypto.randomUUID()}`;
           (d.devices ||= {})[code] = { user: d.signInAs, pendingPolls: d.pendingPolls ?? 1, scopes: String(form.get('scope') || '').split(' ') };
@@ -248,7 +250,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
           const u = graph.users.find((x) => x.mail === user) || {};
           const idToken = `${b64json({ alg: 'none' })}.${b64json({ oid: u.id || user, tid: 'tid-contoso', preferred_username: u.upn || user, name: u.displayName || '' })}.`;
           const scope = [...granted.map(shortScope), 'openid', 'profile', 'email'].join(' ');
-          return { token_type: 'Bearer', scope, expires_in: graph.tokenLifetime || 3600, access_token: delegatedToken(user, granted), refresh_token: refresh, id_token: idToken };
+          return { token_type: 'Bearer', scope, expires_in: lifetime(), access_token: delegatedToken(user, granted), refresh_token: refresh, id_token: idToken };
         };
         if (grant === 'urn:ietf:params:oauth:grant-type:device_code') {
           const device = d.devices?.[form.get('device_code')];
@@ -284,7 +286,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
         } else if (form.get('client_secret') !== graph.secret) {
           return json(res, 401, { error: 'invalid_client', error_description: 'AADSTS7000215: Invalid client secret provided.' });
         }
-        return json(res, 200, { access_token: imap ? 'imap-app' : 'graph-token', expires_in: graph.tokenLifetime || 3600, token_type: 'Bearer' });
+        return json(res, 200, { access_token: imap ? 'imap-app' : 'graph-token', expires_in: lifetime(), token_type: 'Bearer' });
       }
       // Endereço de download pré-autenticado (como o do SharePoint): sem o cabeçalho de autorização.
       const download = /^\/download\/([^/]+)\/([^/]+)$/.exec(url.pathname);

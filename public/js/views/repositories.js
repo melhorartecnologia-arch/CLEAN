@@ -21,8 +21,9 @@ function repoForm(repo, ctx, mailSources) {
   // Conexões do Microsoft 365 com credenciais de aplicativo (a conta conectada só tem permissões de e-mail).
   const m365 = mailSources.filter((s) => s.type === 'graph' && s.graph?.auth !== 'delegated');
   const connectedOnly = !m365.length && mailSources.some((s) => s.type === 'graph');
-  // Certificado copiado de uma conexão de e-mail que deixou de estar ligada: continua valendo.
-  const certificate = !repo?.credentialsFrom && g.auth === 'certificate' && g.hasCertificateKey ? g.certificate : null;
+  // Certificado copiado de uma conexão de e-mail (ligada ou que deixou de estar): ao informar as
+  // credenciais manualmente com o segredo em branco, ele continua valendo.
+  const certificate = g.auth === 'certificate' && g.hasCertificateKey ? g.certificate : null;
   return html`<div class="form-grid">
     <label class="field full">
       <span>Nome</span>

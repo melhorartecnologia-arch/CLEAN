@@ -599,7 +599,14 @@ function wireForm(form, existing) {
     const hadFocus = deviceBox.contains(document.activeElement);
     deviceBox.hidden = true;
     paint(deviceBox, '');
+    announce('');
     if (hadFocus) connectButton.focus();
+  };
+  // O foco volta ao botão só se continuar nele (desabilitado, o foco vai para a página): quem já
+  // passou a outro campo continua nele.
+  const refocus = (button) => {
+    const active = document.activeElement;
+    if (!state.closed && (active === button || active === document.body || !active)) button.focus();
   };
   const connected = (flow, account) => {
     // Uma entrada anterior, concluída e ainda não salva, sai do servidor.
@@ -633,7 +640,11 @@ function wireForm(form, existing) {
     try {
       result = await post('/api/mail-sources/oauth/device/status', { flowId: flow.id });
     } catch (err) {
-      result = { status: 'pending', notice: `Falha momentânea ao consultar o servidor do CLEAN (${err.message}). Tentando de novo…` };
+      result = { status: 'pending', notice: `Falha momentânea ao consultar o servidor do CLEAN (${err.message.replace(/\.$/, '')}). Tentando de novo…` };
+    }
+    // Sem resposta até o código vencer (ex.: o servidor do CLEAN fora do ar): desiste.
+    if (result.status === 'pending' && Date.now() > flow.expiresAt) {
+      result = { status: 'failed', error: 'O código expirou antes de a entrada terminar: clique em "Conectar conta" de novo.' };
     }
     if (state.flow !== flow || state.closed) return;
     if (result.status === 'connected') {
@@ -653,6 +664,7 @@ function wireForm(form, existing) {
     // Pendente: consulta de novo em alguns segundos (com o aviso de uma falha momentânea, se houver).
     const notice = deviceBox.querySelector('[data-device-notice]');
     if (notice) {
+      if (result.notice && notice.hidden) announce(result.notice);
       notice.textContent = result.notice || '';
       notice.hidden = !result.notice;
     }
@@ -686,12 +698,12 @@ function wireForm(form, existing) {
       return;
     } finally {
       button.disabled = false;
-      if (hadFocus && !started) button.focus();
+      if (hadFocus && !started) refocus(button);
     }
     // Cancelada (outra escolha, outro campo ou o formulário fechado) enquanto o código era pedido.
     if (mine !== state.attempt || state.closed) {
       post('/api/mail-sources/oauth/device/cancel', { flowId: started.flowId }).catch(() => {});
-      if (hadFocus && !state.closed) button.focus();
+      if (hadFocus) refocus(button);
       return;
     }
     state.requesting = false;
@@ -709,8 +721,9 @@ function wireForm(form, existing) {
         <button type="button" class="btn small" data-action="connect-cancel">Cancelar a entrada</button>`,
     );
     announce(`Código de entrada: ${started.userCode.split('').join(' ')}. Abra ${shown} e digite o código.`);
-    if (hadFocus) deviceBox.querySelector('[data-action="copy-code"]').focus();
-    const flow = { id: started.flowId, timer: null, request };
+    const active = document.activeElement;
+    if (hadFocus && (active === button || active === document.body || !active)) deviceBox.querySelector('[data-action="copy-code"]').focus();
+    const flow = { id: started.flowId, timer: null, request, expiresAt: Date.parse(started.expiresAt) || Date.now() + 15 * 60000 };
     state.flow = flow;
     flow.timer = setTimeout(() => poll(flow), Math.max(2, Number(started.interval) || 5) * 1000);
   };
