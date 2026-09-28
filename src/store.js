@@ -188,15 +188,30 @@ export class Store {
     return {
       clientSecret: open(s.clientSecret),
       privateKey: open(s.privateKey),
+      certificateKey: open(s.certificateKey),
+      refreshToken: open(s.refreshToken),
       defaultPassword: open(s.defaultPassword),
       passwords: Object.fromEntries(Object.entries(s.passwords || {}).map(([address, value]) => [address, open(value)])),
     };
   }
 
-  /** Segredo do repositório do OneDrive/SharePoint, decifrado (nunca vai para o navegador). */
+  /**
+   * Conta Microsoft conectada: grava (cifrado) o novo token de atualização que a Microsoft devolve a
+   * cada renovação — só se a conexão ainda estiver com a mesma entrada da conta (grantId), para que
+   * uma análise antiga não troque o token de uma conta conectada depois. Não muda a data de alteração.
+   */
+  saveRefreshToken(sourceId, grantId, token) {
+    const source = this.getMailSource(sourceId);
+    if (!source || !grantId || !token || source.graph?.account?.grantId !== grantId) return false;
+    this.#update('mailSources', sourceId, { secrets: { ...(source.secrets || {}), refreshToken: this.secrets.seal(token) } }, { touch: false });
+    return true;
+  }
+
+  /** Segredos do repositório do OneDrive/SharePoint, decifrados (nunca vão para o navegador). */
   openRepositorySecrets(repo) {
-    const value = repo?.secrets?.clientSecret;
-    return { clientSecret: value ? this.secrets.open(value) : '' };
+    const s = repo?.secrets || {};
+    const open = (value) => (value ? this.secrets.open(value) : '');
+    return { clientSecret: open(s.clientSecret), certificateKey: open(s.certificateKey) };
   }
 
   listSchedules() {

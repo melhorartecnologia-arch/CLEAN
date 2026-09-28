@@ -1,23 +1,13 @@
-// Cliente do Microsoft Graph com permissões de aplicativo (sem usuário conectado): token pelo fluxo
-// "client credentials" de um registro de aplicativo no Microsoft Entra ID, novas tentativas em
+// Cliente do Microsoft Graph: token OAuth 2.0 do Microsoft Entra ID (aplicativo com segredo do
+// cliente ou com certificado, ou conta conectada — veja microsoft-auth.js), novas tentativas em
 // limites de requisição, paginação e localização de usuários. Usado pelas caixas de e-mail do
 // Microsoft 365 e pelos repositórios do OneDrive e do SharePoint.
 import { request, ApiError } from '../mail/http.js';
+import { MicrosoftAuth, aadError } from './microsoft-auth.js';
 
 export const GRAPH_ENDPOINTS = {
   login: 'https://login.microsoftonline.com',
   graph: 'https://graph.microsoft.com/v1.0',
-};
-
-const AAD_ERRORS = {
-  700016: 'O aplicativo (ID do cliente) não foi encontrado neste locatário. Confira o ID do cliente e o ID do locatário.',
-  7000215: 'Segredo do cliente inválido. Copie o VALOR do segredo (e não o "ID do segredo").',
-  7000222: 'O segredo do cliente expirou. Gere um novo segredo no registro do aplicativo.',
-  90002: 'Locatário não encontrado. Confira o ID do locatário (ou o domínio, ex.: empresa.onmicrosoft.com).',
-  900023: 'ID do locatário inválido.',
-  700023: 'O ID do locatário informado não corresponde ao aplicativo.',
-  50034: 'Conta não encontrada no diretório.',
-  53003: 'Acesso bloqueado por uma política de Acesso Condicional do Microsoft Entra ID.',
 };
 
 export const enc = encodeURIComponent;
@@ -28,8 +18,8 @@ export const enc = encodeURIComponent;
  */
 export function commonGraphError(err) {
   if (!(err instanceof ApiError)) return err;
-  const aad = /AADSTS(\d+)/.exec(err.message);
-  if (aad && AAD_ERRORS[aad[1]]) return new ApiError(`${AAD_ERRORS[aad[1]]} (AADSTS${aad[1]})`, err);
+  const aad = aadError(err);
+  if (aad) return aad;
   if (err.status === 403 && /Authorization_RequestDenied/i.test(err.code)) {
     return new ApiError('Permissão insuficiente para listar os usuários: conceda ao aplicativo a permissão User.Read.All (tipo Aplicativo) com consentimento do administrador.', err);
   }
@@ -46,18 +36,23 @@ export function detailedGraphError(err) {
 
 export class GraphClient {
   /**
-   * source: cadastro com graph { tenantId, clientId } e secrets { clientSecret } (já decifrado).
-   * options: { endpoints (troca os endereços, nos testes), signal, log(level, message) }.
+   * source: cadastro com graph { tenantId, clientId, auth, certificate?, account? } e secrets
+   * { clientSecret | certificateKey | refreshToken } (já decifrados).
+   * options: { endpoints (troca os endereços, nos testes), signal, log(level, message),
+   * onRefreshToken(token) (conta conectada: novo token de atualização a gravar) }.
    */
-  constructor(source, { endpoints = {}, signal, log = () => {} } = {}) {
+  constructor(source, { endpoints = {}, signal, log = () => {}, onRefreshToken } = {}) {
     this.source = source;
     this.endpoints = { login: endpoints.graphLogin || GRAPH_ENDPOINTS.login, graph: endpoints.graph || GRAPH_ENDPOINTS.graph };
     this.signal = signal;
     this.log = log;
-    this.token = null;
-    this.tokenExpires = 0;
-    this.tokenPromise = null;
+    this.auth = new MicrosoftAuth(source.graph || {}, source.secrets || {}, { login: this.endpoints.login, signal, onRefreshToken });
     this.lastThrottleLog = 0;
+  }
+
+  /** Conta conectada (permissões delegadas), e não um aplicativo. */
+  get delegated() {
+    return this.auth.delegated;
   }
 
   /** Tradução dos erros para mensagens com a providência a tomar (cada conector completa a sua). */
@@ -66,29 +61,11 @@ export class GraphClient {
   }
 
   async accessToken(force = false) {
-    if (!force && this.token && Date.now() < this.tokenExpires - 120000) return this.token;
-    const { tenantId, clientId } = this.source.graph || {};
-    const secret = this.source.secrets?.clientSecret;
-    if (!tenantId || !clientId || !secret) throw new ApiError('Informe o ID do locatário, o ID do cliente e o segredo do cliente.');
-    this.tokenPromise ||= request(`${this.endpoints.login}/${enc(tenantId)}/oauth2/v2.0/token`, {
-      method: 'POST',
-      form: { client_id: clientId, client_secret: secret, scope: 'https://graph.microsoft.com/.default', grant_type: 'client_credentials' },
-      signal: this.signal,
-      retries: 3,
-    })
-      .then((res) => {
-        if (!res?.access_token) throw new ApiError('O Microsoft Entra ID não devolveu um token de acesso.');
-        this.token = res.access_token;
-        this.tokenExpires = Date.now() + (Number(res.expires_in) || 3600) * 1000;
-        return this.token;
-      })
-      .catch((err) => {
-        throw this.translate(err);
-      })
-      .finally(() => {
-        this.tokenPromise = null;
-      });
-    return this.tokenPromise;
+    try {
+      return await this.auth.token('graph', { force });
+    } catch (err) {
+      throw this.translate(err);
+    }
   }
 
   /** Chamada autenticada ao Graph (renova o token uma vez se ele for recusado). */

@@ -463,7 +463,10 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       } catch (err) {
         throw new HttpError(409, err.message);
       }
-      const connector = createConnector({ ...source, secrets }, { signal: AbortSignal.timeout(120000), endpoints });
+      // Conta Microsoft conectada: o token renovado pela Microsoft é gravado (cifrado) na conexão.
+      const grantId = source.graph?.account?.grantId;
+      const onRefreshToken = grantId ? (token) => store.saveRefreshToken(source.id, grantId, token) : undefined;
+      const connector = createConnector({ ...source, secrets }, { signal: AbortSignal.timeout(120000), endpoints, onRefreshToken });
       try {
         const map = await connector.deleteMessages(mailboxFor(source, record), [{ id: record.messageId, messageId: record.internetMessageId }], method);
         const r = map.get(record.messageId) || { ok: false, error: 'O servidor não confirmou a exclusão.' };

@@ -67,7 +67,7 @@ const mb = (bytes) => `${Math.round((bytes / 1048576) * 10) / 10} MB`;
 export class MailScanner {
   /**
    * config: { sources: [conexões com secrets], terms: [...], options: {...}, endpoints? }
-   * emit(message): recebe { type: 'log'|'progress'|'results'|'errors'|'done', ... }
+   * emit(message): recebe { type: 'log'|'progress'|'results'|'errors'|'deletions'|'credentials'|'done', ... }
    */
   constructor(config, emit, { connectorFactory = createConnector } = {}) {
     this.sources = config.sources || [];
@@ -186,10 +186,13 @@ export class MailScanner {
     let connector;
     let mailboxes;
     try {
+      const grantId = source.graph?.account?.grantId || null;
       connector = this.connectorFactory(source, {
         signal: this.abort.signal,
         endpoints: this.endpoints,
         log: (level, message) => this.log(level, `${source.name}: ${message}`),
+        // Conta Microsoft conectada: o novo token de atualização vai para o servidor, que o grava.
+        onRefreshToken: grantId ? (refreshToken) => this.emit({ type: 'credentials', sourceId: source.id, grantId, refreshToken }) : undefined,
       });
       mailboxes = await connector.mailboxes();
     } catch (err) {

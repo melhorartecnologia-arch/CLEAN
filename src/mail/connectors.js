@@ -11,7 +11,9 @@ export const MAIL_TYPES = {
 
 /**
  * source: conexão com os segredos já decifrados (source.secrets).
- * options: { signal, log(level, message), endpoints } — endpoints troca os endereços das APIs (testes).
+ * options: { signal, log(level, message), endpoints, onRefreshToken(token) } — endpoints troca os
+ * endereços das APIs (testes); onRefreshToken recebe o novo token de atualização de uma conta
+ * Microsoft conectada, para gravá-lo.
  */
 export function createConnector(source, options = {}) {
   switch (source.type) {

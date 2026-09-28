@@ -1,6 +1,9 @@
-// Microsoft 365 / Exchange Online pela API Microsoft Graph, com permissões de aplicativo (sem usuário
-// conectado): um registro de aplicativo no Microsoft Entra ID com Mail.Read e User.Read.All e um
-// segredo do cliente. Cada mensagem é baixada no formato MIME original (com os anexos).
+// Microsoft 365 / Exchange Online (e Outlook.com) pela API Microsoft Graph. Dois modos de acesso:
+// - aplicativo (sem usuário conectado): um registro de aplicativo no Microsoft Entra ID com Mail.Read e
+//   User.Read.All e um segredo do cliente ou um certificado — alcança todas as caixas do locatário;
+// - conta conectada (OAuth delegado): a caixa da conta que entrou e as caixas compartilhadas com ela
+//   (Mail.Read e Mail.Read.Shared).
+// Cada mensagem é baixada no formato MIME original (com os anexos).
 import { pool, ApiError } from './http.js';
 import { SkipMailboxError, folderMatcher, addressMatcher, deletionItems } from './common.js';
 import { GraphClient, GRAPH_ENDPOINTS, commonGraphError, detailedGraphError, enc } from '../cloud/graph-client.js';
@@ -17,12 +20,18 @@ const IMMUTABLE_IDS = { Prefer: 'IdType="ImmutableId"' };
 
 export { GRAPH_ENDPOINTS };
 
-/** Traduz erros do Graph/Entra ID para mensagens com a providência a tomar. */
-export function graphError(err) {
+/** Traduz erros do Graph/Entra ID para mensagens com a providência a tomar. delegated: conta conectada. */
+export function graphError(err, { delegated = false } = {}) {
   if (!(err instanceof ApiError)) return err;
   const common = commonGraphError(err);
   if (common) return common;
   if (err.status === 403 && /AccessDenied/i.test(err.code)) {
+    if (delegated) {
+      return new ApiError(
+        'Acesso negado à caixa de correio: a conta conectada não tem acesso a ela. Numa caixa compartilhada ou de outra pessoa, a conta precisa da permissão de Acesso Total (Exchange Online) — e a entrada precisa ter autorizado as caixas compartilhadas (Mail.Read.Shared, pedida quando o locatário é informado).',
+        err,
+      );
+    }
     return new ApiError(
       'Acesso negado à caixa de correio: conceda ao aplicativo a permissão Mail.Read (tipo Aplicativo) com consentimento do administrador e confira se uma política de acesso do Exchange Online (RBAC para aplicativos ou Application Access Policy) libera esta caixa.',
       err,
@@ -33,13 +42,23 @@ export function graphError(err) {
 
 export class GraphConnector extends GraphClient {
   translate(err) {
-    return graphError(err);
+    return graphError(err, { delegated: this.delegated });
   }
 
-  /** Caixas a analisar: todas as do locatário (usuários com e-mail) ou as da lista. */
+  /** A caixa é a da própria conta conectada (acessada por /me). */
+  ownMailbox(address) {
+    const account = this.source.graph?.account || {};
+    const key = String(address || '').trim().toLowerCase();
+    return Boolean(key) && [account.address, account.username].some((a) => String(a || '').toLowerCase() === key);
+  }
+
+  /**
+   * Caixas a analisar: todas as do locatário (usuários com e-mail) ou as da lista. Com a conta
+   * conectada, sempre as da lista (a da conta e as compartilhadas com ela).
+   */
   async mailboxes() {
     const excluded = addressMatcher(this.source.excludeMailboxes);
-    if (this.source.scope !== 'all') {
+    if (this.source.scope !== 'all' || this.delegated) {
       return (this.source.mailboxes || []).map((m) => ({ address: m.address, name: '' })).filter((m) => !excluded(m.address));
     }
     const out = [];
@@ -52,28 +71,40 @@ export class GraphConnector extends GraphClient {
     return out.sort((a, b) => a.address.localeCompare(b.address));
   }
 
-  /** Identificador do usuário dono da caixa (o endereço pode ser diferente do nome de logon). */
-  resolveUser(mailbox, { signal } = {}) {
-    return super.resolveUser(mailbox, { signal, notFound: `A caixa ${mailbox.address} não foi encontrada no Microsoft 365.` });
+  /**
+   * Dono da caixa: { id, name, path } — path é o início dos endereços da caixa no Graph. Com um
+   * aplicativo, o usuário é localizado pelo e-mail (pode ser diferente do nome de logon); com a conta
+   * conectada, a caixa dela é "/me" e as compartilhadas são acessadas pelo endereço.
+   */
+  async resolveUser(mailbox, { signal } = {}) {
+    if (this.delegated) {
+      if (this.ownMailbox(mailbox.address)) return { id: 'me', name: this.source.graph?.account?.name || '', path: '/me' };
+      return { id: mailbox.address, name: mailbox.name || '', path: `/users/${enc(mailbox.address)}` };
+    }
+    const user = await super.resolveUser(mailbox, { signal, notFound: `A caixa ${mailbox.address} não foi encontrada no Microsoft 365.` });
+    return { ...user, path: `/users/${enc(user.id)}` };
   }
 
-  async wellKnownFolder(userId, name) {
+  async wellKnownFolder(base, name) {
     try {
-      return (await this.api(`/users/${enc(userId)}/mailFolders/${name}?$select=id`))?.id || null;
+      return (await this.api(`${base}/mailFolders/${name}?$select=id`))?.id || null;
     } catch (err) {
       if (err.status === 404 && !NO_MAILBOX.has(err.code)) return null;
       throw err;
     }
   }
 
-  /** Pastas da caixa (com subpastas), sem as excluídas pelas opções e pelos padrões da conexão. */
-  async folders(userId, { includeTrash = true, includeJunk = false } = {}) {
+  /**
+   * Pastas da caixa (com subpastas), sem as excluídas pelas opções e pelos padrões da conexão.
+   * base: início dos endereços da caixa (resolveUser().path).
+   */
+  async folders(base, { includeTrash = true, includeJunk = false } = {}) {
     const skip = new Set();
     let trash = null;
     try {
-      trash = await this.wellKnownFolder(userId, 'deleteditems');
-      const junk = await this.wellKnownFolder(userId, 'junkemail');
-      const sync = await this.wellKnownFolder(userId, 'syncissues');
+      trash = await this.wellKnownFolder(base, 'deleteditems');
+      const junk = await this.wellKnownFolder(base, 'junkemail');
+      const sync = await this.wellKnownFolder(base, 'syncissues');
       if (!includeTrash && trash) skip.add(trash);
       if (!includeJunk && junk) skip.add(junk);
       if (sync) skip.add(sync); // registros de sincronização do Outlook
@@ -81,7 +112,7 @@ export class GraphConnector extends GraphClient {
       if (NO_MAILBOX.has(err.code) || err.status === 404) throw new SkipMailboxError('usuário sem caixa de correio no Exchange Online (sem licença, desativada ou local).');
       // Com "todas as caixas" e o acesso limitado pelo RBAC para aplicativos, as caixas fora do
       // escopo respondem 403: são ignoradas (com aviso), não contadas como erro.
-      if (err.status === 403 && this.source.scope === 'all') throw new SkipMailboxError('acesso à caixa não liberado para o aplicativo (permissão Mail.Read ou escopo do RBAC para aplicativos).');
+      if (err.status === 403 && this.source.scope === 'all' && !this.delegated) throw new SkipMailboxError('acesso à caixa não liberado para o aplicativo (permissão Mail.Read ou escopo do RBAC para aplicativos).');
       throw err;
     }
     const excluded = folderMatcher(this.source.excludeFolders);
@@ -96,12 +127,12 @@ export class GraphConnector extends GraphClient {
           if (skip.has(f.id) || excluded(path)) continue;
           const inTrash = parentInTrash || (trash !== null && f.id === trash);
           out.push({ id: f.id, path, total: Number(f.totalItemCount) || 0, inTrash });
-          if (f.childFolderCount > 0) await walk(`/users/${enc(userId)}/mailFolders/${enc(f.id)}/childFolders?${fields}`, path, inTrash);
+          if (f.childFolderCount > 0) await walk(`${base}/mailFolders/${enc(f.id)}/childFolders?${fields}`, path, inTrash);
         }
         next = this.next(page);
       }
     };
-    await walk(`/users/${enc(userId)}/mailFolders?${fields}`, '', false);
+    await walk(`${base}/mailFolders?${fields}`, '', false);
     return out;
   }
 
@@ -114,8 +145,8 @@ export class GraphConnector extends GraphClient {
   async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
     const user = await this.resolveUser(mailbox);
     mailbox.name ||= user.name;
-    const folders = await this.folders(user.id, { includeTrash, includeJunk });
-    const userPath = `/users/${enc(user.id)}`;
+    const folders = await this.folders(user.path, { includeTrash, includeJunk });
+    const userPath = user.path;
     const conditions = [since && `receivedDateTime ge ${since.toISOString()}`, before && `receivedDateTime lt ${before.toISOString()}`].filter(Boolean);
     const filter = conditions.length ? `&$filter=${enc(conditions.join(' and '))}` : '';
     const fields = headersOnly ? 'id,receivedDateTime,webLink,subject,from,internetMessageId' : 'id,receivedDateTime,webLink';
@@ -172,9 +203,14 @@ export class GraphConnector extends GraphClient {
   async test() {
     const details = [];
     await this.accessToken();
-    details.push('Autenticação no Microsoft Entra ID: OK.');
+    if (this.delegated) {
+      const me = await this.api('/me?$select=displayName,mail,userPrincipalName');
+      details.push(`Conta conectada: ${me?.displayName ? `${me.displayName} — ` : ''}${me?.mail || me?.userPrincipalName || '—'} (token renovado: OK).`);
+    } else {
+      details.push(`Autenticação no Microsoft Entra ID (${this.auth.mode === 'certificate' ? 'certificado' : 'segredo do cliente'}): OK.`);
+    }
     let boxes;
-    if (this.source.scope === 'all') {
+    if (this.source.scope === 'all' && !this.delegated) {
       const page = await this.api('/users?$select=id,displayName,mail&$top=50');
       boxes = (page?.value || []).filter((u) => u.mail).map((u) => ({ address: u.mail, id: u.id, name: u.displayName }));
       details.push(`Listagem de usuários (User.Read.All): OK — ${boxes.length}${page?.['@odata.nextLink'] ? '+' : ''} com e-mail.`);
@@ -189,12 +225,12 @@ export class GraphConnector extends GraphClient {
       if (checked >= 3) break;
       try {
         const user = await this.resolveUser(box);
-        const inbox = await this.api(`/users/${enc(user.id)}/mailFolders/inbox?$select=displayName,totalItemCount`);
+        const inbox = await this.api(`${user.path}/mailFolders/inbox?$select=displayName,totalItemCount`);
         details.push(`${box.address}: ${Number(inbox?.totalItemCount) || 0} mensagem(ns) em "${inbox?.displayName || 'Caixa de Entrada'}".`);
         checked++;
       } catch (err) {
         // Em "todas as caixas", usuários sem caixa ou fora do escopo do RBAC são pulados.
-        if (this.source.scope === 'all' && (NO_MAILBOX.has(err.code) || err.status === 404 || err.status === 403)) {
+        if (this.source.scope === 'all' && !this.delegated && (NO_MAILBOX.has(err.code) || err.status === 404 || err.status === 403)) {
           skipped = err;
           continue;
         }
@@ -221,7 +257,7 @@ export class GraphConnector extends GraphClient {
     const list = deletionItems(items);
     if (list.length === 0) return results;
     const user = await this.resolveUser(mailbox, { signal });
-    const userPath = `/users/${enc(user.id)}`;
+    const userPath = user.path;
     const run = pool(list, MAX_CONCURRENCY, async ({ id }) => {
       if (shouldStop?.()) return undefined;
       const result = await this.deleteOne(userPath, id, mode, signal);
@@ -250,6 +286,12 @@ export class GraphConnector extends GraphClient {
         return uncertain ? { ok: true } : { ok: false, missing: true, error: 'Mensagem não encontrada (já excluída ou movida).' };
       }
       if (err.status === 403) {
+        if (this.delegated) {
+          return {
+            ok: false,
+            error: 'Sem permissão para excluir: conecte a conta de novo com "Permitir excluir" marcado (permissão Mail.ReadWrite; nas caixas compartilhadas, Mail.ReadWrite.Shared e Acesso Total à caixa).',
+          };
+        }
         return { ok: false, error: 'Sem permissão para excluir: conceda ao aplicativo a permissão Mail.ReadWrite (tipo Aplicativo) ou a função "Application Mail.ReadWrite" do RBAC para aplicativos.' };
       }
       return { ok: false, error: err.message };

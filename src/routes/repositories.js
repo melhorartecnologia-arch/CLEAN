@@ -9,11 +9,11 @@ import { DrivesConnector } from '../cloud/drives.js';
 import { isCloudRepo, deletionScope } from '../scan/delete.js';
 import { checkDeleteSchedules } from '../schedule/scheduler.js';
 
-/** Repositório sem os segredos (apenas indica se o segredo do cliente está salvo). */
+/** Repositório sem os segredos (apenas indica se o segredo do cliente ou a chave do certificado estão salvos). */
 export function publicRepository(repo) {
   const { secrets, ...rest } = repo;
   const out = { ...rest, type: repo.type || 'local' };
-  if (repo.graph) out.graph = { ...repo.graph, hasClientSecret: Boolean(secrets?.clientSecret) };
+  if (repo.graph) out.graph = { ...repo.graph, hasClientSecret: Boolean(secrets?.clientSecret), hasCertificateKey: Boolean(secrets?.certificateKey) };
   return out;
 }
 

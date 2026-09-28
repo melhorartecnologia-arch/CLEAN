@@ -20,10 +20,20 @@ export function deletionScope(repo) {
   return `${repo.type}|${String(repo.graph?.tenantId || '').toLowerCase()}|${c.scope}|${list.join(',')}`;
 }
 
+/**
+ * Quem acessa as caixas pela Microsoft: o locatário (aplicativo, com segredo ou certificado) ou a
+ * conta conectada — outra conta conectada alcança outras caixas.
+ */
+function microsoftAccount(graph) {
+  if (graph?.auth !== 'delegated') return graph?.tenantId;
+  return `${graph.tenantId}|conta:${graph.account?.id || graph.account?.username || ''}`;
+}
+
 /** O que a exclusão de e-mails alcança: tipo, conta ou servidor, alcance e caixas da conexão. */
 export function mailDeletionScope(source) {
   const s = source || {};
-  const account = s.type === 'graph' ? s.graph?.tenantId : s.type === 'gmail' ? `${s.gmail?.clientEmail}|${s.gmail?.adminEmail}` : `${s.imap?.host}:${s.imap?.port}`;
+  const server = `${s.imap?.host}:${s.imap?.port}${s.imap?.auth === 'oauth' ? `|oauth:${microsoftAccount(s.graph)}` : ''}`;
+  const account = s.type === 'graph' ? microsoftAccount(s.graph) : s.type === 'gmail' ? `${s.gmail?.clientEmail}|${s.gmail?.adminEmail}` : server;
   const boxes = (s.mailboxes || []).map((m) => `${m.address}${m.login ? `>${m.login}` : ''}`.toLowerCase()).sort();
   return `${s.type}|${String(account || '').toLowerCase()}|${s.scope}|${boxes.join(',')}`;
 }

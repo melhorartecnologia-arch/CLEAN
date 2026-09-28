@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { validateTerm, foldText } from '../scan/matcher.js';
 import { VALIDATORS } from '../scan/presets.js';
+import { MS_AUTH, TENANT_KEYWORDS } from '../cloud/microsoft-auth.js';
 
 export class HttpError extends Error {
   /** code: identificador opcional devolvido à interface junto com a mensagem (ex.: 'method-changed'). */
@@ -91,6 +92,86 @@ export function graphCredentials(g = {}, { previousSecret = null, previousGraph 
   const clientSecret = secret ? box.seal(secret) : previousSecret;
   if (!clientSecret) throw bad('Informe o segredo do cliente (valor do segredo criado no registro do aplicativo).');
   return { graph: { tenantId, clientId }, clientSecret };
+}
+
+/**
+ * Locatário e aplicativo (cliente) do Microsoft Entra ID. delegated: conta conectada, que aceita
+ * também os locatários genéricos ("organizations", "common" e "consumers"). Retorna { tenantId, clientId }.
+ */
+export function microsoftApp(g = {}, { delegated = false } = {}) {
+  let tenantId = text(g.tenantId, 'o ID do locatário', { required: true, max: 255 });
+  const keyword = TENANT_KEYWORDS.has(tenantId.toLowerCase());
+  if (keyword && !delegated) throw bad(`"${tenantId}" vale só para a conta conectada: para um aplicativo, informe o ID do locatário (GUID) ou o domínio, ex.: empresa.onmicrosoft.com.`);
+  if (!keyword && !GUID_RE.test(tenantId) && !DOMAIN_RE.test(tenantId)) {
+    throw bad(
+      delegated
+        ? 'Locatário inválido: use o GUID (ID do diretório), o domínio (ex.: empresa.onmicrosoft.com), "organizations" (contas de trabalho ou escola) ou "consumers" (contas pessoais: Outlook.com, Hotmail).'
+        : 'ID do locatário inválido: use o GUID (ID do diretório) ou o domínio, ex.: empresa.onmicrosoft.com.',
+    );
+  }
+  if (keyword) tenantId = tenantId.toLowerCase();
+  const clientId = text(g.clientId, 'o ID do cliente (aplicativo)', { required: true, max: 64 });
+  if (!GUID_RE.test(clientId)) throw bad('ID do cliente inválido: use o "ID do aplicativo (cliente)" do registro do aplicativo.');
+  return { tenantId, clientId };
+}
+
+/**
+ * Credenciais da Microsoft (Microsoft Entra ID) de uma conexão de e-mail — do Microsoft 365 ou do
+ * IMAP da Microsoft com OAuth — numa das três formas (auth): 'secret' (aplicativo com segredo do
+ * cliente), 'certificate' (aplicativo com certificado) ou 'delegated' (conta Microsoft conectada).
+ * Campos vazios mantêm o que está salvo (previous: { graph, secrets } do cadastro atual): o segredo e
+ * a conta conectada só para o mesmo locatário e aplicativo; o certificado também em outro aplicativo
+ * (a chave privada não sai do CLEAN — o arquivo do certificado é que precisa ser enviado a ele).
+ * pending: credenciais ainda não salvas — signIn(id) (entrada da conta concluída) e certificate(id)
+ * (certificado gerado ou importado). purpose: 'graph' ou 'imap' (a conta conectada autoriza um dos dois).
+ * Retorna { graph, secrets } com os segredos cifrados.
+ */
+export function microsoftCredentials(g = {}, { previous = null, box, pending = {}, purpose = 'graph' }) {
+  const auth = Object.hasOwn(MS_AUTH, g.auth) ? g.auth : 'secret';
+  const { tenantId, clientId } = microsoftApp(g, { delegated: auth === 'delegated' });
+  const before = previous?.graph || null;
+  const saved = previous?.secrets || {};
+  const beforeAuth = before ? before.auth || 'secret' : null;
+  const sameApp = Boolean(before) && String(before.tenantId).toLowerCase() === tenantId.toLowerCase() && String(before.clientId).toLowerCase() === clientId.toLowerCase();
+  const graph = { tenantId, clientId, auth };
+  const secrets = {};
+  if (auth === 'secret') {
+    const secret = text(g.clientSecret, 'o segredo do cliente', { max: 2000 });
+    if (!secret && saved.clientSecret && beforeAuth === 'secret' && !sameApp) throw bad('Ao trocar o locatário ou o aplicativo, informe o segredo do cliente novamente.');
+    secrets.clientSecret = secret ? box.seal(secret) : sameApp && beforeAuth === 'secret' ? saved.clientSecret : null;
+    if (!secrets.clientSecret) throw bad('Informe o segredo do cliente (valor do segredo criado no registro do aplicativo).');
+  } else if (auth === 'certificate') {
+    const id = typeof g.certificateId === 'string' ? g.certificateId : '';
+    if (id) {
+      const item = pending.certificate?.(id);
+      if (!item) throw bad('O certificado gerado (ou importado) não está mais disponível para salvar (mais de 24 horas ou o CLEAN foi reiniciado): gere ou importe o certificado de novo.');
+      graph.certificate = item.certificate;
+      secrets.certificateKey = box.seal(item.privateKeyPem);
+    } else if (beforeAuth === 'certificate' && before.certificate && saved.certificateKey) {
+      graph.certificate = before.certificate;
+      secrets.certificateKey = saved.certificateKey;
+    } else {
+      throw bad('Gere o certificado (ou importe um existente) e envie o arquivo do certificado ao registro do aplicativo.');
+    }
+  } else {
+    const id = typeof g.signIn === 'string' ? g.signIn : '';
+    if (id) {
+      const flow = pending.signIn?.(id);
+      if (!flow) throw bad('A entrada da conta não está mais disponível para salvar (mais de 2 horas ou o CLEAN foi reiniciado): clique em "Conectar conta" de novo.');
+      if (String(flow.tenantId).toLowerCase() !== tenantId.toLowerCase() || String(flow.clientId).toLowerCase() !== clientId.toLowerCase()) {
+        throw bad('O locatário ou o aplicativo foi alterado depois da entrada da conta: clique em "Conectar conta" de novo.');
+      }
+      if (flow.purpose !== purpose) throw bad('A conta foi conectada para outro tipo de conexão: clique em "Conectar conta" de novo.');
+      graph.account = flow.account;
+      secrets.refreshToken = box.seal(flow.refreshToken);
+    } else if (beforeAuth === 'delegated' && sameApp && before.account && saved.refreshToken && (before.account.purpose || 'graph') === purpose) {
+      graph.account = before.account;
+      secrets.refreshToken = saved.refreshToken;
+    } else {
+      throw bad(beforeAuth === 'delegated' && !sameApp ? 'Ao trocar o locatário ou o aplicativo, conecte a conta novamente ("Conectar conta").' : 'Conecte a conta Microsoft: clique em "Conectar conta" e entre com a conta cujas caixas serão analisadas.');
+    }
+  }
+  return { graph, secrets };
 }
 
 /**
@@ -184,22 +265,41 @@ export function parseRepository(body = {}, { existing = null, box = null, mailSo
   };
 }
 
+/**
+ * Credenciais de aplicativo de uma conexão de e-mail do Microsoft 365 (segredo do cliente ou
+ * certificado) para um repositório do OneDrive/SharePoint ligado a ela: { graph, secrets }, ou null se
+ * a conexão não tiver credenciais de aplicativo (conta conectada: as permissões são só de e-mail).
+ */
+export function linkedCredentials(source) {
+  if (source?.type !== 'graph' || !source.graph) return null;
+  const auth = source.graph.auth || 'secret';
+  const { tenantId, clientId } = source.graph;
+  if (auth === 'secret' && source.secrets?.clientSecret) return { graph: { tenantId, clientId }, secrets: { clientSecret: source.secrets.clientSecret } };
+  if (auth === 'certificate' && source.secrets?.certificateKey && source.graph.certificate) {
+    return { graph: { tenantId, clientId, auth, certificate: source.graph.certificate }, secrets: { certificateKey: source.secrets.certificateKey } };
+  }
+  return null;
+}
+
 function parseCloud(body, type, { existing, box, mailSource }) {
   let graph;
-  let clientSecret;
+  let secrets;
   let credentialsFrom = null;
   if (body.credentialsFrom) {
     // Mesmo registro de aplicativo de uma conexão de e-mail do Microsoft 365: as credenciais ficam
-    // ligadas a ela (um novo segredo salvo na conexão também passa a valer para o repositório).
+    // ligadas a ela (um novo segredo ou certificado salvo na conexão também passa a valer para o repositório).
     if (!mailSource || mailSource.type !== 'graph' || !mailSource.graph) throw bad('Escolha uma conexão de e-mail do Microsoft 365 para usar as mesmas credenciais.');
-    if (!mailSource.secrets?.clientSecret) throw bad(`A conexão "${mailSource.name}" não tem o segredo do cliente salvo.`);
-    graph = { tenantId: mailSource.graph.tenantId, clientId: mailSource.graph.clientId };
-    clientSecret = mailSource.secrets.clientSecret;
+    if (mailSource.graph.auth === 'delegated') throw bad(`A conexão "${mailSource.name}" usa uma conta conectada (permissões só de e-mail): o OneDrive e o SharePoint precisam das credenciais de um aplicativo (segredo do cliente ou certificado).`);
+    const linked = linkedCredentials(mailSource);
+    if (!linked) throw bad(`A conexão "${mailSource.name}" não tem o segredo do cliente (ou o certificado) salvo.`);
+    ({ graph, secrets } = linked);
     credentialsFrom = mailSource.id;
   } else {
     const cloudBefore = CLOUD_REPO_TYPES.has(existing?.type);
     const previousSecret = cloudBefore ? existing.secrets?.clientSecret || null : null;
+    let clientSecret;
     ({ graph, clientSecret } = graphCredentials(body.graph || {}, { previousSecret, previousGraph: cloudBefore ? existing.graph : null, box }));
+    secrets = { clientSecret };
   }
   const scope = body.scope === 'all' ? 'all' : 'list';
   const cloud = { scope, accounts: [], sites: [], exclude: lines(body.excludeTargets, 500) };
@@ -218,7 +318,7 @@ function parseCloud(body, type, { existing, box, mailSource }) {
     // Lixeira do site/OneDrive (recuperável) ou exclusão definitiva.
     deleteMode: body.deleteMode === 'permanent' ? 'permanent' : 'trash',
     graph,
-    secrets: { clientSecret },
+    secrets,
     credentialsFrom,
     cloud,
     audit: { ...NO_AUDIT },

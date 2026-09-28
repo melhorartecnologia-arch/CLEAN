@@ -1,4 +1,4 @@
-// Servidor IMAP mínimo para os testes: LOGIN, LIST, EXAMINE/SELECT, UID SEARCH, UID FETCH (com
+// Servidor IMAP mínimo para os testes: LOGIN, AUTHENTICATE XOAUTH2, LIST, EXAMINE/SELECT, UID SEARCH, UID FETCH (com
 // busca parcial BODY.PEEK[]<0.N>, FLAGS e ENVELOPE), STORE, EXPUNGE, COPY, MOVE, STATUS e LOGOUT.
 // Suficiente para o conector do CLEAN, inclusive para simular servidores sem UIDPLUS/MOVE, que
 // recusam comandos ou que se comportam como o Gmail.
@@ -61,12 +61,15 @@ function messageIdOf(raw) {
  *             special?: { folder: '\\Trash' }, validity?: { folder: número } } }
  * options: capabilities (padrão "IMAP4rev1 UIDPLUS MOVE"), permanentFlags (texto enviado em
  * PERMANENTFLAGS), refuse ({ store, copy, move, expunge }: responde NO), gmail (EXPUNGE fora da
- * Lixeira só arquiva, como o Gmail com as configurações padrão).
+ * Lixeira só arquiva, como o Gmail com as configurações padrão), oauth(login, token) (login por
+ * AUTHENTICATE XOAUTH2, como o Exchange Online: devolve se o token dá acesso à caixa; logins pelo
+ * token ficam registrados em `oauthLogins`).
  */
 export function startFakeImap(
   accounts,
-  { log = [], maxLine = Infinity, sizeOffset = 0, capabilities = 'IMAP4rev1 UIDPLUS MOVE', permanentFlags = null, refuse = {}, gmail = false } = {},
+  { log = [], maxLine = Infinity, sizeOffset = 0, capabilities = 'IMAP4rev1 UIDPLUS MOVE', permanentFlags = null, refuse = {}, gmail = false, oauth = null, oauthLogins = [] } = {},
 ) {
+  if (oauth) capabilities = `${capabilities} AUTH=XOAUTH2 SASL-IR`;
   for (const account of Object.values(accounts)) {
     for (const list of Object.values(account.folders)) list.forEach((m, i) => (m.uid ??= i + 1));
   }
@@ -108,6 +111,15 @@ export function startFakeImap(
           if (!accounts[login] || accounts[login].password !== password) return send(`${tag} NO [AUTHENTICATIONFAILED] Credenciais inválidas\r\n`);
           user = login;
           return ok(`[CAPABILITY ${capabilities}] Logado`);
+        }
+        case 'AUTHENTICATE': {
+          if (!oauth || String(args[0]).toUpperCase() !== 'XOAUTH2') return send(`${tag} NO Mecanismo não suportado\r\n`);
+          const text = Buffer.from(String(args[1] || ''), 'base64').toString('utf8');
+          const m = /^user=([^\x01]*)\x01auth=Bearer ([^\x01]*)\x01\x01$/.exec(text);
+          if (!m || !accounts[m[1]] || !oauth(m[1], m[2])) return send(`${tag} NO AUTHENTICATE failed.\r\n`);
+          user = m[1];
+          oauthLogins.push(m[1]);
+          return ok(`[CAPABILITY ${capabilities}] AUTHENTICATE completed.`);
         }
         case 'LIST':
         case 'LSUB': {

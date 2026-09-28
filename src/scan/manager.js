@@ -485,6 +485,14 @@ export class ScanManager {
       case 'log':
         store.appendLog(id, message);
         break;
+      case 'credentials':
+        // Conta Microsoft conectada: a Microsoft trocou o token de atualização (gravado cifrado).
+        try {
+          store.saveRefreshToken(message.sourceId, message.grantId, message.refreshToken);
+        } catch (err) {
+          console.error('[CLEAN] Falha ao gravar o token renovado da conta conectada:', err.message);
+        }
+        break;
       case 'fatal':
         entry.fatal = message.message;
         break;

@@ -1,8 +1,11 @@
 // Servidores IMAP: Exchange local, Zimbra, Dovecot, provedores de hospedagem, Gmail com senha de app
 // etc. Cada caixa tem o seu login; a senha pode ser individual ou uma senha padrão da conexão (útil
 // com contas de serviço, ex.: "DOMINIO\servico\caixa" no Exchange ou "caixa*mestre" no Dovecot).
+// No Exchange Online e no Outlook.com (que não aceitam mais senha), o login é por OAuth 2.0 da
+// Microsoft (XOAUTH2): com a conta conectada ou com um aplicativo (segredo do cliente ou certificado).
 import { ApiError } from './http.js';
 import { folderMatcher, addressMatcher, normalizeAddress, deletionItems, normalizeMessageId } from './common.js';
+import { MicrosoftAuth, MICROSOFT_IMAP_HOSTS } from '../cloud/microsoft-auth.js';
 
 // Marcadores do Gmail exibidos como pasta (quando o servidor é o Gmail).
 const GMAIL_LABELS = { '\\Inbox': 'Caixa de entrada', '\\Sent': 'Enviados', '\\Draft': 'Rascunhos', '\\Spam': 'Spam', '\\Trash': 'Lixeira' };
@@ -36,14 +39,47 @@ const TLS_ERRORS = new Set([
   'ERR_TLS_CERT_ALTNAME_INVALID',
 ]);
 
-/** Traduz erros de conexão e autenticação IMAP. */
-export function imapError(err, host = '') {
+/** Servidor IMAP da Microsoft (Exchange Online ou Outlook.com). */
+export const isMicrosoftImapHost = (host) => MICROSOFT_IMAP_HOSTS.has(String(host || '').trim().toLowerCase());
+
+/**
+ * Onde o CLEAN aceita enviar o token OAuth da Microsoft: só aos servidores IMAP da Microsoft, com
+ * TLS e certificado verificado (endpoints.microsoftImap troca a lista nos testes). Devolve o motivo
+ * para recusar, ou null.
+ */
+export function imapOAuthProblem(imap = {}, endpoints = {}) {
+  const test = endpoints.microsoftImap || null;
+  const host = String(imap.host || '').toLowerCase();
+  if (!isMicrosoftImapHost(host) && !test?.hosts?.includes(host)) {
+    return `O login OAuth da Microsoft só é usado nos servidores IMAP da Microsoft (${[...MICROSOFT_IMAP_HOSTS].join(', ')}): em outro servidor, o token daria acesso à caixa a quem o recebesse.`;
+  }
+  if ((imap.security === 'none' && !test?.insecure) || imap.allowSelfSigned) return 'Com o login OAuth da Microsoft, use SSL/TLS (ou STARTTLS) com o certificado do servidor verificado.';
+  return null;
+}
+
+/** Traduz erros de conexão e autenticação IMAP. oauth: login OAuth da Microsoft (XOAUTH2). */
+export function imapError(err, host = '', { oauth = false } = {}) {
   if (err instanceof ApiError) return err;
   const code = err?.code || '';
   const where = host ? ` (${host})` : '';
   if (err?.authenticationFailed) {
     const detail = err.responseText ? `: ${err.responseText}` : '';
+    if (oauth) {
+      return new ApiError(
+        `O servidor IMAP da Microsoft recusou o login OAuth${detail}. Confira se o IMAP está habilitado na caixa (Microsoft 365: centro de administração › Usuários › a pessoa › Email › Gerenciar aplicativos de email) e se a conta conectada tem acesso a ela (em caixas de outras pessoas, a permissão de Acesso Total). Com um aplicativo, a entidade de serviço dele precisa estar registrada no Exchange Online e ter Acesso Total à caixa (veja o LEIA-ME).`,
+        { code: 'AUTH' },
+      );
+    }
+    if (isMicrosoftImapHost(host)) {
+      return new ApiError(
+        `A Microsoft recusou o login com senha${detail}. O Exchange Online e o Outlook.com não aceitam mais senha no IMAP (a autenticação básica foi desativada): edite a conexão e, em "Autenticação", escolha "OAuth 2.0 da Microsoft" — ou use o tipo de conexão Microsoft 365.`,
+        { code: 'AUTH' },
+      );
+    }
     return new ApiError(`Usuário ou senha recusados pelo servidor IMAP${detail}.`, { code: 'AUTH' });
+  }
+  if (oauth && /Unsupported authentication mechanism/i.test(err?.message || '')) {
+    return new ApiError(`O servidor IMAP${where} não oferece o login por OAuth (XOAUTH2).`, { code: 'AUTH' });
   }
   if (TLS_ERRORS.has(code)) {
     return new ApiError(
@@ -109,16 +145,36 @@ function labelsText(labels) {
 }
 
 export class ImapConnector {
-  constructor(source, { signal, log = () => {} } = {}) {
+  /**
+   * options: signal, log(level, message), endpoints (troca os endereços, nos testes) e
+   * onRefreshToken(token) (login OAuth com a conta conectada: novo token de atualização a gravar).
+   */
+  constructor(source, { signal, log = () => {}, endpoints = {}, onRefreshToken } = {}) {
     this.source = source;
     this.imap = source.imap || {};
     this.signal = signal;
     this.log = log;
+    this.endpoints = endpoints;
+    this.oauth = this.imap.auth === 'oauth';
+    if (this.oauth) this.auth = new MicrosoftAuth(source.graph || {}, source.secrets || {}, { login: endpoints.graphLogin, signal, onRefreshToken });
+  }
+
+  error(err) {
+    return imapError(err, this.imap.host, { oauth: this.oauth });
   }
 
   async mailboxes() {
     const excluded = addressMatcher(this.source.excludeMailboxes);
     return (this.source.mailboxes || []).filter((m) => !excluded(m.address)).map((m) => ({ address: m.address, login: m.login || m.address, name: '' }));
+  }
+
+  /** Login da caixa: usuário e senha, ou usuário e token de acesso (OAuth da Microsoft). */
+  async credentials(mailbox) {
+    const user = mailbox.login || mailbox.address;
+    if (!this.oauth) return { user, pass: this.password(mailbox) };
+    const problem = imapOAuthProblem(this.imap, this.endpoints);
+    if (problem) throw new ApiError(problem);
+    return { user, accessToken: await this.auth.token('imap') };
   }
 
   password(mailbox) {
@@ -132,12 +188,13 @@ export class ImapConnector {
   async connect(mailbox, { signal = this.signal } = {}) {
     const { host, port, security, allowSelfSigned } = this.imap;
     const ImapFlow = await loadImapFlow();
+    const auth = await this.credentials(mailbox);
     const client = new ImapFlow({
       host,
       port: Number(port) || (security === 'tls' ? 993 : 143),
       secure: security === 'tls',
       doSTARTTLS: security === 'starttls' ? true : security === 'none' ? false : undefined,
-      auth: { user: mailbox.login || mailbox.address, pass: this.password(mailbox) },
+      auth,
       tls: { rejectUnauthorized: !allowSelfSigned, minVersion: 'TLSv1.2' },
       logger: false,
       disableAutoIdle: true,
@@ -163,7 +220,7 @@ export class ImapConnector {
     } catch (err) {
       await dispose();
       if (signal?.aborted) throw signal.reason;
-      throw imapError(err, host);
+      throw this.error(err);
     }
     return { client, dispose };
   }
@@ -280,6 +337,15 @@ export class ImapConnector {
     const boxes = await this.mailboxes();
     if (boxes.length === 0) return { ok: false, message: 'Informe ao menos uma caixa de e-mail.', details: [] };
     const details = [];
+    if (this.oauth) {
+      try {
+        await this.auth.token('imap');
+      } catch (err) {
+        return { ok: false, message: this.error(err).message, details };
+      }
+      const account = this.source.graph?.account;
+      details.push(`Login OAuth da Microsoft: token obtido (${account ? `conta conectada ${account.username || account.address}` : this.auth.mode === 'certificate' ? 'aplicativo com certificado' : 'aplicativo com segredo do cliente'}).`);
+    }
     for (const box of boxes.slice(0, 3)) {
       let session;
       try {
@@ -288,7 +354,7 @@ export class ImapConnector {
         const status = await session.client.status('INBOX', { messages: true }).catch(() => null);
         details.push(`${box.address}: login OK, ${folders.length} pasta(s)${status ? `, ${status.messages} mensagem(ns) na caixa de entrada` : ''}.`);
       } catch (err) {
-        return { ok: false, message: `${box.address}: ${imapError(err, this.imap.host).message}`, details };
+        return { ok: false, message: `${box.address}: ${this.error(err).message}`, details };
       } finally {
         await session?.dispose();
       }

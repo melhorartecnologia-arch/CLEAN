@@ -143,10 +143,16 @@ function drivesApi({ req, res, path, url, base, graph, find, json }) {
 }
 
 /**
- * graph: { tenant, clientId, secret, users: [{ id, mail, displayName, noMailbox?, folders: [{ id, displayName,
- *          parent?, wellKnown? }], messages: { [folderId]: [{ id, raw, received }] } }], throttleOnce?: Set<messageId>,
+ * graph: { tenant, clientId, secret, users: [{ id, mail, displayName, noMailbox?, sharedWith?: [e-mails com
+ *          Acesso Total à caixa], folders: [{ id, displayName, parent?, wellKnown? }], messages: { [folderId]:
+ *          [{ id, raw, received }] } }], throttleOnce?: Set<messageId>,
  *          deleteError?: { status, code } (resposta das exclusões), flakyDelete? (a 1ª exclusão de cada
- *          mensagem é feita, mas a resposta é um erro 503, como uma resposta perdida) }
+ *          mensagem é feita, mas a resposta é um erro 503, como uma resposta perdida),
+ *          certificatePem? (certificado do aplicativo: a asserção do cliente é conferida com ele),
+ *          delegated?: { signInAs (e-mail da conta que entra pelo código), pendingPolls (consultas
+ *          "authorization_pending" antes de concluir), publicClientDisabled?, declined?, revoked?,
+ *          refreshTokens: { [token]: { user, scopes } } (tokens de atualização válidos; cada renovação
+ *          devolve outro e o antigo continua valendo, como no Entra ID), issued: [tokens emitidos] } }
  * google: { publicKey, admin, users: [{ mail, name, disabled?, labels: [{ id, name, type }],
  *          messages: [{ id, raw, labelIds, internalDate }] }], flakyDelete? }
  */
@@ -154,6 +160,48 @@ function drivesApi({ req, res, path, url, base, graph, find, json }) {
 function mimeHeader(raw, name) {
   const head = raw.toString('utf8').split(/\r?\n\r?\n/)[0];
   return (new RegExp(`^${name}:[ \t]*(.*)$`, 'im').exec(head)?.[1] || '').trim();
+}
+
+const b64json = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+const unb64json = (text) => JSON.parse(Buffer.from(String(text), 'base64url').toString('utf8'));
+const IMAP_SCOPE = 'https://outlook.office.com/IMAP.AccessAsUser.All';
+const OIDC_SCOPES = new Set(['openid', 'profile', 'offline_access', 'email']);
+
+/** Token de acesso delegado do simulador: "d.<json>" para o Graph e "i.<json>" para o IMAP. */
+export const delegatedToken = (user, scopes) => `${scopes.includes(IMAP_SCOPE) ? 'i' : 'd'}.${b64json({ user, scopes })}`;
+/** Conta do token de acesso do IMAP (ou null): usado pelo servidor IMAP de teste. */
+export function imapTokenUser(token) {
+  if (token === 'imap-app') return '*';
+  if (!String(token).startsWith('i.')) return null;
+  try {
+    return unb64json(token.slice(2)).user;
+  } catch {
+    return null;
+  }
+}
+
+/** Confere a asserção do cliente (certificado): assinatura PS256, impressão digital e prazos. */
+function checkAssertion(graph, form, audience) {
+  if (form.get('client_assertion_type') !== 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer') return 'AADSTS50027: Invalid client_assertion_type.';
+  const [h, p, sig] = String(form.get('client_assertion')).split('.');
+  let header;
+  let claims;
+  try {
+    header = unb64json(h);
+    claims = unb64json(p);
+  } catch {
+    return 'AADSTS50027: JWT token is invalid or malformed.';
+  }
+  if (!graph.certificatePem) return 'AADSTS700027: Client assertion failed signature validation.';
+  const cert = new crypto.X509Certificate(graph.certificatePem);
+  const thumbprint = Buffer.from(cert.fingerprint256.replace(/:/g, ''), 'hex').toString('base64url');
+  if (header.alg !== 'PS256' || header['x5t#S256'] !== thumbprint) return 'AADSTS700027: Client assertion failed signature validation.';
+  const valid = crypto.verify('sha256', Buffer.from(`${h}.${p}`), { key: cert.publicKey, padding: crypto.constants.RSA_PKCS1_PSS_PADDING, saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST }, Buffer.from(sig, 'base64url'));
+  if (!valid) return 'AADSTS700027: Client assertion failed signature validation.';
+  const now = Date.now() / 1000;
+  if (claims.aud !== audience || claims.iss !== graph.clientId || claims.sub !== graph.clientId || !claims.jti) return 'AADSTS700021: Client assertion audience or issuer is invalid.';
+  if (!(claims.exp > now) || !(claims.nbf <= now + 300) || claims.exp - claims.nbf > 600) return 'AADSTS700024: Client assertion is not within its valid time range.';
+  return null;
 }
 
 export function startMockApis({ graph = null, google = null } = {}) {
@@ -171,13 +219,62 @@ export function startMockApis({ graph = null, google = null } = {}) {
     const body = req.method === 'POST' ? await readBody(req) : '';
     try {
       // ---------------- Microsoft Entra ID / Graph ----------------
-      const login = /^\/graph-login\/([^/]+)\/oauth2\/v2\.0\/token$/.exec(url.pathname);
+      const login = /^\/graph-login\/([^/]+)\/oauth2\/v2\.0\/(token|devicecode)$/.exec(url.pathname);
       if (login) {
         const form = new URLSearchParams(body);
-        if (decodeURIComponent(login[1]) !== graph.tenant) return json(res, 400, { error: 'invalid_request', error_description: 'AADSTS90002: Tenant not found.' });
+        const tenant = decodeURIComponent(login[1]);
+        const d = graph.delegated || {};
+        const grant = form.get('grant_type');
+        const delegatedGrant = login[2] === 'devicecode' || grant !== 'client_credentials';
+        if (tenant !== graph.tenant && !(delegatedGrant && ['organizations', 'common', 'consumers'].includes(tenant))) return json(res, 400, { error: 'invalid_request', error_description: 'AADSTS90002: Tenant not found.' });
         if (form.get('client_id') !== graph.clientId) return json(res, 400, { error: 'unauthorized_client', error_description: 'AADSTS700016: Application not found.' });
-        if (form.get('client_secret') !== graph.secret) return json(res, 401, { error: 'invalid_client', error_description: 'AADSTS7000215: Invalid client secret provided.' });
-        return json(res, 200, { access_token: 'graph-token', expires_in: 3600, token_type: 'Bearer' });
+        (graph.tokenRequests ||= []).push({ endpoint: login[2], grant, scope: form.get('scope') || '' });
+        if (login[2] === 'devicecode') {
+          const code = `device-${crypto.randomUUID()}`;
+          (d.devices ||= {})[code] = { user: d.signInAs, pendingPolls: d.pendingPolls ?? 1, scopes: String(form.get('scope') || '').split(' ') };
+          return json(res, 200, { device_code: code, user_code: 'ABCD-EFGH', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900, interval: 1, message: 'To sign in, use a web browser...' });
+        }
+        // Conta conectada: resposta com o token de acesso ao recurso pedido e um novo token de atualização.
+        const delegatedTokens = (user, scopes) => {
+          const refresh = `rt-${crypto.randomUUID()}`;
+          (d.refreshTokens ||= {})[refresh] = { user, scopes };
+          (d.issued ||= []).push(refresh);
+          const granted = scopes.filter((x) => !OIDC_SCOPES.has(x));
+          const u = graph.users.find((x) => x.mail === user) || {};
+          const idToken = `${b64json({ alg: 'none' })}.${b64json({ oid: u.id || user, tid: 'tid-contoso', preferred_username: u.upn || user, name: u.displayName || '' })}.`;
+          return { token_type: 'Bearer', scope: granted.join(' '), expires_in: 3600, access_token: delegatedToken(user, granted), refresh_token: refresh, id_token: idToken };
+        };
+        if (grant === 'urn:ietf:params:oauth:grant-type:device_code') {
+          const device = d.devices?.[form.get('device_code')];
+          if (!device) return json(res, 400, { error: 'bad_verification_code', error_description: 'AADSTS70000: Unknown device code.' });
+          if (d.publicClientDisabled) return json(res, 401, { error: 'invalid_client', error_description: "AADSTS7000218: The request body must contain the following parameter: 'client_assertion' or 'client_secret'." });
+          if (d.declined) return json(res, 400, { error: 'authorization_declined', error_description: 'AADSTS70019: The user declined.' });
+          if (device.pendingPolls > 0) {
+            device.pendingPolls--;
+            return json(res, 400, { error: 'authorization_pending', error_description: 'AADSTS70016: OAuth 2.0 device flow error. Authorization is pending. Continue polling.' });
+          }
+          delete d.devices[form.get('device_code')];
+          return json(res, 200, delegatedTokens(device.user, device.scopes));
+        }
+        if (grant === 'refresh_token') {
+          const entry = d.refreshTokens?.[form.get('refresh_token')];
+          if (d.revoked) return json(res, 400, { error: 'invalid_grant', error_description: 'AADSTS50173: The provided grant has expired due to it being revoked.' });
+          if (!entry) return json(res, 400, { error: 'invalid_grant', error_description: 'AADSTS700082: The refresh token has expired due to inactivity.' });
+          const asked = String(form.get('scope') || '').split(' ').filter((x) => x && !OIDC_SCOPES.has(x));
+          const missing = asked.filter((x) => !entry.scopes.includes(x));
+          if (missing.length) return json(res, 400, { error: 'invalid_grant', error_description: `AADSTS65001: The user or administrator has not consented to use the application (${missing.join(' ')}).` });
+          return json(res, 200, delegatedTokens(entry.user, entry.scopes));
+        }
+        // Aplicativo: segredo do cliente ou certificado (asserção assinada).
+        const imap = form.get('scope') === 'https://outlook.office365.com/.default';
+        if (form.get('client_assertion')) {
+          const problem = checkAssertion(graph, form, `${base}/graph-login/${login[1]}/oauth2/v2.0/token`);
+          if (problem) return json(res, 401, { error: 'invalid_client', error_description: problem });
+          graph.assertions = (graph.assertions || 0) + 1;
+        } else if (form.get('client_secret') !== graph.secret) {
+          return json(res, 401, { error: 'invalid_client', error_description: 'AADSTS7000215: Invalid client secret provided.' });
+        }
+        return json(res, 200, { access_token: imap ? 'imap-app' : 'graph-token', expires_in: 3600, token_type: 'Bearer' });
       }
       // Endereço de download pré-autenticado (como o do SharePoint): sem o cabeçalho de autorização.
       const download = /^\/download\/([^/]+)\/([^/]+)$/.exec(url.pathname);
@@ -203,11 +300,32 @@ export function startMockApis({ graph = null, google = null } = {}) {
         return res.end(found.item.content);
       }
       if (url.pathname.startsWith('/graph/v1.0/')) {
-        if (req.headers.authorization !== 'Bearer graph-token') return json(res, 401, { error: { code: 'InvalidAuthenticationToken', message: 'Token inválido' } });
-        const path = decodeURIComponent(url.pathname.slice('/graph/v1.0'.length));
+        // Aplicativo ("graph-token") ou conta conectada ("d.<json>": conta e permissões delegadas).
+        const bearer = String(req.headers.authorization || '');
+        let principal = null;
+        if (bearer === 'Bearer graph-token') principal = { app: true };
+        else if (bearer.startsWith('Bearer d.')) principal = unb64json(bearer.slice('Bearer d.'.length));
+        if (!principal) return json(res, 401, { error: { code: 'InvalidAuthenticationToken', message: 'Token inválido' } });
+        let path = decodeURIComponent(url.pathname.slice('/graph/v1.0'.length));
         const users = graph.users;
         const find = (key) =>
           users.find((u) => u.id === key || (u.mail.toLowerCase() === String(key).toLowerCase() && u.upnIsMail !== false) || (u.upn && u.upn.toLowerCase() === String(key).toLowerCase()));
+        if (!principal.app) {
+          (graph.delegatedCalls ||= []).push(`${req.method} ${path}`);
+          const me = users.find((u) => u.mail === principal.user);
+          const has = (scope) => principal.scopes.some((x) => x.endsWith(`/${scope}`) || x === scope);
+          if (path === '/me') return json(res, 200, { id: me.id, displayName: me.displayName, mail: me.mail, userPrincipalName: me.upn || me.mail });
+          if (path.startsWith('/me/')) path = `/users/${me.id}${path.slice(3)}`;
+          const target = /^\/users\/([^/]+)\/(.+)$/.exec(path);
+          if (!target) return json(res, 403, { error: { code: 'Authorization_RequestDenied', message: 'Insufficient privileges to complete the operation.' } });
+          const owner = find(target[1]);
+          const own = owner === me;
+          const write = /\/(permanentDelete|move)$/.test(path) && req.method === 'POST';
+          const needed = own ? (write ? ['Mail.ReadWrite'] : ['Mail.Read', 'Mail.ReadWrite']) : write ? ['Mail.ReadWrite.Shared'] : ['Mail.Read.Shared', 'Mail.ReadWrite.Shared'];
+          const allowed = owner && (own || (owner.sharedWith || []).includes(principal.user)) && needed.some(has);
+          if (!allowed) return json(res, 403, { error: { code: 'ErrorAccessDenied', message: 'Access is denied. Check credentials and try again.' } });
+        }
+        if (principal.app && path.startsWith('/me')) return json(res, 400, { error: { code: 'BadRequest', message: '/me request is only valid with delegated authentication flow.' } });
         if (drivesApi({ req, res, path, url, base, graph, find, json })) return;
         if (path === '/users') {
           const filter = url.searchParams.get('$filter');
