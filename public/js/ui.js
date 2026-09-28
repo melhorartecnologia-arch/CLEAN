@@ -175,7 +175,11 @@ export function toast(message, kind = 'info') {
  * Abre um formulário em diálogo modal. onSubmit(form) pode lançar erro (exibido no diálogo) ou
  * devolver false para manter o diálogo aberto.
  */
-export function openDialog({ title, body, submitLabel = 'Salvar', cancelLabel = 'Cancelar', wide = false, danger = false, describe = true, onOpen, onSubmit }) {
+/**
+ * Diálogo com formulário. beforeClose(form): mensagem para avisar antes de fechar sem salvar (Esc,
+ * Cancelar ou ×) — ex.: algo que só é guardado ao salvar; a segunda tentativa fecha. null: fecha direto.
+ */
+export function openDialog({ title, body, submitLabel = 'Salvar', cancelLabel = 'Cancelar', wide = false, danger = false, describe = true, onOpen, onSubmit, beforeClose }) {
   const dialog = document.getElementById('modal');
   dialog.className = wide ? 'wide' : '';
   // Leitores de tela anunciam o título e o texto ao abrir (importante nas confirmações de exclusão);
@@ -202,11 +206,26 @@ export function openDialog({ title, body, submitLabel = 'Salvar', cancelLabel = 
   const errorBox = dialog.querySelector('.dialog-error');
   return new Promise((resolve) => {
     let result = null;
+    let warned = false;
     const close = () => dialog.close();
-    dialog.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', close));
+    // Fechar sem salvar: com beforeClose, o primeiro pedido só avisa (o aviso aparece no lugar dos erros).
+    const cancel = (event) => {
+      const message = !warned && beforeClose ? beforeClose(form) : null;
+      if (!message) {
+        if (event?.type !== 'cancel') close();
+        return;
+      }
+      event?.preventDefault();
+      warned = true;
+      render(errorBox, html`<div class="alert" role="alert">${icon('alert')}<div>${message}</div></div>`);
+      errorBox.hidden = false;
+    };
+    dialog.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', cancel));
+    dialog.addEventListener('cancel', cancel); // Esc
     dialog.addEventListener(
       'close',
       () => {
+        dialog.removeEventListener('cancel', cancel);
         resolve(result);
       },
       { once: true },

@@ -150,9 +150,11 @@ function drivesApi({ req, res, path, url, base, graph, find, json }) {
  *          mensagem é feita, mas a resposta é um erro 503, como uma resposta perdida),
  *          certificatePem? (certificado do aplicativo: a asserção do cliente é conferida com ele),
  *          delegated?: { signInAs (e-mail da conta que entra pelo código), pendingPolls (consultas
- *          "authorization_pending" antes de concluir), publicClientDisabled?, declined?, revoked?,
- *          refreshTokens: { [token]: { user, scopes } } (tokens de atualização válidos; cada renovação
- *          devolve outro e o antigo continua valendo, como no Entra ID), issued: [tokens emitidos] } }
+ *          "authorization_pending" antes de concluir), flakyPolls (consultas que falham com 503 antes),
+ *          publicClientDisabled?, declined?, revoked?, refreshTokens: { [token]: { user, scopes } }
+ *          (tokens de atualização válidos; cada renovação devolve outro e o antigo continua valendo,
+ *          como no Entra ID), issued: [tokens emitidos] },
+ *          tokenLifetime? (segundos de validade dos tokens de acesso; padrão 3600) }
  * google: { publicKey, admin, users: [{ mail, name, disabled?, labels: [{ id, name, type }],
  *          messages: [{ id, raw, labelIds, internalDate }] }], flakyDelete? }
  */
@@ -166,6 +168,9 @@ const b64json = (value) => Buffer.from(JSON.stringify(value)).toString('base64ur
 const unb64json = (text) => JSON.parse(Buffer.from(String(text), 'base64url').toString('utf8'));
 const IMAP_SCOPE = 'https://outlook.office.com/IMAP.AccessAsUser.All';
 const OIDC_SCOPES = new Set(['openid', 'profile', 'offline_access', 'email']);
+// Como o Entra ID: as permissões do Graph voltam com o nome curto ("Mail.Read"), as de outros recursos
+// com o endereço completo; nos pedidos, as duas formas valem.
+const shortScope = (scope) => String(scope).replace(/^https:\/\/graph\.microsoft\.com\//i, '');
 
 /** Token de acesso delegado do simulador: "d.<json>" para o Graph e "i.<json>" para o IMAP. */
 export const delegatedToken = (user, scopes) => `${scopes.includes(IMAP_SCOPE) ? 'i' : 'd'}.${b64json({ user, scopes })}`;
@@ -242,12 +247,17 @@ export function startMockApis({ graph = null, google = null } = {}) {
           const granted = scopes.filter((x) => !OIDC_SCOPES.has(x));
           const u = graph.users.find((x) => x.mail === user) || {};
           const idToken = `${b64json({ alg: 'none' })}.${b64json({ oid: u.id || user, tid: 'tid-contoso', preferred_username: u.upn || user, name: u.displayName || '' })}.`;
-          return { token_type: 'Bearer', scope: granted.join(' '), expires_in: 3600, access_token: delegatedToken(user, granted), refresh_token: refresh, id_token: idToken };
+          const scope = [...granted.map(shortScope), 'openid', 'profile', 'email'].join(' ');
+          return { token_type: 'Bearer', scope, expires_in: graph.tokenLifetime || 3600, access_token: delegatedToken(user, granted), refresh_token: refresh, id_token: idToken };
         };
         if (grant === 'urn:ietf:params:oauth:grant-type:device_code') {
           const device = d.devices?.[form.get('device_code')];
           if (!device) return json(res, 400, { error: 'bad_verification_code', error_description: 'AADSTS70000: Unknown device code.' });
           if (d.publicClientDisabled) return json(res, 401, { error: 'invalid_client', error_description: "AADSTS7000218: The request body must contain the following parameter: 'client_assertion' or 'client_secret'." });
+          if (d.flakyPolls > 0) {
+            d.flakyPolls--;
+            return json(res, 503, { error: 'temporarily_unavailable', error_description: 'AADSTS90033: A transient error has occurred. Please try again.' });
+          }
           if (d.declined) return json(res, 400, { error: 'authorization_declined', error_description: 'AADSTS70019: The user declined.' });
           if (device.pendingPolls > 0) {
             device.pendingPolls--;
@@ -261,7 +271,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
           if (d.revoked) return json(res, 400, { error: 'invalid_grant', error_description: 'AADSTS50173: The provided grant has expired due to it being revoked.' });
           if (!entry) return json(res, 400, { error: 'invalid_grant', error_description: 'AADSTS700082: The refresh token has expired due to inactivity.' });
           const asked = String(form.get('scope') || '').split(' ').filter((x) => x && !OIDC_SCOPES.has(x));
-          const missing = asked.filter((x) => !entry.scopes.includes(x));
+          const missing = asked.filter((x) => !entry.scopes.some((y) => shortScope(y) === shortScope(x)));
           if (missing.length) return json(res, 400, { error: 'invalid_grant', error_description: `AADSTS65001: The user or administrator has not consented to use the application (${missing.join(' ')}).` });
           return json(res, 200, delegatedTokens(entry.user, entry.scopes));
         }
@@ -274,7 +284,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
         } else if (form.get('client_secret') !== graph.secret) {
           return json(res, 401, { error: 'invalid_client', error_description: 'AADSTS7000215: Invalid client secret provided.' });
         }
-        return json(res, 200, { access_token: imap ? 'imap-app' : 'graph-token', expires_in: 3600, token_type: 'Bearer' });
+        return json(res, 200, { access_token: imap ? 'imap-app' : 'graph-token', expires_in: graph.tokenLifetime || 3600, token_type: 'Bearer' });
       }
       // Endereço de download pré-autenticado (como o do SharePoint): sem o cabeçalho de autorização.
       const download = /^\/download\/([^/]+)\/([^/]+)$/.exec(url.pathname);
@@ -319,6 +329,8 @@ export function startMockApis({ graph = null, google = null } = {}) {
           const target = /^\/users\/([^/]+)\/(.+)$/.exec(path);
           if (!target) return json(res, 403, { error: { code: 'Authorization_RequestDenied', message: 'Insufficient privileges to complete the operation.' } });
           const owner = find(target[1]);
+          // Como o Graph: endereço desconhecido (ou diferente do nome de logon) é "usuário inválido".
+          if (!owner) return json(res, 404, { error: { code: 'ErrorInvalidUser', message: `The requested user '${target[1]}' is invalid.` } });
           const own = owner === me;
           const write = /\/(permanentDelete|move)$/.test(path) && req.method === 'POST';
           const needed = own ? (write ? ['Mail.ReadWrite'] : ['Mail.Read', 'Mail.ReadWrite']) : write ? ['Mail.ReadWrite.Shared'] : ['Mail.Read.Shared', 'Mail.ReadWrite.Shared'];

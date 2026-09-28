@@ -45,6 +45,19 @@ export class GraphConnector extends GraphClient {
     return graphError(err, { delegated: this.delegated });
   }
 
+  /**
+   * Conta conectada: a caixa informada não existe para o Microsoft Graph (endereço errado ou
+   * diferente do nome de logon) ou não tem caixa no Exchange Online. É um erro (e não uma caixa
+   * ignorada): quem cadastrou a lista pediu para analisá-la.
+   */
+  missingMailbox(address, err) {
+    const own = this.ownMailbox(address);
+    const message = own
+      ? `A conta conectada (${address}) não tem caixa de correio no Exchange Online (sem licença, desativada ou local).`
+      : `A caixa ${address} não foi encontrada para a conta conectada: confira o endereço (use o endereço principal da caixa ou o nome de logon dela no Microsoft 365) e se a conta tem acesso a ela.`;
+    return new ApiError(message, err);
+  }
+
   /** A caixa é a da própria conta conectada (acessada por /me). */
   ownMailbox(address) {
     const account = this.source.graph?.account || {};
@@ -89,7 +102,9 @@ export class GraphConnector extends GraphClient {
     try {
       return (await this.api(`${base}/mailFolders/${name}?$select=id`))?.id || null;
     } catch (err) {
-      if (err.status === 404 && !NO_MAILBOX.has(err.code)) return null;
+      // Pasta que não existe na caixa (ex.: sem Lixo Eletrônico). Com a conta conectada, o endereço da
+      // caixa não foi conferido antes: "recurso não encontrado" é a própria caixa.
+      if (err.status === 404 && !NO_MAILBOX.has(err.code) && !(this.delegated && /ResourceNotFound/i.test(err.code))) return null;
       throw err;
     }
   }
@@ -98,7 +113,7 @@ export class GraphConnector extends GraphClient {
    * Pastas da caixa (com subpastas), sem as excluídas pelas opções e pelos padrões da conexão.
    * base: início dos endereços da caixa (resolveUser().path).
    */
-  async folders(base, { includeTrash = true, includeJunk = false } = {}) {
+  async folders(base, { includeTrash = true, includeJunk = false, address = '' } = {}) {
     const skip = new Set();
     let trash = null;
     try {
@@ -109,6 +124,7 @@ export class GraphConnector extends GraphClient {
       if (!includeJunk && junk) skip.add(junk);
       if (sync) skip.add(sync); // registros de sincronização do Outlook
     } catch (err) {
+      if (this.delegated && (NO_MAILBOX.has(err.code) || err.status === 404)) throw this.missingMailbox(address, err);
       if (NO_MAILBOX.has(err.code) || err.status === 404) throw new SkipMailboxError('usuário sem caixa de correio no Exchange Online (sem licença, desativada ou local).');
       // Com "todas as caixas" e o acesso limitado pelo RBAC para aplicativos, as caixas fora do
       // escopo respondem 403: são ignoradas (com aviso), não contadas como erro.
@@ -145,7 +161,7 @@ export class GraphConnector extends GraphClient {
   async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
     const user = await this.resolveUser(mailbox);
     mailbox.name ||= user.name;
-    const folders = await this.folders(user.path, { includeTrash, includeJunk });
+    const folders = await this.folders(user.path, { includeTrash, includeJunk, address: mailbox.address });
     const userPath = user.path;
     const conditions = [since && `receivedDateTime ge ${since.toISOString()}`, before && `receivedDateTime lt ${before.toISOString()}`].filter(Boolean);
     const filter = conditions.length ? `&$filter=${enc(conditions.join(' and '))}` : '';
@@ -230,6 +246,7 @@ export class GraphConnector extends GraphClient {
         checked++;
       } catch (err) {
         // Em "todas as caixas", usuários sem caixa ou fora do escopo do RBAC são pulados.
+        if (this.delegated && (NO_MAILBOX.has(err.code) || err.status === 404)) return { ok: false, message: this.missingMailbox(box.address, err).message, details };
         if (this.source.scope === 'all' && !this.delegated && (NO_MAILBOX.has(err.code) || err.status === 404 || err.status === 403)) {
           skipped = err;
           continue;

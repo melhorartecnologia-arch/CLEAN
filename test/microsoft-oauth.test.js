@@ -11,7 +11,7 @@ import { MailScanner } from '../src/mail/scanner.js';
 import { GraphConnector } from '../src/mail/graph.js';
 import { imapError } from '../src/mail/imap.js';
 import { createCertificate, importCertificate } from '../src/cloud/certificate.js';
-import { aadError, delegatedScopes, clientAssertion } from '../src/cloud/microsoft-auth.js';
+import { aadError, delegatedScopes, clientAssertion, MicrosoftAuth } from '../src/cloud/microsoft-auth.js';
 import { ApiError } from '../src/mail/http.js';
 import { mailDeletionScope } from '../src/scan/delete.js';
 import { createApp } from '../src/app.js';
@@ -161,8 +161,12 @@ test('permissões pedidas na entrada: leitura ou escrita, compartilhadas só com
 
 test('erros do Entra ID viram a providência a tomar', () => {
   const err = (message, code = '') => new ApiError(message, { status: 400, code });
-  assert.match(aadError(err("AADSTS7000218: The request body must contain the following parameter: 'client_assertion' or 'client_secret'.")).message, /Permitir fluxos de cliente público/);
+  assert.match(aadError(err("AADSTS7000218: The request body must contain the following parameter: 'client_assertion' or 'client_secret'.")).message, /Permitir fluxos de clientes públicos/);
   assert.match(aadError(err('AADSTS700027: Client assertion failed signature validation.')).message, /envie o arquivo do certificado/);
+  assert.match(aadError(err('AADSTS700027: Client assertion failed signature validation. Reason - The key used is expired.')).message, /certificado do aplicativo venceu/);
+  // Os identificadores do Entra ID ficam na mensagem, para o administrador achar a entrada nos logs.
+  const traced = aadError(err('AADSTS7000215: Invalid client secret provided. Trace ID: 0a1b2c3d-1111-2222-3333-444455556666 Correlation ID: 9f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff Timestamp: 2026-09-28'));
+  assert.match(traced.message, /Segredo do cliente inválido.*AADSTS7000215 · Trace ID 0a1b2c3d-1111-2222-3333-444455556666 · Correlation ID 9f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff/);
   assert.match(aadError(err('AADSTS700082: The refresh token has expired due to inactivity.', 'invalid_grant'), { delegated: true }).message, /90 dias.*Conectar conta/);
   assert.match(aadError(err('AADSTS99999: algo novo', 'invalid_grant'), { delegated: true }).message, /não vale mais.*Conectar conta/);
   assert.equal(aadError(err('AADSTS99999: algo novo', 'invalid_grant')), null, 'sem conta conectada, fica o erro original');
@@ -209,16 +213,21 @@ test('Microsoft 365 com certificado: o Entra ID confere a asserção e a anális
 });
 
 test('Microsoft 365 com a conta conectada: /me, caixa compartilhada, sem acesso às outras e token renovado', async () => {
-  const source = delegatedSource({ mailboxes: [{ address: 'ana@contoso.com' }, { address: 'rh@contoso.com' }, { address: 'bia@contoso.com' }] });
+  const source = delegatedSource({ mailboxes: [{ address: 'ana@contoso.com' }, { address: 'rh@contoso.com' }, { address: 'bia@contoso.com' }, { address: 'naoexiste@contoso.com' }] });
   graph.delegatedCalls = [];
-  const { records, errors, credentials } = await runMail([source]);
+  const { records, errors, credentials, stats } = await runMail([source]);
   assert.deepEqual(records.map((r) => `${r.mailbox}:${r.subject}`).sort(), ['ana@contoso.com:Relatório a', 'rh@contoso.com:Relatório r']);
   assert.ok(graph.delegatedCalls.some((c) => c.startsWith('GET /me/mailFolders')), 'a caixa da própria conta é lida por /me');
   assert.ok(graph.delegatedCalls.some((c) => c.startsWith('GET /users/rh@contoso.com/mailFolders')), 'a compartilhada, pelo endereço');
   assert.ok(!graph.delegatedCalls.some((c) => /^GET \/users(\?|$)/.test(c)), 'não lista os usuários do locatário');
-  assert.equal(errors.length, 1);
+  assert.equal(errors.length, 2);
   assert.equal(errors[0].path, 'bia@contoso.com');
   assert.match(errors[0].message, /conta conectada não tem acesso a ela/);
+  // Endereço desconhecido (ou diferente do nome de logon): erro, e não "caixa ignorada".
+  assert.equal(errors[1].path, 'naoexiste@contoso.com');
+  assert.match(errors[1].message, /não foi encontrada para a conta conectada: confira o endereço/);
+  assert.equal(stats.mailboxesSkipped, 0);
+  assert.equal(stats.gaps, 2);
   // A Microsoft devolve um novo token de atualização a cada renovação: vai para o servidor gravar.
   assert.equal(credentials.length, 1);
   assert.equal(credentials[0].sourceId, 'src-conta');
@@ -235,10 +244,15 @@ test('Microsoft 365 com a conta conectada: /me, caixa compartilhada, sem acesso 
   assert.deepEqual(ok.get('r2'), { ok: true });
   assert.ok(graph.users[1].messages.trash.some((m) => m.id === 'r2'), 'movida para Itens Excluídos da caixa compartilhada');
 
-  // Autorização revogada (troca de senha, sessões encerradas): pede para conectar a conta de novo.
-  const revoked = await runMail([delegatedSource({ secrets: { refreshToken: 'rt-desconhecido' } })]);
+  // Autorização vencida (90 dias sem uso): pede para conectar a conta de novo — uma vez só, sem
+  // repetir o pedido à Microsoft para cada caixa.
+  const before = graph.tokenRequests.length;
+  const revoked = await runMail([delegatedSource({ secrets: { refreshToken: 'rt-desconhecido' }, mailboxes: [{ address: 'ana@contoso.com' }, { address: 'rh@contoso.com' }, { address: 'bia@contoso.com' }] })]);
   assert.equal(revoked.records.length, 0);
+  assert.equal(graph.tokenRequests.length - before, 1, 'um pedido de token só');
+  assert.equal(revoked.errors.length, 2);
   assert.match(revoked.errors[0].message, /expirou por falta de uso.*Conectar conta/);
+  assert.match(revoked.errors[1].message, /^2 caixas da conexão não foram analisadas: A autorização da conta conectada expirou/);
 });
 
 test('IMAP com OAuth da Microsoft: conta conectada e aplicativo (XOAUTH2), só em servidor da Microsoft', async () => {
@@ -296,6 +310,84 @@ test('IMAP com OAuth da Microsoft: conta conectada e aplicativo (XOAUTH2), só e
   }
 });
 
+test('IMAP com OAuth: a sessão que cai (token vencido) continua numa nova, sem perder nem repetir mensagens', async () => {
+  const oauthLogins = [];
+  // Maiores que o limite da análise (1 MB): baixadas uma a uma, cada uma num FETCH.
+  const big = (n) => ({ raw: mail(`Grande ${n}`, `confidencial ${'x'.repeat(1100000)}`), date: new Date('2026-09-20T10:00:00Z') });
+  const small = (n) => ({ raw: mail(`Pequena ${n}`, 'confidencial'), date: new Date('2026-09-20T10:00:00Z') });
+  // 1 FETCH para listar cada pasta + 1 por mensagem grande (baixada sozinha) ou por lote de pequenas:
+  // com 3 FETCH por sessão, a sessão cai três vezes no meio da leitura.
+  const server = await startFakeImap(
+    { 'ana@contoso.com': { password: 'x', folders: { INBOX: [big(1), big(2), big(3), big(4)], Arquivo: [small(1), small(2)] } } },
+    { oauthLogins, dropAfterFetches: 3, oauth: (login, token) => imapTokenUser(token) === login },
+  );
+  const lifetime = graph.tokenLifetime;
+  try {
+    graph.tokenLifetime = 20 * 60; // 20 minutos: menos que o mínimo de uma sessão (30), então cada sessão pede outro
+    const endpoints = { ...mocks.endpoints, microsoftImap: { hosts: ['127.0.0.1'], insecure: true } };
+    const refreshes = () => (graph.tokenRequests || []).filter((r) => r.grant === 'refresh_token').length;
+    const before = refreshes();
+    const messages = [];
+    const scanner = new MailScanner(
+      {
+        sources: [
+          {
+            id: 'src-queda',
+            name: 'IMAP que cai',
+            type: 'imap',
+            scope: 'list',
+            mailboxes: [{ address: 'ana@contoso.com' }],
+            excludeMailboxes: [],
+            excludeFolders: [],
+            imap: { host: '127.0.0.1', port: server.port, security: 'none', auth: 'oauth' },
+            graph: { tenantId: TENANT, clientId: CLIENT, auth: 'delegated', account: { username: 'ana@contoso.com', address: 'ana@contoso.com', scopes: [IMAP_SCOPE], grantId: 'g-queda' } },
+            secrets: { refreshToken: refreshTokenFor('ana@contoso.com', [IMAP_SCOPE]) },
+          },
+        ],
+        terms: TERMS,
+        options: { maxMessageSizeMB: 1 },
+        endpoints,
+      },
+      (m) => messages.push(m),
+    );
+    const stats = await scanner.run();
+    const records = messages.filter((m) => m.type === 'results').flatMap((m) => m.records);
+    const errors = messages.filter((m) => m.type === 'errors').flatMap((m) => m.items);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(records.map((r) => r.subject).sort(), ['Grande 1', 'Grande 2', 'Grande 3', 'Grande 4', 'Pequena 1', 'Pequena 2'], 'todas, uma vez cada');
+    assert.equal(stats.messagesSeen, 6);
+    assert.ok(oauthLogins.length >= 3, `novas sessões depois das quedas (${oauthLogins.length})`);
+    assert.equal(refreshes() - before, oauthLogins.length, 'cada sessão com um token novo (o guardado vale menos de 30 min)');
+  } finally {
+    graph.tokenLifetime = lifetime;
+    await server.close();
+  }
+});
+
+test('token: renovado quando vale menos que o pedido; certificado vencido nem chega a ser enviado', async () => {
+  const lifetime = graph.tokenLifetime;
+  try {
+    graph.tokenLifetime = 20 * 60;
+    const auth = new MicrosoftAuth({ tenantId: TENANT, clientId: CLIENT, auth: 'secret' }, { clientSecret: SECRET }, { login: mocks.endpoints.graphLogin });
+    const count = () => (graph.tokenRequests || []).filter((r) => r.grant === 'client_credentials').length;
+    const before = count();
+    await auth.token('graph');
+    await auth.token('graph');
+    assert.equal(count() - before, 1, 'guardado enquanto vale mais de 2 minutos');
+    await auth.token('graph', { minValidityMs: 30 * 60 * 1000 });
+    assert.equal(count() - before, 2, 'renovado: vale menos de 30 minutos');
+    assert.ok(auth.expiresAt('graph') > Date.now() + 19 * 60 * 1000);
+  } finally {
+    graph.tokenLifetime = lifetime;
+  }
+  const expired = { ...cert.certificate, notAfter: '2025-01-31T12:00:00.000Z' };
+  const old = new MicrosoftAuth({ tenantId: TENANT, clientId: CLIENT, auth: 'certificate', certificate: expired }, { certificateKey: cert.privateKeyPem }, { login: mocks.endpoints.graphLogin });
+  const before = (graph.tokenRequests || []).length;
+  await assert.rejects(old.token('graph'), /certificado do aplicativo venceu em 31\/01\/2025: na conexão, gere um novo certificado/);
+  await assert.rejects(old.token('graph'), /venceu em/);
+  assert.equal((graph.tokenRequests || []).length, before, 'nenhum pedido com o certificado vencido');
+});
+
 // ---------------------------------------------------------------------------------------------
 // API: entrada da conta, certificado, cadastro, teste, análise e exclusão
 
@@ -326,13 +418,14 @@ async function startApp() {
 }
 
 /** Entrada pelo código de dispositivo até o fim (o simulador responde "pendente" na 1ª consulta). */
-async function signIn(api, body) {
+async function signIn(api, body, { onPending } = {}) {
   const started = await api('POST', '/api/mail-sources/oauth/device', body);
   assert.equal(started.status, 201, JSON.stringify(started.data));
   let state;
-  for (let i = 0; i < 40; i++) {
-    state = (await api('GET', `/api/mail-sources/oauth/device/${started.data.flowId}`)).data;
+  for (let i = 0; i < 80; i++) {
+    state = (await api('POST', '/api/mail-sources/oauth/device/status', { flowId: started.data.flowId })).data;
     if (state.status !== 'pending') break;
+    onPending?.(state);
     await new Promise((r) => setTimeout(r, 150));
   }
   return { ...started.data, state };
@@ -411,11 +504,14 @@ test('API: conta conectada pelo código, token cifrado, teste, análise e exclus
     const otherApp = await app.api('PUT', `/api/mail-sources/${src.id}`, { ...src, graph: { tenantId: TENANT, clientId: '99999999-2222-3333-4444-555555555555', auth: 'delegated' } });
     assert.equal(otherApp.status, 400);
     assert.match(otherApp.data.error, /conecte a conta novamente/);
-    const readOnly = await signIn(app.api, { type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT }, allowDelete: false });
+    const readOnly = await signIn(app.api, { id: src.id, type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT }, allowDelete: false });
     assert.equal(readOnly.state.account.canDelete, false);
     const noWrite = await app.api('PUT', `/api/mail-sources/${src.id}`, { ...src, allowDelete: true, graph: { tenantId: TENANT, clientId: CLIENT, auth: 'delegated', signIn: readOnly.flowId } });
     assert.equal(noWrite.status, 400);
     assert.match(noWrite.data.error, /autorizou somente a leitura/);
+    const testedReadOnly = await app.api('POST', '/api/mail-sources/test', { ...src, allowDelete: true, graph: { tenantId: TENANT, clientId: CLIENT, auth: 'delegated', signIn: readOnly.flowId } });
+    assert.equal(testedReadOnly.data.ok, false, 'o teste avisa o que o salvar recusaria');
+    assert.match(testedReadOnly.data.message, /leitura das caixas funciona, mas a exclusão está permitida/);
 
     // Autorização revogada: o teste explica o que fazer.
     graph.delegated.revoked = true;
@@ -435,7 +531,7 @@ test('API: entrada recusada pelo registro do aplicativo e locatário genérico s
     graph.delegated.pendingPolls = 0;
     const flow = await signIn(app.api, { type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT } });
     assert.equal(flow.state.status, 'failed');
-    assert.match(flow.state.error, /Permitir fluxos de cliente público/);
+    assert.match(flow.state.error, /Permitir fluxos de clientes públicos/);
     graph.delegated.publicClientDisabled = false;
 
     const generic = await app.api('POST', '/api/mail-sources', { name: 'X', type: 'graph', graph: { tenantId: 'organizations', clientId: CLIENT, auth: 'secret', clientSecret: SECRET } });
@@ -445,11 +541,40 @@ test('API: entrada recusada pelo registro do aplicativo e locatário genérico s
     assert.equal(personal.state.status, 'connected');
     const scopes = graph.tokenRequests.filter((r) => r.endpoint === 'devicecode').at(-1).scope;
     assert.ok(!scopes.includes('.Shared'), 'contas pessoais não têm caixas compartilhadas');
-    const unknown = await app.api('GET', '/api/mail-sources/oauth/device/nao-existe');
+    const unknown = await app.api('POST', '/api/mail-sources/oauth/device/status', { flowId: 'nao-existe' });
     assert.equal(unknown.data.status, 'failed');
+
+    // Falha passageira da Microsoft (503) numa consulta: a entrada continua, e termina.
+    graph.delegated.flakyPolls = 2;
+    graph.delegated.pendingPolls = 1;
+    const notices = [];
+    const flaky = await signIn(app.api, { type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT } }, { onPending: (state) => state.notice && notices.push(state.notice) });
+    assert.equal(flaky.state.status, 'connected', JSON.stringify(flaky.state));
+    assert.match(notices[0], /Falha momentânea ao consultar a Microsoft/);
+
+    // Entrada ainda em andamento, cancelada ou começada em outra conexão: não é salva.
+    graph.delegated.pendingPolls = 50;
+    const started = await app.api('POST', '/api/mail-sources/oauth/device', { type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT } });
+    const body = { name: 'X', type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT, auth: 'delegated', signIn: started.data.flowId } };
+    const unfinished = await app.api('POST', '/api/mail-sources', body);
+    assert.equal(unfinished.status, 400);
+    assert.match(unfinished.data.error, /ainda não terminou/);
+    assert.equal((await app.api('POST', '/api/mail-sources/oauth/device/cancel', { flowId: started.data.flowId })).status, 204);
+    const cancelled = await app.api('POST', '/api/mail-sources', body);
+    assert.match(cancelled.data.error, /não está mais disponível/);
+    graph.delegated.pendingPolls = 0;
+    const source = await app.api('POST', '/api/mail-sources', { name: 'Segredo', type: 'graph', scope: 'all', graph: { tenantId: TENANT, clientId: CLIENT, auth: 'secret', clientSecret: SECRET } });
+    const forOther = await signIn(app.api, { id: source.data.id, type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT } });
+    assert.equal(forOther.state.status, 'connected');
+    const elsewhere = await app.api('POST', '/api/mail-sources', { name: 'Outra', type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT, auth: 'delegated', signIn: forOther.flowId } });
+    assert.equal(elsewhere.status, 400);
+    assert.match(elsewhere.data.error, /feita em outra conexão/);
+    const here = await app.api('PUT', `/api/mail-sources/${source.data.id}`, { name: 'Segredo', type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT, auth: 'delegated', signIn: forOther.flowId } });
+    assert.equal(here.status, 200, JSON.stringify(here.data));
   } finally {
     graph.delegated.publicClientDisabled = false;
     graph.delegated.pendingPolls = 1;
+    graph.delegated.flakyPolls = 0;
     await app.close();
   }
 });
@@ -457,8 +582,14 @@ test('API: entrada recusada pelo registro do aplicativo e locatário genérico s
 test('API: certificado gerado no CLEAN (chave só no servidor), teste, cadastro e repositório ligado', async () => {
   const app = await startApp();
   try {
-    const generated = await app.api('POST', '/api/mail-sources/certificate', { name: 'E-mail' });
+    const longName = 'Caixas do departamento financeiro e contábil da matriz em São Paulo';
+    const long = await app.api('POST', '/api/mail-sources/certificate', { name: longName });
+    assert.equal(long.status, 201, 'nome longo: o nome do certificado é cortado');
+    assert.equal(long.data.certificate.subject, `CN=CLEAN - ${longName.slice(0, 56).trim()}`, 'o nome do certificado (CN) tem no máximo 64 caracteres');
+    const generated = await app.api('POST', '/api/mail-sources/certificate', { name: 'E-mail', replaces: long.data.certificateId });
     assert.equal(generated.status, 201);
+    const replaced = await app.api('POST', '/api/mail-sources', { name: 'Y', type: 'graph', scope: 'all', graph: { tenantId: TENANT, clientId: CLIENT, auth: 'certificate', certificateId: long.data.certificateId } });
+    assert.equal(replaced.status, 400, 'o certificado substituído saiu da memória');
     const { certificateId, certificate } = generated.data;
     assert.match(certificate.thumbprint, /^[0-9A-F]{40}$/);
     assert.equal(certificate.subject, 'CN=CLEAN - E-mail');
@@ -489,10 +620,18 @@ test('API: certificado gerado no CLEAN (chave só no servidor), teste, cadastro 
     assert.ok(app.store.openRepositorySecrets(app.store.getRepository(repo.data.id)).certificateKey.includes('PRIVATE KEY'));
 
     // A conexão passa para a conta conectada: o repositório deixa de estar ligado (permissões só de e-mail).
-    const flow = await signIn(app.api, { type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT } });
+    const flow = await signIn(app.api, { id: created.data.id, type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT } });
     const delegated = await app.api('PUT', `/api/mail-sources/${created.data.id}`, { ...body, graph: { tenantId: TENANT, clientId: CLIENT, auth: 'delegated', signIn: flow.flowId } });
     assert.equal(delegated.status, 200, JSON.stringify(delegated.data));
     assert.equal(app.store.getRepository(repo.data.id).credentialsFrom, null);
+    // O repositório desligado continua com o certificado e pode ser editado sem informar um segredo.
+    const renamed = await app.api('PUT', `/api/repositories/${repo.data.id}`, { name: 'OneDrive (certificado)', type: 'onedrive', scope: 'all', graph: { tenantId: TENANT, clientId: CLIENT, clientSecret: '' } });
+    assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+    assert.equal(renamed.data.graph.auth, 'certificate');
+    assert.equal(renamed.data.graph.hasCertificateKey, true);
+    const toSecret = await app.api('PUT', `/api/repositories/${repo.data.id}`, { name: 'OneDrive', type: 'onedrive', scope: 'all', graph: { tenantId: TENANT, clientId: CLIENT, clientSecret: SECRET } });
+    assert.equal(toSecret.data.graph.auth, undefined, 'com um segredo informado, passa a usar o segredo');
+    assert.equal(toSecret.data.graph.hasClientSecret, true);
     const link = await app.api('POST', '/api/repositories', { name: 'SharePoint', type: 'sharepoint', scope: 'all', credentialsFrom: created.data.id });
     assert.equal(link.status, 400);
     assert.match(link.data.error, /usa uma conta conectada/);
@@ -533,6 +672,23 @@ test('API: IMAP com OAuth — só servidores da Microsoft, sem senhas, e a caixa
     // Uma conta conectada para o IMAP não serve para o Microsoft Graph (e vice-versa).
     const asGraph = await app.api('POST', '/api/mail-sources', { name: 'Z', type: 'graph', graph: { tenantId: TENANT, clientId: CLIENT, auth: 'delegated', signIn: flow.flowId } });
     assert.equal(asGraph.status, 400);
+
+    // Com OAuth, o login do XOAUTH2 é o e-mail da caixa: um login de senha deixado na lista não é guardado.
+    const app2 = await app.api('POST', '/api/mail-sources', {
+      name: 'IMAP aplicativo',
+      type: 'imap',
+      imap: { host: 'outlook.office365.com', security: 'tls', auth: 'oauth' },
+      mailboxes: [{ address: 'financeiro@contoso.com', login: 'CONTOSO\\svc\\financeiro' }],
+      graph: { tenantId: TENANT, clientId: CLIENT, auth: 'secret', clientSecret: SECRET },
+    });
+    assert.equal(app2.status, 201, JSON.stringify(app2.data));
+    assert.deepEqual(app2.data.mailboxes.map((m) => m.login), [undefined]);
+    // O segredo do mesmo aplicativo continua valendo ao passar para o tipo Microsoft 365 (e de volta).
+    const asM365 = await app.api('PUT', `/api/mail-sources/${app2.data.id}`, { name: 'Microsoft 365', type: 'graph', scope: 'all', graph: { tenantId: TENANT, clientId: CLIENT, auth: 'secret', clientSecret: '' } });
+    assert.equal(asM365.status, 200, JSON.stringify(asM365.data));
+    assert.equal(asM365.data.graph.hasClientSecret, true);
+    const otherApp = await app.api('PUT', `/api/mail-sources/${app2.data.id}`, { name: 'Microsoft 365', type: 'graph', scope: 'all', graph: { tenantId: TENANT, clientId: '99999999-2222-3333-4444-555555555555', auth: 'secret', clientSecret: '' } });
+    assert.equal(otherApp.status, 400, 'outro aplicativo: o segredo precisa ser informado de novo');
   } finally {
     await app.close();
   }

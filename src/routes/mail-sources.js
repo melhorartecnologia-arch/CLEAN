@@ -16,6 +16,12 @@ import { PendingCredentials } from '../cloud/pending-credentials.js';
 import { friendlyError } from '../scan/errors.js';
 import { checkDeleteSchedules } from '../schedule/scheduler.js';
 
+/** Mensagem de um erro ao falar com a Microsoft (tempo esgotado em português). */
+const microsoftError = (err) =>
+  err?.name === 'TimeoutError' || err?.name === 'AbortError'
+    ? 'Tempo esgotado ao falar com a Microsoft (login.microsoftonline.com): confira a conexão deste servidor com a internet e tente de novo.'
+    : friendlyError(err);
+
 const HOST_RE = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$|^\[?[0-9a-f:.]+\]?$/i;
 const MAX_MAILBOXES = 5000;
 // Entrada concluída ou certificado gerado: disponíveis para salvar a conexão por este tempo.
@@ -73,9 +79,17 @@ export function parseMailSource(body = {}, existing = null, box, { forTest = fal
   // Microsoft 365, ou IMAP da Microsoft com login OAuth: credenciais do Microsoft Entra ID.
   const imapOAuth = type === 'imap' && body.imap?.auth === 'oauth';
   const microsoft = type === 'graph' || imapOAuth;
-  const wasMicrosoft = sameType && existing.graph && (type === 'graph' || existing.imap?.auth === 'oauth');
+  // As credenciais do aplicativo (segredo ou certificado) valem também ao trocar entre Microsoft 365 e
+  // IMAP com OAuth (o mesmo aplicativo, no mesmo locatário); a conta conectada, só para o mesmo uso.
+  const hadMicrosoft = Boolean(existing?.graph) && (existing.type === 'graph' || existing.imap?.auth === 'oauth');
   const creds = microsoft
-    ? microsoftCredentials(body.graph || {}, { previous: wasMicrosoft ? { graph: existing.graph, secrets: prev } : null, box, pending, purpose: type === 'graph' ? 'graph' : 'imap' })
+    ? microsoftCredentials(body.graph || {}, {
+        previous: hadMicrosoft ? { graph: existing.graph, secrets: existing.secrets || {} } : null,
+        box,
+        pending,
+        purpose: type === 'graph' ? 'graph' : 'imap',
+        sourceId: existing?.id || null,
+      })
     : null;
   const msAccount = creds?.graph.account || null; // conta Microsoft conectada
   const data = {
@@ -147,7 +161,8 @@ export function parseMailSource(body = {}, existing = null, box, { forTest = fal
       const address = email(m?.address, `o e-mail da caixa ${index + 1}`);
       if (!address || seen.has(key(address))) continue;
       seen.add(key(address));
-      const login = text(m?.login, `o login da caixa ${address}`, { max: 320 });
+      // Com OAuth, o login (XOAUTH2) é o próprio e-mail da caixa: um login de senha não é guardado.
+      const login = imapOAuth ? '' : text(m?.login, `o login da caixa ${address}`, { max: 320 });
       data.mailboxes.push(login && login !== address ? { address, login } : { address });
       if (imapOAuth) continue; // login pelo token da Microsoft, sem senha
       const password = text(m?.password, `a senha da caixa ${address}`, { max: 1000 });
@@ -203,19 +218,18 @@ export function mailSourcesRouter({ store, manager = null, scheduler = null, end
   const router = Router();
   const pending = new PendingCredentials();
   const login = endpoints.graphLogin || GRAPH_ENDPOINTS.login;
-  // Credenciais ainda não salvas, para parseMailSource: a entrada concluída e o certificado gerado.
+  // Credenciais ainda não salvas, para parseMailSource: a entrada da conta (com a situação dela) e o
+  // certificado gerado ou importado.
   const lookups = {
-    signIn: (id) => {
-      const flow = pending.get(id, 'device');
-      return flow?.status === 'connected' ? flow : null;
-    },
+    signIn: (id) => pending.get(id, 'device'),
     certificate: (id) => pending.get(id, 'certificate'),
   };
   const parse = (body, existing, options = {}) => parseMailSource(body, existing, store.secrets, { ...options, pending: lookups, endpoints });
   // Depois de salvar, a entrada e o certificado usados saem da memória.
   const forgetPending = (body) => {
-    pending.delete(body?.graph?.signIn);
-    pending.delete(body?.graph?.certificateId);
+    const g = body?.graph || {};
+    if (pending.get(g.signIn, 'device')) pending.delete(g.signIn);
+    if (pending.get(g.certificateId, 'certificate')) pending.delete(g.certificateId);
   };
 
   const find = (id) => {
@@ -227,27 +241,45 @@ export function mailSourcesRouter({ store, manager = null, scheduler = null, end
   // ---------- Conta Microsoft conectada: entrada pelo código de dispositivo ----------
   //
   // O CLEAN pede um código à Microsoft; a pessoa abre o endereço mostrado (em qualquer navegador),
-  // digita o código e entra com a conta. Enquanto isso, a tela consulta o resultado; ao terminar, o
-  // token de atualização fica na memória do servidor até a conexão ser salva (gravado cifrado).
+  // digita o código e entra com a conta. Enquanto isso, a tela consulta o resultado (POST, com o
+  // identificador no corpo: não fica nos registros de acesso de um proxy); ao terminar, o token de
+  // atualização fica na memória do servidor até a conexão ser salva (gravado cifrado). A entrada fica
+  // presa à conexão em que foi começada (ou a uma conexão nova).
 
   router.post('/oauth/device', async (req, res) => {
     const body = req.body || {};
     const purpose = body.type === 'imap' ? 'imap' : 'graph';
+    const sourceId = typeof body.id === 'string' && body.id ? find(body.id).id : null;
     const { tenantId, clientId } = microsoftApp(body.graph || {}, { delegated: true });
-    const scopes = delegatedScopes(purpose, { write: body.allowDelete === true, tenantId });
+    const write = body.allowDelete === true;
+    const scopes = delegatedScopes(purpose, { write, tenantId });
     let start;
     try {
-      start = await startDeviceCode({ login, tenantId, clientId, scopes, signal: AbortSignal.timeout(45000) });
+      start = await startDeviceCode({ login, tenantId, clientId, scopes });
     } catch (err) {
-      throw bad(friendlyError(err));
+      throw bad(microsoftError(err));
     }
     const now = Date.now();
     const flow = pending.add(
       'device',
-      { tenantId, clientId, purpose, deviceCode: start.deviceCode, interval: start.interval, nextPoll: now + start.interval * 1000, codeExpires: now + start.expiresIn * 1000, status: 'pending' },
+      {
+        sourceId,
+        tenantId,
+        clientId,
+        purpose,
+        scopes,
+        write,
+        // Identificador da autorização: a gravação dos tokens renovados confere se ainda é a da conexão.
+        grantId: crypto.randomUUID(),
+        deviceCode: start.deviceCode,
+        interval: start.interval,
+        nextPoll: now + start.interval * 1000,
+        codeExpires: now + start.expiresIn * 1000,
+        status: 'pending',
+      },
       start.expiresIn * 1000 + SIGN_IN_TTL_MS,
     );
-    res.status(201).json({ flowId: flow.id, userCode: start.userCode, verificationUri: start.verificationUri, expiresAt: new Date(flow.codeExpires).toISOString(), interval: start.interval });
+    res.status(201).json({ flowId: flow.id, userCode: start.userCode, verificationUri: start.verificationUri, expiresAt: new Date(flow.codeExpires).toISOString(), interval: start.interval, allowDelete: write });
   });
 
   /** A entrada terminou: guarda o token e os dados da conta (e, no Microsoft 365, o e-mail da caixa). */
@@ -268,15 +300,21 @@ export function mailSourcesRouter({ store, manager = null, scheduler = null, end
         // sem os dados do perfil: fica o nome de logon informado na entrada
       }
     }
+    // Permissões concedidas (informadas pela Microsoft; sem elas, as pedidas na entrada).
     const granted = grantedScopes(tokens);
-    flow.account = { ...info, address, scopes: granted.length ? granted : delegatedScopes(flow.purpose, { tenantId: flow.tenantId }), grantId: flow.id, purpose: flow.purpose, connectedAt: new Date().toISOString() };
+    const asked = flow.scopes.filter((scope) => !['openid', 'profile', 'offline_access', 'email'].includes(scope));
+    flow.account = { ...info, address, scopes: granted.length ? granted : asked, grantId: flow.grantId, purpose: flow.purpose, connectedAt: new Date().toISOString() };
     flow.refreshToken = tokens.refresh_token;
     flow.status = 'connected';
     flow.deviceCode = null;
+    flow.notice = null;
     flow.expiresAt = Date.now() + SIGN_IN_TTL_MS;
   }
 
-  /** Consulta a Microsoft (respeitando o intervalo pedido por ela) e atualiza a situação da entrada. */
+  /**
+   * Consulta a Microsoft (respeitando o intervalo pedido por ela) e atualiza a situação da entrada.
+   * Uma falha passageira (rede, tempo esgotado, erro temporário da Microsoft) não encerra a entrada.
+   */
   async function advanceSignIn(flow) {
     if (flow.status !== 'pending') return;
     if (Date.now() >= flow.codeExpires) {
@@ -287,11 +325,13 @@ export function mailSourcesRouter({ store, manager = null, scheduler = null, end
     if (Date.now() < flow.nextPoll) return;
     flow.polling = (async () => {
       try {
-        const result = await pollDeviceCode({ login, tenantId: flow.tenantId, clientId: flow.clientId, deviceCode: flow.deviceCode, signal: AbortSignal.timeout(45000) });
+        const result = await pollDeviceCode({ login, tenantId: flow.tenantId, clientId: flow.clientId, deviceCode: flow.deviceCode });
+        flow.notice = null;
         if (result.status === 'slow_down') flow.interval = Math.min(flow.interval + 5, 60);
         if (result.status === 'connected') await completeSignIn(flow, result.tokens);
       } catch (err) {
-        Object.assign(flow, { status: 'failed', error: friendlyError(err), deviceCode: null });
+        if (err?.retryable || err?.name === 'TimeoutError') flow.notice = `Falha momentânea ao consultar a Microsoft (${microsoftError(err)}). Tentando de novo…`;
+        else Object.assign(flow, { status: 'failed', error: microsoftError(err), deviceCode: null });
       } finally {
         flow.nextPoll = Date.now() + flow.interval * 1000;
         flow.polling = null;
@@ -300,19 +340,21 @@ export function mailSourcesRouter({ store, manager = null, scheduler = null, end
     return flow.polling;
   }
 
-  router.get('/oauth/device/:flowId', async (req, res) => {
-    const flow = pending.get(req.params.flowId, 'device');
+  router.post('/oauth/device/status', async (req, res) => {
+    const flow = pending.get(req.body?.flowId, 'device');
     if (!flow) return res.json({ status: 'failed', error: 'A entrada expirou ou foi cancelada: clique em "Conectar conta" de novo.' });
     await advanceSignIn(flow);
     res.json({
       status: flow.status,
       ...(flow.status === 'connected' ? { account: publicAccount(flow.account, flow.purpose) } : {}),
       ...(flow.status === 'failed' ? { error: flow.error } : {}),
+      ...(flow.status === 'pending' && flow.notice ? { notice: flow.notice } : {}),
     });
   });
 
-  router.delete('/oauth/device/:flowId', (req, res) => {
-    pending.delete(req.params.flowId);
+  router.post('/oauth/device/cancel', (req, res) => {
+    const id = req.body?.flowId;
+    if (pending.get(id, 'device')) pending.delete(id);
     res.status(204).end();
   });
 
@@ -329,11 +371,21 @@ export function mailSourcesRouter({ store, manager = null, scheduler = null, end
         throw bad(err.message);
       }
     } else {
-      const name = text(body.name, 'o nome da conexão', { max: 60 }).replace(/[^\p{L}\p{N} ._-]/gu, '');
+      // O nome da conexão só dá nome ao certificado (CN, até 64 caracteres com o "CLEAN - "): um nome
+      // longo é cortado.
+      const name = String(body.name ?? '').replace(/[^\p{L}\p{N} ._-]/gu, '').trim().slice(0, 56).trim();
       result = await createCertificate({ commonName: name ? `CLEAN - ${name}` : 'CLEAN' });
     }
+    // O certificado ainda não salvo que este substitui sai da memória.
+    if (pending.get(body.replaces, 'certificate')) pending.delete(body.replaces);
     const item = pending.add('certificate', result, CERTIFICATE_TTL_MS);
     res.status(201).json({ certificateId: item.id, certificate: result.certificate });
+  });
+
+  router.post('/certificate/discard', (req, res) => {
+    const id = req.body?.certificateId;
+    if (pending.get(id, 'certificate')) pending.delete(id);
+    res.status(204).end();
   });
 
   router.get('/', (req, res) => {
@@ -365,16 +417,27 @@ export function mailSourcesRouter({ store, manager = null, scheduler = null, end
     const timer = setTimeout(() => controller.abort(new Error('timeout')), 60000);
     // Conta conectada: o token renovado no teste substitui o da entrada (ainda não salva) ou o salvo.
     const grantId = data.graph?.account?.grantId;
+    const signIn = req.body?.graph?.signIn;
     const onRefreshToken = grantId
       ? (token) => {
-          const flow = pending.get(grantId, 'device');
-          if (flow) flow.refreshToken = token;
+          const flow = pending.get(signIn, 'device');
+          if (flow && flow.grantId === grantId) flow.refreshToken = token;
           else if (existing) store.saveRefreshToken(existing.id, grantId, token);
         }
       : undefined;
     try {
       const connector = createConnector({ ...data, id: existing?.id || 'teste', secrets }, { signal: controller.signal, endpoints, onRefreshToken });
-      res.json(await connector.test());
+      const result = await connector.test();
+      // A leitura funciona, mas salvar com "Permitir excluir" seria recusado: o teste já avisa.
+      const account = data.type === 'graph' ? data.graph?.account : null;
+      if (result.ok && account && data.allowDelete && !canWriteMail(account.scopes)) {
+        return res.json({
+          ok: false,
+          message: 'A leitura das caixas funciona, mas a exclusão está permitida e a conta conectada autorizou só a leitura das mensagens: clique em "Conectar conta" de novo com "Permitir excluir" marcado (sem isso, a conexão não pode ser salva).',
+          details: result.details,
+        });
+      }
+      res.json(result);
     } catch (err) {
       const message = controller.signal.aborted ? 'Tempo esgotado ao testar a conexão (60 s).' : friendlyError(err);
       res.json({ ok: false, message, details: [] });

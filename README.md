@@ -401,7 +401,7 @@ delegadas a mais):
 1. Em *Registros de aplicativo › Novo registro*, escolha os tipos de conta: *somente contas deste
    diretório organizacional* (contas de trabalho ou escola) ou, para contas pessoais (Outlook.com,
    Hotmail), *contas em qualquer diretório organizacional e contas Microsoft pessoais*.
-2. Em *Autenticação*, ative **Permitir fluxos de cliente público** (*Sim*) e salve — é o que permite
+2. Em *Autenticação*, ative **Permitir fluxos de clientes públicos** (*Sim*) e salve — é o que permite
    a entrada pelo código de dispositivo. Não é preciso URI de redirecionamento.
 3. Em *Permissões de API › Adicionar uma permissão › Microsoft Graph › Permissões delegadas*, inclua
    **`User.Read`**, **`Mail.Read`** e **`Mail.Read.Shared`** (para a exclusão, **`Mail.ReadWrite`** e
@@ -430,7 +430,7 @@ a leitura). Trocar o locatário, o aplicativo ou o tipo da conexão exige conect
 Os repositórios do OneDrive e do SharePoint não usam a conta conectada (as permissões dela são só de
 e-mail).
 
-Mensagens comuns na entrada: *Permitir fluxos de cliente público* desativado (AADSTS7000218);
+Mensagens comuns na entrada: *Permitir fluxos de clientes públicos* desativado (AADSTS7000218);
 aplicativo de um só locatário com `organizations`/`common` (AADSTS50194: informe o ID do
 locatário); permissões que precisam do administrador (AADSTS90094/65001); bloqueio por acesso
 condicional (AADSTS53003). Cada uma aparece na tela com a providência a tomar.
@@ -487,11 +487,11 @@ marcadores), sem repetir as mensagens de cada marcador.
 
 **Exchange Online e Outlook.com por IMAP (OAuth 2.0 da Microsoft).** A Microsoft desativou o login
 com senha no IMAP: em *Autenticação*, escolha **OAuth 2.0 da Microsoft**. O servidor é
-`outlook.office365.com` (porta 993, SSL/TLS) e o login de cada caixa é feito com um token da
-Microsoft (XOAUTH2), sem senha — com as mesmas três formas do Microsoft 365:
+`outlook.office365.com` (porta 993, SSL/TLS) e o login de cada caixa é o próprio e-mail dela, com
+um token da Microsoft (XOAUTH2) no lugar da senha — com as mesmas três formas do Microsoft 365:
 
-- **conta conectada** (o mais comum): no registro do aplicativo, ative *Permitir fluxos de cliente
-  público* e inclua a permissão delegada **`IMAP.AccessAsUser.All`** (*Microsoft Graph › Permissões
+- **conta conectada** (o mais comum): no registro do aplicativo, ative *Permitir fluxos de clientes
+  públicos* e inclua a permissão delegada **`IMAP.AccessAsUser.All`** (*Microsoft Graph › Permissões
   delegadas*); clique em *Conectar conta* e entre com a conta. Analisa a caixa da conta e as caixas
   a que ela tem Acesso Total (informe-as na lista; em branco, a caixa da conta);
 - **aplicativo** (segredo ou certificado): inclua a permissão de aplicativo **`IMAP.AccessAsApp`**
@@ -505,7 +505,10 @@ Microsoft (XOAUTH2), sem senha — com as mesmas três formas do Microsoft 365:
   ```
 
 O IMAP precisa estar habilitado nas caixas (centro de administração do Microsoft 365 › Usuários › a
-pessoa › Email › Gerenciar aplicativos de email). Por segurança, o CLEAN só envia o token da
+pessoa › Email › Gerenciar aplicativos de email). O Exchange Online encerra a sessão IMAP quando o
+token vence: o CLEAN abre cada sessão com um token válido por ao menos 30 minutos, renova a sessão
+antes de abrir uma pasta quando o token está para vencer e, se a sessão cair no meio de uma pasta,
+continua a leitura numa nova sessão, de onde parou (sem repetir nem pular mensagens). Por segurança, o CLEAN só envia o token da
 Microsoft aos servidores IMAP da Microsoft (`outlook.office365.com`, `outlook.office.com` e
 `imap-mail.outlook.com`), com o certificado do servidor verificado — em qualquer outro endereço, o
 token daria acesso à caixa a quem o recebesse. Com uma senha num desses servidores, o formulário e o

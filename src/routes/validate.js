@@ -105,7 +105,7 @@ export function microsoftApp(g = {}, { delegated = false } = {}) {
   if (!keyword && !GUID_RE.test(tenantId) && !DOMAIN_RE.test(tenantId)) {
     throw bad(
       delegated
-        ? 'Locatário inválido: use o GUID (ID do diretório), o domínio (ex.: empresa.onmicrosoft.com), "organizations" (contas de trabalho ou escola) ou "consumers" (contas pessoais: Outlook.com, Hotmail).'
+        ? 'Locatário inválido: use o GUID (ID do diretório), o domínio (ex.: empresa.onmicrosoft.com), "organizations" (contas de trabalho ou escola), "consumers" (contas pessoais: Outlook.com, Hotmail) ou "common" (as duas).'
         : 'ID do locatário inválido: use o GUID (ID do diretório) ou o domínio, ex.: empresa.onmicrosoft.com.',
     );
   }
@@ -122,11 +122,12 @@ export function microsoftApp(g = {}, { delegated = false } = {}) {
  * Campos vazios mantêm o que está salvo (previous: { graph, secrets } do cadastro atual): o segredo e
  * a conta conectada só para o mesmo locatário e aplicativo; o certificado também em outro aplicativo
  * (a chave privada não sai do CLEAN — o arquivo do certificado é que precisa ser enviado a ele).
- * pending: credenciais ainda não salvas — signIn(id) (entrada da conta concluída) e certificate(id)
- * (certificado gerado ou importado). purpose: 'graph' ou 'imap' (a conta conectada autoriza um dos dois).
+ * pending: credenciais ainda não salvas — signIn(id) (entrada da conta) e certificate(id) (certificado
+ * gerado ou importado). purpose: 'graph' ou 'imap' (a conta conectada autoriza um dos dois). sourceId:
+ * a conexão em edição (null numa nova): a entrada da conta só vale para a conexão em que foi começada.
  * Retorna { graph, secrets } com os segredos cifrados.
  */
-export function microsoftCredentials(g = {}, { previous = null, box, pending = {}, purpose = 'graph' }) {
+export function microsoftCredentials(g = {}, { previous = null, box, pending = {}, purpose = 'graph', sourceId = null }) {
   const auth = Object.hasOwn(MS_AUTH, g.auth) ? g.auth : 'secret';
   const { tenantId, clientId } = microsoftApp(g, { delegated: auth === 'delegated' });
   const before = previous?.graph || null;
@@ -157,7 +158,10 @@ export function microsoftCredentials(g = {}, { previous = null, box, pending = {
     const id = typeof g.signIn === 'string' ? g.signIn : '';
     if (id) {
       const flow = pending.signIn?.(id);
-      if (!flow) throw bad('A entrada da conta não está mais disponível para salvar (mais de 2 horas ou o CLEAN foi reiniciado): clique em "Conectar conta" de novo.');
+      if (!flow) throw bad('A entrada da conta não está mais disponível (cancelada, mais de 2 horas ou o CLEAN foi reiniciado): clique em "Conectar conta" de novo.');
+      if (flow.status === 'pending') throw bad('A entrada da conta ainda não terminou: conclua a entrada na página da Microsoft com o código mostrado.');
+      if (flow.status !== 'connected') throw bad(`A entrada da conta não foi concluída${flow.error ? ` (${flow.error})` : ''}: clique em "Conectar conta" de novo.`);
+      if ((flow.sourceId || null) !== (sourceId || null)) throw bad('A entrada da conta foi feita em outra conexão: clique em "Conectar conta" de novo.');
       if (String(flow.tenantId).toLowerCase() !== tenantId.toLowerCase() || String(flow.clientId).toLowerCase() !== clientId.toLowerCase()) {
         throw bad('O locatário ou o aplicativo foi alterado depois da entrada da conta: clique em "Conectar conta" de novo.');
       }
@@ -296,10 +300,23 @@ function parseCloud(body, type, { existing, box, mailSource }) {
     credentialsFrom = mailSource.id;
   } else {
     const cloudBefore = CLOUD_REPO_TYPES.has(existing?.type);
-    const previousSecret = cloudBefore ? existing.secrets?.clientSecret || null : null;
-    let clientSecret;
-    ({ graph, clientSecret } = graphCredentials(body.graph || {}, { previousSecret, previousGraph: cloudBefore ? existing.graph : null, box }));
-    secrets = { clientSecret };
+    const g = body.graph || {};
+    const before = cloudBefore ? existing.graph || {} : {};
+    const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+    // Certificado copiado de uma conexão de e-mail que deixou de estar ligada: continua valendo para o
+    // mesmo aplicativo enquanto nenhum segredo do cliente for informado.
+    const keepCertificate =
+      before.auth === 'certificate' && before.certificate && existing.secrets?.certificateKey && !text(g.clientSecret, 'o segredo do cliente', { max: 2000 }) && same(before.tenantId, g.tenantId) && same(before.clientId, g.clientId);
+    if (keepCertificate) {
+      const app = microsoftApp(g);
+      graph = { ...app, auth: 'certificate', certificate: before.certificate };
+      secrets = { certificateKey: existing.secrets.certificateKey };
+    } else {
+      const previousSecret = cloudBefore ? existing.secrets?.clientSecret || null : null;
+      let clientSecret;
+      ({ graph, clientSecret } = graphCredentials(g, { previousSecret, previousGraph: cloudBefore ? existing.graph : null, box }));
+      secrets = { clientSecret };
+    }
   }
   const scope = body.scope === 'all' ? 'all' : 'list';
   const cloud = { scope, accounts: [], sites: [], exclude: lines(body.excludeTargets, 500) };

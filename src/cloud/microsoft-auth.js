@@ -49,6 +49,7 @@ export function delegatedScopes(purpose, { write = false, tenantId = '' } = {}) 
 export const canWriteMail = (scopes = []) => scopes.some((s) => /(^|\/)Mail\.ReadWrite$/i.test(String(s)));
 
 const RECONNECT = 'Em Caixas de e-mail, edite a conexão e clique em "Conectar conta" para entrar de novo.';
+const CERTIFICATE_EXPIRED = 'O certificado do aplicativo venceu: na conexão, gere um novo certificado, envie o arquivo .cer ao registro do aplicativo e salve.';
 
 const AAD_ERRORS = {
   700016: 'O aplicativo (ID do cliente) não foi encontrado neste locatário. Confira o ID do cliente e o ID do locatário.',
@@ -62,7 +63,7 @@ const AAD_ERRORS = {
   530003: 'Acesso bloqueado por uma política de Acesso Condicional do Microsoft Entra ID (dispositivo não gerenciado ou fora da conformidade).',
   700027: 'O certificado não foi reconhecido pelo aplicativo: envie o arquivo do certificado (.cer) em "Certificados e segredos › Certificados" do registro do aplicativo — o mesmo desta conexão (confira a impressão digital).',
   700024: 'A asserção assinada com o certificado ficou fora do prazo aceito: confira a data, a hora e o fuso horário do servidor do CLEAN.',
-  7000218: 'O registro do aplicativo não permite a entrada de contas pelo código de dispositivo: em "Autenticação", ative "Permitir fluxos de cliente público" (Sim) e salve.',
+  7000218: 'O registro do aplicativo não permite a entrada de contas pelo código de dispositivo: em "Autenticação", ative "Permitir fluxos de clientes públicos" (Sim) e salve.',
   50194: 'O aplicativo aceita somente contas do próprio locatário: informe o ID do locatário (ou o domínio) no lugar de "organizations" ou "common".',
   50020: 'A conta usada na entrada não pertence ao locatário informado (nem é convidada nele).',
   65001: `A conta (ou o administrador) ainda não autorizou as permissões do aplicativo: conecte a conta de novo e aceite as permissões — ou peça ao administrador para conceder o consentimento ao aplicativo (Permissões de API). ${RECONNECT}`,
@@ -83,6 +84,13 @@ const AAD_ERRORS = {
   500011: 'O recurso pedido não existe no locatário (o Exchange Online está disponível nele?).',
 };
 
+/** Identificadores do erro no Entra ID, para o administrador localizar a entrada nos logs de entrada. */
+function traceIds(message) {
+  const trace = /Trace ID:\s*([0-9a-f-]{36})/i.exec(message)?.[1];
+  const correlation = /Correlation ID:\s*([0-9a-f-]{36})/i.exec(message)?.[1];
+  return `${trace ? ` · Trace ID ${trace}` : ''}${correlation ? ` · Correlation ID ${correlation}` : ''}`;
+}
+
 /**
  * Traduz os erros do Microsoft Entra ID (códigos AADSTS) para mensagens com a providência a tomar.
  * delegated: erro na renovação do token da conta conectada (um "invalid_grant" sem código conhecido
@@ -91,7 +99,9 @@ const AAD_ERRORS = {
 export function aadError(err, { delegated = false } = {}) {
   if (!(err instanceof ApiError)) return null;
   const aad = /AADSTS(\d+)/.exec(err.message);
-  if (aad && AAD_ERRORS[aad[1]]) return new ApiError(`${AAD_ERRORS[aad[1]]} (AADSTS${aad[1]})`, err);
+  const ids = traceIds(err.message);
+  if (aad?.[1] === '700027' && /expired/i.test(err.message)) return new ApiError(`${CERTIFICATE_EXPIRED} (AADSTS700027${ids})`, err);
+  if (aad && AAD_ERRORS[aad[1]]) return new ApiError(`${AAD_ERRORS[aad[1]]} (AADSTS${aad[1]}${ids})`, err);
   if (delegated && err.code === 'invalid_grant') {
     const detail = String(err.message || '').split(/\r?\n/)[0].slice(0, 300);
     return new ApiError(`A autorização da conta conectada não vale mais (${detail}). ${RECONNECT}`, err);
@@ -151,8 +161,8 @@ export async function startDeviceCode({ login = MICROSOFT_LOGIN, tenantId, clien
       method: 'POST',
       form: { client_id: clientId, scope: scopeText(scopes) },
       signal,
-      retries: 2,
-      timeoutMs: 30000,
+      retries: 1,
+      timeoutMs: 20000,
     });
   } catch (err) {
     throw aadError(err) || err;
@@ -170,7 +180,9 @@ export async function startDeviceCode({ login = MICROSOFT_LOGIN, tenantId, clien
 /**
  * Uma consulta da entrada pelo código: { status: 'pending' } enquanto a pessoa não termina (ou
  * 'slow_down': consultar com menos frequência), { status: 'connected', tokens } quando termina, ou
- * um erro (entrada recusada, código expirado, aplicativo sem fluxos de cliente público...).
+ * um erro (entrada recusada, código expirado, aplicativo sem fluxos de clientes públicos...). Um erro
+ * com retryable (rede, tempo esgotado, falha temporária da Microsoft) não encerra a entrada: o
+ * chamador consulta de novo.
  */
 export async function pollDeviceCode({ login = MICROSOFT_LOGIN, tenantId, clientId, deviceCode, signal }) {
   try {
@@ -178,8 +190,8 @@ export async function pollDeviceCode({ login = MICROSOFT_LOGIN, tenantId, client
       method: 'POST',
       form: { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', client_id: clientId, device_code: deviceCode },
       signal,
-      retries: 2,
-      timeoutMs: 30000,
+      retries: 1,
+      timeoutMs: 20000,
     });
     if (!tokens?.access_token) throw new ApiError('O Microsoft Entra ID não devolveu um token de acesso.');
     if (!tokens.refresh_token) throw new ApiError('O Microsoft Entra ID não devolveu o token de atualização (permissão offline_access): confira as permissões do aplicativo e conecte a conta de novo.');
@@ -212,17 +224,30 @@ export class MicrosoftAuth {
     this.mode = MS_AUTH[this.creds.auth] ? this.creds.auth : 'secret';
     this.refreshToken = this.secrets.refreshToken || '';
     this.cache = new Map(); // recurso → { token, expires, promise }
+    // Recusa definitiva (credencial inválida, autorização revogada...): as próximas chamadas recebem o
+    // mesmo erro, sem repetir o pedido à Microsoft a cada caixa.
+    this.failure = null;
   }
 
   get delegated() {
     return this.mode === 'delegated';
   }
 
-  /** Token de acesso ao recurso ('graph' ou 'imap'), renovado 2 minutos antes de vencer. force: pede um novo. */
-  async token(resource = 'graph', { force = false } = {}) {
+  /** Quando vence o token de acesso ao recurso que está guardado (0 se não há). */
+  expiresAt(resource = 'graph') {
+    return this.cache.get(resource)?.expires || 0;
+  }
+
+  /**
+   * Token de acesso ao recurso ('graph' ou 'imap'). É renovado quando faltam menos de minValidityMs
+   * para vencer (padrão: 2 minutos; uma sessão IMAP pede mais, porque o Exchange Online a encerra
+   * quando o token vence). force: pede um novo.
+   */
+  async token(resource = 'graph', { force = false, minValidityMs = 120000 } = {}) {
+    if (this.failure) throw this.failure;
     let entry = this.cache.get(resource);
     if (!entry) this.cache.set(resource, (entry = { token: null, expires: 0, promise: null }));
-    if (!force && entry.token && Date.now() < entry.expires - 120000) return entry.token;
+    if (!force && entry.token && Date.now() < entry.expires - minValidityMs) return entry.token;
     entry.promise ||= this.#request(resource)
       .then((res) => {
         entry.token = res.access_token;
@@ -251,6 +276,10 @@ export class MicrosoftAuth {
         const key = this.secrets.certificateKey;
         const thumbprint256 = this.creds.certificate?.thumbprint256;
         if (!key || !thumbprint256) throw new ApiError('A conexão não tem o certificado do aplicativo: gere ou importe o certificado.');
+        const notAfter = Date.parse(this.creds.certificate.notAfter);
+        if (notAfter <= Date.now()) {
+          throw (this.failure = new ApiError(`${CERTIFICATE_EXPIRED.replace('venceu:', `venceu em ${new Date(notAfter).toLocaleDateString('pt-BR')}:`)}`));
+        }
         form.client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
         form.client_assertion = clientAssertion({ clientId, audience: url, privateKey: key, thumbprint256 });
       } else {
@@ -262,7 +291,9 @@ export class MicrosoftAuth {
     try {
       res = await request(url, { method: 'POST', form, signal: this.signal, retries: 3 });
     } catch (err) {
-      throw aadError(err, { delegated: this.delegated }) || err;
+      const translated = aadError(err, { delegated: this.delegated }) || err;
+      if (err instanceof ApiError && !err.retryable && err.status >= 400 && err.status < 500) this.failure = translated;
+      throw translated;
     }
     if (!res?.access_token) throw new ApiError('O Microsoft Entra ID não devolveu um token de acesso.');
     if (this.delegated && res.refresh_token && res.refresh_token !== this.refreshToken) {

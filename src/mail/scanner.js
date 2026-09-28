@@ -63,6 +63,7 @@ export function newMailStats(sourcesTotal = 0) {
 }
 
 const mb = (bytes) => `${Math.round((bytes / 1048576) * 10) / 10} MB`;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 export class MailScanner {
   /**
@@ -205,11 +206,22 @@ export class MailScanner {
     this.stats.mailboxesTotal += mailboxes.length;
     this.log('info', `Conexão "${source.name}": ${mailboxes.length} caixa(s) a analisar.`);
     try {
-      for (const mailbox of mailboxes) {
+      for (const [index, mailbox] of mailboxes.entries()) {
         if (this.cancelled) break;
         await this.scanMailbox(connector, source, mailbox);
         this.stats.mailboxesDone++;
         this.progress(true);
+        // Recusa definitiva da Microsoft (autorização revogada, segredo inválido...): as outras caixas
+        // da conexão falhariam do mesmo jeito — ficam registradas uma vez, como não analisadas.
+        const failure = connector.auth?.failure;
+        const rest = mailboxes.length - index - 1;
+        if (failure && rest > 0) {
+          const message = `${plural(rest, 'caixa', 'caixas')} da conexão não ${rest === 1 ? 'foi analisada' : 'foram analisadas'}: ${friendlyError(failure)}`;
+          this.error(source.name, message);
+          this.stats.gaps++;
+          this.log('error', `Conexão "${source.name}": ${message}`);
+          break;
+        }
       }
     } finally {
       await connector.close?.();

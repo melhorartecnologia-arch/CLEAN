@@ -63,11 +63,12 @@ function messageIdOf(raw) {
  * PERMANENTFLAGS), refuse ({ store, copy, move, expunge }: responde NO), gmail (EXPUNGE fora da
  * Lixeira só arquiva, como o Gmail com as configurações padrão), oauth(login, token) (login por
  * AUTHENTICATE XOAUTH2, como o Exchange Online: devolve se o token dá acesso à caixa; logins pelo
- * token ficam registrados em `oauthLogins`).
+ * token ficam registrados em `oauthLogins`), dropAfterFetches (a sessão cai depois de tantos FETCH,
+ * como o Exchange Online quando o token vence: "* BYE Session invalidated - AccessTokenExpired").
  */
 export function startFakeImap(
   accounts,
-  { log = [], maxLine = Infinity, sizeOffset = 0, capabilities = 'IMAP4rev1 UIDPLUS MOVE', permanentFlags = null, refuse = {}, gmail = false, oauth = null, oauthLogins = [] } = {},
+  { log = [], maxLine = Infinity, sizeOffset = 0, capabilities = 'IMAP4rev1 UIDPLUS MOVE', permanentFlags = null, refuse = {}, gmail = false, oauth = null, oauthLogins = [], dropAfterFetches = 0 } = {},
 ) {
   if (oauth) capabilities = `${capabilities} AUTH=XOAUTH2 SASL-IR`;
   for (const account of Object.values(accounts)) {
@@ -79,6 +80,7 @@ export function startFakeImap(
     let user = null;
     let selected = null;
     let pendingLiteral = null; // { size, line }
+    let fetches = 0; // FETCH desta sessão (dropAfterFetches)
     const send = (text) => socket.write(text);
     send(`* OK [CAPABILITY ${capabilities}] Fake IMAP pronto\r\n`);
 
@@ -157,6 +159,10 @@ export function startFakeImap(
           return ok();
         }
         case 'FETCH': {
+          if (dropAfterFetches && ++fetches > dropAfterFetches) {
+            socket.end('* BYE Session invalidated - AccessTokenExpired\r\n');
+            return undefined;
+          }
           const set = parseSet(args[0], uidMode ? nextUid(messages) - 1 : messages.length);
           const items = args.slice(1).join(' ').toUpperCase();
           for (let i = 0; i < messages.length; i++) {

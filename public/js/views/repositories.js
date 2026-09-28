@@ -1,7 +1,7 @@
 // Repositórios: pastas do Windows (locais ou compartilhamentos de rede) e bibliotecas do OneDrive e
 // do SharePoint que serão analisadas.
 import { get, post, put, del } from '../api.js';
-import { html, render as paint, icon, openDialog, confirmDialog, toast, fmtNum } from '../ui.js';
+import { html, render as paint, icon, openDialog, confirmDialog, toast, fmtNum, fmtDate } from '../ui.js';
 
 const TYPES = {
   local: { label: 'Pasta do Windows', detail: 'Servidor de arquivos, NAS ou pasta local' },
@@ -20,6 +20,9 @@ function repoForm(repo, ctx, mailSources) {
   const defaults = (ctx.info?.defaultExcludes || []).join(', ');
   // Conexões do Microsoft 365 com credenciais de aplicativo (a conta conectada só tem permissões de e-mail).
   const m365 = mailSources.filter((s) => s.type === 'graph' && s.graph?.auth !== 'delegated');
+  const connectedOnly = !m365.length && mailSources.some((s) => s.type === 'graph');
+  // Certificado copiado de uma conexão de e-mail que deixou de estar ligada: continua valendo.
+  const certificate = !repo?.credentialsFrom && g.auth === 'certificate' && g.hasCertificateKey ? g.certificate : null;
   return html`<div class="form-grid">
     <label class="field full">
       <span>Nome</span>
@@ -58,7 +61,9 @@ function repoForm(repo, ctx, mailSources) {
             </select>
             <small>O mesmo registro de aplicativo pode ler e-mails e arquivos (inclua nele as permissões de arquivos abaixo). As credenciais ficam ligadas à conexão: um novo segredo (ou certificado) salvo nela também vale aqui. Conexões com a conta conectada não aparecem: o OneDrive e o SharePoint precisam das permissões de um aplicativo.</small>
           </label>`
-        : ''}
+        : connectedOnly
+          ? html`<p class="hint full">As conexões de e-mail do Microsoft 365 cadastradas usam a conta conectada (permissões só de e-mail): o OneDrive e o SharePoint precisam das credenciais de um aplicativo, informadas abaixo.</p>`
+          : ''}
       <div class="form-grid" data-credentials>
         <label class="field">
           <span>ID do locatário (diretório)</span>
@@ -70,7 +75,10 @@ function repoForm(repo, ctx, mailSources) {
         </label>
         <label class="field full">
           <span>Segredo do cliente (valor)</span>
-          <input type="password" name="clientSecret" autocomplete="new-password" placeholder="${g.hasClientSecret ? SAVED : ''}" />
+          <input type="password" name="clientSecret" autocomplete="new-password" placeholder="${g.hasClientSecret ? SAVED : certificate ? 'em branco: continua com o certificado' : ''}" />
+          ${certificate
+            ? html`<small>Este repositório usa o certificado ${certificate.subject || ''} (impressão digital <code>${certificate.thumbprint}</code>, válido até ${fmtDate(certificate.notAfter)}), copiado de uma conexão de e-mail. Com o mesmo locatário e aplicativo e o segredo em branco, ele continua valendo; informe um segredo só para passar a usá-lo.</small>`
+            : ''}
         </label>
       </div>
       <details class="help">

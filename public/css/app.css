@@ -429,6 +429,7 @@ textarea:focus {
 .inline > select {
   flex: 0 1 300px;
   width: auto;
+  min-width: 0; /* pode ficar mais estreita que a opção mais longa (celular) */
 }
 .inline > input[type='number'] {
   flex: 0 0 96px;
@@ -443,6 +444,7 @@ textarea:focus {
 fieldset {
   margin: 0;
   padding: 14px 16px;
+  min-width: 0; /* sem isso, o quadro cresce até o conteúdo mais largo (ex.: tabelas no celular) */
   border: 1px solid var(--line);
   border-radius: 8px;
 }
@@ -1086,6 +1088,9 @@ mark {
   display: block;
   color: var(--muted);
 }
+.type-choice label:has(input:checked) small {
+  color: var(--ink-2); /* contraste sobre o fundo destacado */
+}
 table.mailbox-rows {
   width: 100%;
   min-width: 560px; /* no celular, a tabela rola dentro do quadro */
@@ -1155,8 +1160,13 @@ input[type='file'] {
 .device-box li {
   margin-bottom: 6px;
 }
-.device-box .alert {
-  margin: 0;
+.device-box .device-waiting {
+  color: var(--ink-2); /* contraste sobre o fundo azul */
+  margin: 0 0 8px;
+}
+[data-sign-in-error] .alert,
+[data-read-only-warning] {
+  margin: 8px 0 0;
 }
 .device-code {
   display: inline-block;

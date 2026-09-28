@@ -16,6 +16,16 @@ const BATCH_BYTES = 32 * 1024 * 1024;
 // Mensagens por comando na exclusão: conjuntos de UIDs muito longos passam do tamanho máximo de
 // comando de alguns servidores (10 KB no Exchange).
 const DELETE_CHUNK = 200;
+// Login OAuth: o Exchange Online encerra a sessão IMAP quando o token vence. Cada sessão começa com um
+// token válido por ao menos 30 minutos, e é renovada antes de abrir uma pasta se faltarem menos de 5.
+const OAUTH_SESSION_MIN_MS = 30 * 60 * 1000;
+const OAUTH_RENEW_MS = 5 * 60 * 1000;
+// Quedas da sessão numa mesma caixa (token vencido, rede): a leitura continua numa nova sessão, de onde
+// parou; depois de tantas quedas, o restante da caixa fica como erro.
+const MAX_SESSION_DROPS = 5;
+
+/** Problema da própria pasta (e não da sessão): não adianta tentar de novo em outra sessão. */
+const folderProblem = (message) => Object.assign(new ApiError(message), { folderProblem: true });
 
 /** A biblioteca IMAP é carregada só quando usada: sem ela (npm install não executado após uma atualização) o resto do CLEAN funciona. */
 let imapFlowClass = null;
@@ -168,13 +178,15 @@ export class ImapConnector {
     return (this.source.mailboxes || []).filter((m) => !excluded(m.address)).map((m) => ({ address: m.address, login: m.login || m.address, name: '' }));
   }
 
-  /** Login da caixa: usuário e senha, ou usuário e token de acesso (OAuth da Microsoft). */
+  /**
+   * Login da caixa: usuário e senha, ou o e-mail da caixa e um token de acesso da Microsoft (OAuth,
+   * XOAUTH2) válido por ao menos 30 minutos.
+   */
   async credentials(mailbox) {
-    const user = mailbox.login || mailbox.address;
-    if (!this.oauth) return { user, pass: this.password(mailbox) };
+    if (!this.oauth) return { user: mailbox.login || mailbox.address, pass: this.password(mailbox) };
     const problem = imapOAuthProblem(this.imap, this.endpoints);
     if (problem) throw new ApiError(problem);
-    return { user, accessToken: await this.auth.token('imap') };
+    return { user: mailbox.address, accessToken: await this.auth.token('imap', { minValidityMs: OAUTH_SESSION_MIN_MS }) };
   }
 
   password(mailbox) {
@@ -184,7 +196,10 @@ export class ImapConnector {
     return value;
   }
 
-  /** Abre uma sessão na caixa. signal: interrompe a conexão (padrão: o da análise). */
+  /**
+   * Abre uma sessão na caixa: { client, dispose, expiresAt } (expiresAt: quando vence o token da
+   * sessão OAuth; Infinity com senha). signal: interrompe a conexão (padrão: o da análise).
+   */
   async connect(mailbox, { signal = this.signal } = {}) {
     const { host, port, security, allowSelfSigned } = this.imap;
     const ImapFlow = await loadImapFlow();
@@ -222,7 +237,7 @@ export class ImapConnector {
       if (signal?.aborted) throw signal.reason;
       throw this.error(err);
     }
-    return { client, dispose };
+    return { client, dispose, expiresAt: auth.accessToken ? this.auth.expiresAt('imap') : Infinity };
   }
 
   /** Pastas selecionáveis, sem as excluídas. No Gmail, "Todos os e-mails" já contém os marcadores. */
@@ -249,87 +264,129 @@ export class ImapConnector {
   /**
    * Mensagens da caixa, pasta por pasta. As pequenas são baixadas em lotes; as maiores que maxBytes,
    * uma a uma e apenas até o limite. Entrega { folder, id, raw, truncated, size, receivedAt } ou
-   * { folder, id, error } (pasta que não pôde ser aberta).
+   * { folder, id, error } (pasta que não pôde ser lida). Se a sessão cair (ex.: o Exchange Online a
+   * encerra quando o token OAuth vence), a leitura continua numa nova sessão, de onde parou.
    */
   async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, onFolder } = {}) {
-    const { client, dispose } = await this.connect(mailbox);
+    let session = await this.connect(mailbox);
+    let drops = 0;
     try {
-      const gmail = client.capabilities?.has?.('X-GM-EXT-1');
-      for (const folder of await this.folders(client, { includeTrash, includeJunk })) {
+      const gmail = session.client.capabilities?.has?.('X-GM-EXT-1');
+      for (const folder of await this.folders(session.client, { includeTrash, includeJunk })) {
         if (this.signal?.aborted) return;
         onFolder?.(folder.display);
-        let lock;
-        try {
-          lock = await client.getMailboxLock(folder.path, { readOnly: true });
-        } catch (err) {
-          if (this.signal?.aborted) throw this.signal.reason;
-          yield { folder: folder.display, id: null, raw: null, error: imapError(err, this.imap.host) };
-          continue;
-        }
-        try {
-          if (!client.mailbox?.exists) continue;
-          const validity = String(client.mailbox.uidValidity ?? '');
-          const meta = [];
-          for await (const m of client.fetch('1:*', { uid: true, size: true, internalDate: true, labels: Boolean(gmail && folder.all), envelope: headersOnly }, { uid: true })) {
-            // O filtro por data é feito aqui, e não com SEARCH SINCE: a lista de UIDs de uma busca
-            // pode passar do tamanho máximo de comando do servidor (10 KB no Exchange).
-            if (since && m.internalDate instanceof Date && m.internalDate < since) continue;
-            // "Antes de" (retenção): sem data conhecida, a mensagem não entra.
-            if (before && !(m.internalDate instanceof Date && m.internalDate < before)) continue;
-            meta.push({ uid: m.uid, size: Number(m.size) || 0, date: m.internalDate, labels: m.labels, envelope: m.envelope });
-          }
-          if (headersOnly) {
-            // Retenção: só os dados do envelope (sem baixar a mensagem).
-            for (const info of meta) {
-              const env = info.envelope || {};
-              const from = env.from?.[0];
-              yield {
-                folder: (folder.all && labelsText(info.labels)) || folder.display,
-                id: `${folder.path}:${validity}:${info.uid}`,
-                size: info.size,
-                receivedAt: info.date instanceof Date && !Number.isNaN(info.date.getTime()) ? info.date.toISOString() : null,
-                subject: env.subject || '',
-                from: from ? { name: from.name || '', address: from.address || '' } : null,
-                internetMessageId: env.messageId || null,
-                inTrash: folder.inTrash,
-                headersOnly: true,
-              };
+        // Mensagens já entregues desta pasta (uma nova sessão continua sem repeti-las).
+        const state = { validity: null, delivered: new Set() };
+        for (;;) {
+          const dropped = !session.client.usable;
+          // Sessão perdida, ou token perto de vencer: abre outra antes de continuar.
+          if (dropped || session.expiresAt - Date.now() < OAUTH_RENEW_MS) {
+            if (dropped && ++drops > MAX_SESSION_DROPS) {
+              yield { folder: folder.display, id: null, raw: null, error: new ApiError(`A conexão com o servidor IMAP caiu ${MAX_SESSION_DROPS} vezes durante a leitura da caixa: o restante dela não foi lido.`) };
+              return;
             }
-            continue;
+            await session.dispose();
+            session = await this.connect(mailbox);
           }
-          const small = meta.filter((m) => m.size <= maxBytes);
-          const large = meta.filter((m) => m.size > maxBytes);
-          const make = (info, source, truncated) => ({
-            folder: (folder.all && labelsText(info.labels)) || folder.display,
-            id: `${folder.path}:${validity}:${info.uid}`,
-            raw: source || Buffer.alloc(0),
-            truncated,
-            size: info.size,
-            receivedAt: info.date instanceof Date && !Number.isNaN(info.date.getTime()) ? info.date.toISOString() : null,
-          });
-          for (const batch of batches(small)) {
-            if (this.signal?.aborted) return;
-            const byUid = new Map(batch.map((m) => [m.uid, m]));
-            const items = [];
-            for await (const m of client.fetch(packUids(batch.map((b) => b.uid)), { uid: true, source: true }, { uid: true })) items.push(m);
-            for (const m of items) if (byUid.has(m.uid)) yield make(byUid.get(m.uid), m.source, false);
+          let failure = null;
+          try {
+            yield* this.folderMessages(session.client, folder, state, { gmail, since, before, headersOnly, maxBytes });
+          } catch (err) {
+            if (this.signal?.aborted) throw this.signal.reason;
+            failure = err;
           }
-          for (const info of large) {
-            if (this.signal?.aborted) return;
-            const m = await client.fetchOne(String(info.uid), { uid: true, source: { start: 0, maxLength: maxBytes } }, { uid: true });
-            // O Exchange informa um tamanho estimado: só está cortada se veio até o limite.
-            if (m) yield make(info, m.source, (m.source?.length || 0) >= maxBytes);
-          }
-        } catch (err) {
-          if (this.signal?.aborted) throw this.signal.reason;
-          yield { folder: folder.display, id: null, raw: null, error: imapError(err, this.imap.host) };
-          if (!client.usable) return;
-        } finally {
-          lock.release();
+          if (!failure) break;
+          // A sessão caiu no meio da pasta: continua a mesma pasta numa nova sessão.
+          if (!session.client.usable && !failure.folderProblem) continue;
+          yield { folder: folder.display, id: null, raw: null, error: this.error(failure) };
+          break;
         }
       }
     } finally {
-      await dispose();
+      await session.dispose();
+    }
+  }
+
+  /**
+   * As mensagens de uma pasta ainda não entregues (state.delivered), na sessão dada. Um erro da
+   * sessão (conexão perdida) é lançado para messages() continuar em outra; um problema da própria
+   * pasta vem com folderProblem.
+   */
+  async *folderMessages(client, folder, state, { gmail, since, before, headersOnly, maxBytes }) {
+    let lock;
+    try {
+      lock = await client.getMailboxLock(folder.path, { readOnly: true });
+    } catch (err) {
+      if (this.signal?.aborted) throw this.signal.reason;
+      if (!client.usable) throw err;
+      throw Object.assign(this.error(err), { folderProblem: true });
+    }
+    try {
+      if (!client.mailbox?.exists) return;
+      const validity = String(client.mailbox.uidValidity ?? '');
+      // Numa nova sessão, os números (UIDs) só continuam valendo se a pasta não foi recriada.
+      if (state.validity !== null && state.validity !== validity) {
+        throw folderProblem('A pasta foi recriada no servidor durante a análise (UIDVALIDITY diferente): o restante dela não foi lido.');
+      }
+      state.validity = validity;
+      const meta = [];
+      for await (const m of client.fetch('1:*', { uid: true, size: true, internalDate: true, labels: Boolean(gmail && folder.all), envelope: headersOnly }, { uid: true })) {
+        if (state.delivered.has(m.uid)) continue;
+        // O filtro por data é feito aqui, e não com SEARCH SINCE: a lista de UIDs de uma busca
+        // pode passar do tamanho máximo de comando do servidor (10 KB no Exchange).
+        if (since && m.internalDate instanceof Date && m.internalDate < since) continue;
+        // "Antes de" (retenção): sem data conhecida, a mensagem não entra.
+        if (before && !(m.internalDate instanceof Date && m.internalDate < before)) continue;
+        meta.push({ uid: m.uid, size: Number(m.size) || 0, date: m.internalDate, labels: m.labels, envelope: m.envelope });
+      }
+      const deliver = (uid, item) => {
+        state.delivered.add(uid);
+        return item;
+      };
+      if (headersOnly) {
+        // Retenção: só os dados do envelope (sem baixar a mensagem).
+        for (const info of meta) {
+          const env = info.envelope || {};
+          const from = env.from?.[0];
+          yield deliver(info.uid, {
+            folder: (folder.all && labelsText(info.labels)) || folder.display,
+            id: `${folder.path}:${validity}:${info.uid}`,
+            size: info.size,
+            receivedAt: info.date instanceof Date && !Number.isNaN(info.date.getTime()) ? info.date.toISOString() : null,
+            subject: env.subject || '',
+            from: from ? { name: from.name || '', address: from.address || '' } : null,
+            internetMessageId: env.messageId || null,
+            inTrash: folder.inTrash,
+            headersOnly: true,
+          });
+        }
+        return;
+      }
+      const small = meta.filter((m) => m.size <= maxBytes);
+      const large = meta.filter((m) => m.size > maxBytes);
+      const make = (info, source, truncated) => ({
+        folder: (folder.all && labelsText(info.labels)) || folder.display,
+        id: `${folder.path}:${validity}:${info.uid}`,
+        raw: source || Buffer.alloc(0),
+        truncated,
+        size: info.size,
+        receivedAt: info.date instanceof Date && !Number.isNaN(info.date.getTime()) ? info.date.toISOString() : null,
+      });
+      for (const batch of batches(small)) {
+        if (this.signal?.aborted) return;
+        const byUid = new Map(batch.map((m) => [m.uid, m]));
+        const items = [];
+        for await (const m of client.fetch(packUids(batch.map((b) => b.uid)), { uid: true, source: true }, { uid: true })) items.push(m);
+        for (const m of items) if (byUid.has(m.uid)) yield deliver(m.uid, make(byUid.get(m.uid), m.source, false));
+      }
+      for (const info of large) {
+        if (this.signal?.aborted) return;
+        const m = await client.fetchOne(String(info.uid), { uid: true, source: { start: 0, maxLength: maxBytes } }, { uid: true });
+        // O Exchange informa um tamanho estimado: só está cortada se veio até o limite.
+        if (m) yield deliver(info.uid, make(info, m.source, (m.source?.length || 0) >= maxBytes));
+      }
+    } finally {
+      lock.release();
     }
   }
 

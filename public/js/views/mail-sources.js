@@ -35,23 +35,46 @@ const MICROSOFT_IMAP = new Set(['outlook.office365.com', 'outlook.office.com', '
 const isMicrosoftHost = (host) => MICROSOFT_IMAP.has(String(host || '').trim().toLowerCase());
 const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly';
 const SAVED = '•••••• salvo — deixe em branco para manter';
+// Campos que mudam o que "Testar conexão" confere: o resultado anterior deixa de valer.
+const TEST_FIELDS = new Set([
+  'type',
+  'imapAuth',
+  'msAuth',
+  'tenantId',
+  'clientId',
+  'clientSecret',
+  'host',
+  'port',
+  'security',
+  'allowSelfSigned',
+  'defaultPassword',
+  'mbAddress',
+  'mbLogin',
+  'mbPassword',
+  'scope',
+  'mailboxList',
+  'excludeMailboxes',
+  'adminEmail',
+  'allowDelete',
+]);
 
 function mailboxRow(m = {}) {
   return html`<tr data-mailbox-row>
     <td><input type="email" name="mbAddress" value="${m.address || ''}" placeholder="nome@empresa.com.br" aria-label="E-mail da caixa" /></td>
-    <td><input type="text" name="mbLogin" value="${m.login || ''}" placeholder="igual ao e-mail" aria-label="Login da caixa" /></td>
+    <td data-login-cell><input type="text" name="mbLogin" value="${m.login || ''}" placeholder="igual ao e-mail" aria-label="Login da caixa" /></td>
     <td data-password-cell><input type="password" name="mbPassword" autocomplete="new-password" placeholder="${m.hasPassword ? 'salva' : 'usa a senha padrão'}" data-saved="${m.hasPassword ? '1' : ''}" aria-label="Senha da caixa" /></td>
     <td><button type="button" class="icon-btn danger" data-action="remove-row" aria-label="Remover caixa" title="Remover">${icon('x')}</button></td>
   </tr>`;
 }
 
-/** Dias até o certificado vencer (negativo: vencido). */
-const daysLeft = (iso) => Math.floor((Date.parse(iso) - Date.now()) / 86400000);
-
+/** Aviso de validade do certificado: vencido, vence hoje ou nos próximos 30 dias. */
 function expiryChip(certificate) {
   if (!certificate?.notAfter) return '';
-  const days = daysLeft(certificate.notAfter);
-  if (days < 0) return html` <span class="chip danger">vencido</span>`;
+  const end = new Date(certificate.notAfter);
+  const now = new Date();
+  if (end <= now) return html` <span class="chip danger">vencido</span>`;
+  if (end.toDateString() === now.toDateString()) return html` <span class="chip danger">vence hoje</span>`;
+  const days = Math.ceil((end - now) / 86400000);
   if (days < 30) return html` <span class="chip danger">vence em ${plural(days, 'dia', 'dias')}</span>`;
   return '';
 }
@@ -64,10 +87,12 @@ function certificateInfo(c, { pending = false } = {}) {
 
 function accountInfo(a, { pending = false, stale = '' } = {}) {
   if (!a) return html`<span class="muted">Nenhuma conta conectada.</span>`;
+  const address = a.address || a.username || '';
   const note = stale
     ? html`<span class="small warn-text">${stale}</span>`
     : html`<span class="small muted">${pending ? 'Conectada agora: salve a conexão para guardar a autorização.' : `Conectada em ${fmtDate(a.connectedAt)}. O acesso é renovado sozinho a cada uso (a autorização vence após 90 dias sem uso).`}</span>`;
-  return html`${icon('user')} <b>${a.name || a.username || a.address}</b>${a.address || a.username ? html` — ${a.address || a.username}` : ''}${a.canDelete === false ? html` <span class="chip">somente leitura</span>` : ''}<br />${note}`;
+  const who = a.name && a.name !== address ? html`<b>${a.name}</b>${address ? html` — ${address}` : ''}` : html`<b>${address || a.name}</b>`;
+  return html`${icon('user')} ${who}${a.canDelete === false ? html` <span class="chip">somente leitura</span>` : ''}<br />${note}`;
 }
 
 function sourceForm(src) {
@@ -124,6 +149,9 @@ function sourceForm(src) {
         <p class="alert full" data-ms-password-warning hidden>
           ${icon('alert')}<span>A Microsoft não aceita mais senha no IMAP do Exchange Online e do Outlook.com. Em <b>Autenticação</b>, escolha <b>OAuth 2.0 da Microsoft</b> — ou use o tipo de conexão <b>Microsoft 365</b>.</span>
         </p>
+        <p class="alert full" data-ms-host-warning hidden>
+          ${icon('alert')}<span>Com o OAuth da Microsoft, o servidor precisa ser da Microsoft (<code>outlook.office365.com</code>): o CLEAN não envia o token a outros endereços.</span>
+        </p>
         <label class="check full" data-imap-password>
           <input type="checkbox" name="allowSelfSigned" ${im.allowSelfSigned ? 'checked' : ''} />
           <span>Aceitar certificado não confiável <small class="muted">(servidor interno com certificado próprio)</small></span>
@@ -151,7 +179,7 @@ function sourceForm(src) {
         <label class="field">
           <span>ID do locatário (diretório)</span>
           <input type="text" name="tenantId" value="${g.tenantId || ''}" placeholder="GUID ou empresa.onmicrosoft.com" />
-          <small data-ms-show="delegated">Com a conta conectada, também <code>organizations</code> (contas de trabalho ou escola) ou <code>consumers</code> (contas pessoais: Outlook.com, Hotmail).</small>
+          <small data-ms-show="delegated">Com a conta conectada, também <code>organizations</code> (contas de trabalho ou escola), <code>consumers</code> (contas pessoais: Outlook.com, Hotmail) ou <code>common</code> (as duas).</small>
         </label>
         <label class="field">
           <span>ID do aplicativo (cliente)</span>
@@ -171,9 +199,12 @@ function sourceForm(src) {
           <div class="alert" data-cert-confirm hidden>
             ${icon('alert')}
             <div>
-              Gerar um novo certificado? Depois de salvar a conexão, o CLEAN passa a usar o novo: envie o novo arquivo .cer ao registro do aplicativo
-              antes (o certificado atual pode continuar lá até você removê-lo).
-              <div class="inline"><button type="button" class="btn small primary" data-action="cert-generate-confirm">Gerar novo certificado</button><button type="button" class="btn small" data-action="cert-generate-cancel">Cancelar</button></div>
+              <span id="cert-confirm-text">Gerar um novo certificado? Depois de salvar a conexão, o CLEAN passa a usar o novo: envie o novo arquivo .cer ao registro do aplicativo
+              antes (o certificado atual pode continuar lá até você removê-lo).</span>
+              <div class="inline">
+                <button type="button" class="btn small primary" data-action="cert-generate-confirm" aria-describedby="cert-confirm-text">Sim, gerar novo certificado</button>
+                <button type="button" class="btn small" data-action="cert-generate-cancel">Manter o atual</button>
+              </div>
             </div>
           </div>
           <details class="help">
@@ -186,12 +217,13 @@ function sourceForm(src) {
         </div>
         <div class="field full" data-ms-show="delegated">
           <span class="field-label">Conta conectada</span>
-          <div class="ms-status" data-account-info>${accountInfo(g.account)}</div>
+          <div class="ms-status" data-account-info tabindex="-1">${accountInfo(g.account)}</div>
           <div class="inline">
-            <button type="button" class="btn small primary" data-action="connect">${icon('user')} <span data-connect-label>${g.account ? 'Conectar outra conta' : 'Conectar conta'}</span></button>
+            <button type="button" class="btn small primary" data-action="connect">${icon('user')} Conectar conta</button>
           </div>
-          <p class="alert full" data-read-only-warning hidden>${icon('alert')}<span>A exclusão está permitida, mas a conta conectada autorizou só a leitura das mensagens: clique em <b>Conectar conta</b> de novo (com "Permitir excluir" marcado) para autorizar a exclusão.</span></p>
           <div class="device-box" data-device hidden></div>
+          <div data-sign-in-error hidden></div>
+          <p class="sr-only" role="status" aria-live="polite" data-sign-in-status></p>
           <input type="hidden" name="signIn" value="" />
         </div>
       </div>
@@ -208,7 +240,7 @@ function sourceForm(src) {
         </ol>
         <ol data-ms-show="delegated">
           <li>No centro de administração do Microsoft Entra (entra.microsoft.com), abra <b>Registros de aplicativo › Novo registro</b> (ex.: "CLEAN"). Para contas pessoais (Outlook.com), escolha "Contas em qualquer diretório organizacional e contas Microsoft pessoais".</li>
-          <li>Em <b>Autenticação</b>, ative <b>Permitir fluxos de cliente público</b> (entrada pelo código de dispositivo) e salve.</li>
+          <li>Em <b>Autenticação</b>, ative <b>Permitir fluxos de clientes públicos</b> (entrada pelo código de dispositivo) e salve.</li>
           <li data-ms-for="graph">Em <b>Permissões de API › Adicionar › Microsoft Graph › Permissões delegadas</b>, inclua <code>User.Read</code>, <code>Mail.Read</code> e <code>Mail.Read.Shared</code> (para excluir: <code>Mail.ReadWrite</code> e <code>Mail.ReadWrite.Shared</code>).</li>
           <li data-ms-for="imap">Em <b>Permissões de API › Adicionar › Microsoft Graph › Permissões delegadas</b>, inclua <code>IMAP.AccessAsUser.All</code> e <code>offline_access</code>. O IMAP precisa estar habilitado nas caixas.</li>
           <li>Copie o ID do aplicativo (cliente) e o ID do diretório (locatário), clique em <b>Conectar conta</b> e entre com a conta. A própria pessoa autoriza as permissões ao entrar (se a organização não permitir, o administrador concede o consentimento no registro do aplicativo).</li>
@@ -246,8 +278,10 @@ function sourceForm(src) {
     <fieldset class="full">
       <legend>Caixas a analisar</legend>
       <div data-scope-box>
-        <label class="check" data-scope-all-choice><input type="radio" name="scope" value="all" ${scope === 'all' ? 'checked' : ''} /><span>Todas as caixas <span data-domain></span></span></label>
-        <label class="check"><input type="radio" name="scope" value="list" ${scope === 'list' ? 'checked' : ''} /><span>Somente as caixas informadas</span></label>
+        <div data-scope-choice>
+          <label class="check"><input type="radio" name="scope" value="all" ${scope === 'all' ? 'checked' : ''} /><span>Todas as caixas <span data-domain></span></span></label>
+          <label class="check"><input type="radio" name="scope" value="list" ${scope === 'list' ? 'checked' : ''} /><span>Somente as caixas informadas</span></label>
+        </div>
         <label class="field" data-scope="list">
           <span>Caixas (uma por linha)</span>
           <textarea name="mailboxList" rows="4" placeholder="financeiro@empresa.com.br&#10;rh@empresa.com.br">${list}</textarea>
@@ -261,11 +295,12 @@ function sourceForm(src) {
       <div data-imap-box>
         <div class="table-wrap">
           <table class="mailbox-rows">
-            <thead><tr><th>E-mail</th><th>Login (se diferente)</th><th data-password-cell>Senha</th><th><span class="sr-only">Remover</span></th></tr></thead>
+            <thead><tr><th>E-mail</th><th data-login-cell>Login (se diferente)</th><th data-password-cell>Senha</th><th><span class="sr-only">Remover</span></th></tr></thead>
             <tbody data-rows>${imapRows.map(mailboxRow)}</tbody>
           </table>
         </div>
-        <small class="hint" data-imap-oauth-rows>Com OAuth, o login de cada caixa é o próprio e-mail: a caixa da conta conectada e as caixas às quais ela (ou o aplicativo) tem Acesso Total. Em branco, só a caixa da conta conectada.</small>
+        <small class="hint" data-imap-oauth-rows="delegated">Com OAuth, o login de cada caixa é o próprio e-mail: a caixa da conta conectada e as caixas a que ela tem Acesso Total. Em branco, só a caixa da conta conectada.</small>
+        <small class="hint" data-imap-oauth-rows="app">Com OAuth, o login de cada caixa é o próprio e-mail: informe as caixas — o aplicativo precisa ter Acesso Total a cada uma no Exchange Online.</small>
         <div class="inline page-actions">
           <button type="button" class="btn small" data-action="add-row">${icon('plus')} Adicionar caixa</button>
           <button type="button" class="btn small" data-action="bulk">Adicionar várias…</button>
@@ -284,6 +319,13 @@ function sourceForm(src) {
         <input type="checkbox" name="allowDelete" ${src?.allowDelete ? 'checked' : ''} />
         <span><b>Permitir excluir as mensagens em que os termos forem encontrados</b><br /><small class="muted">Na análise ("analisar e excluir") ou item a item pelo relatório.</small></span>
       </label>
+      <div class="alert" role="status" data-read-only-warning hidden>
+        ${icon('alert')}
+        <div>
+          A conta conectada autorizou só a leitura das mensagens: para permitir a exclusão, entre de novo com esta opção marcada (a Microsoft pede a permissão de alterar as mensagens).
+          <div class="inline"><button type="button" class="btn small" data-action="connect">${icon('user')} Conectar conta</button></div>
+        </div>
+      </div>
       <label class="field" data-delete-mode ${src?.allowDelete ? '' : 'hidden'}>
         <span>Como excluir</span>
         <select name="deleteMode">
@@ -321,6 +363,8 @@ function sourceForm(src) {
 
 /** A conexão usa as credenciais da Microsoft: Microsoft 365, ou IMAP com OAuth da Microsoft. */
 const usesMicrosoft = (form) => form.elements.type.value === 'graph' || (form.elements.type.value === 'imap' && form.elements.imapAuth.value === 'oauth');
+/** Conta conectada no Microsoft 365: as caixas são sempre as da lista. */
+const delegatedGraph = (form) => form.elements.type.value === 'graph' && form.elements.msAuth.value === 'delegated';
 
 function readForm(form, existing) {
   const f = new FormData(form);
@@ -356,15 +400,16 @@ function readForm(form, existing) {
       defaultPassword: oauth ? '' : f.get('defaultPassword'),
     };
     body.scope = 'list';
+    // Com OAuth, o login é o próprio e-mail da caixa (sem login nem senha próprios).
     body.mailboxes = [...form.querySelectorAll('[data-mailbox-row]')]
       .map((row) => ({
         address: row.querySelector('[name="mbAddress"]').value.trim(),
-        login: row.querySelector('[name="mbLogin"]').value.trim(),
+        login: oauth ? '' : row.querySelector('[name="mbLogin"]').value.trim(),
         password: oauth ? '' : row.querySelector('[name="mbPassword"]').value,
       }))
       .filter((m) => m.address);
   } else {
-    body.scope = f.get('scope');
+    body.scope = delegatedGraph(form) ? 'list' : f.get('scope');
     body.mailboxes = f.get('mailboxList');
     body.excludeMailboxes = f.get('excludeMailboxes');
   }
@@ -412,6 +457,10 @@ function downloadCertificate(certificate, name) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
+/**
+ * Liga o formulário. Devolve beforeClose(): o aviso ao fechar sem salvar quando há uma conta
+ * conectada ou um certificado que só é guardado ao salvar (ou null).
+ */
 function wireForm(form, existing) {
   const rows = form.querySelector('[data-rows]');
   const saved = existing?.type === 'imap' && existing.imap?.auth !== 'oauth' ? existing.imap : null;
@@ -423,10 +472,26 @@ function wireForm(form, existing) {
     // Para que a conta vale: tipo de conexão, locatário e aplicativo em que ela entrou.
     accountFor: savedGraph?.account ? { purpose: existing.type === 'imap' ? 'imap' : 'graph', tenantId: savedGraph.tenantId, clientId: savedGraph.clientId } : null,
     certificate: savedGraph?.certificate || null,
-    flow: null, // entrada em andamento: { id, timer, stopped }
+    certificatePending: false,
+    flow: null, // entrada em andamento: { id, timer, request }
+    requesting: false, // o código da entrada está sendo pedido à Microsoft
+    attempt: 0, // cada entrada começada ou cancelada muda o número: respostas de uma anterior são descartadas
+    closed: false,
+    imapBefore: null, // servidor IMAP antes de escolher o OAuth (volta se a pessoa voltar para a senha)
   };
   const purpose = () => (form.elements.type.value === 'imap' ? 'imap' : 'graph');
   const lower = (v) => String(v || '').trim().toLowerCase();
+  const deviceBox = form.querySelector('[data-device]');
+  const signInError = form.querySelector('[data-sign-in-error]');
+  const signInStatus = form.querySelector('[data-sign-in-status]');
+  const accountBox = form.querySelector('[data-account-info]');
+  const connectButton = form.querySelector('[data-ms-show="delegated"] [data-action="connect"]');
+  const testBox = form.querySelector('[data-test-result]');
+
+  const clearTest = () => {
+    testBox.className = 'test-result';
+    testBox.textContent = '';
+  };
   // Motivo para a conta mostrada não valer mais (tipo, locatário ou aplicativo trocados), ou ''.
   const accountStale = () => {
     const a = state.accountFor;
@@ -437,12 +502,9 @@ function wireForm(form, existing) {
     }
     return '';
   };
-  const drawAccount = () => {
-    paint(form.querySelector('[data-account-info]'), accountInfo(state.account, { pending: state.accountPending, stale: accountStale() }));
-    form.querySelector('[data-connect-label]').textContent = state.account ? 'Conectar outra conta' : 'Conectar conta';
-  };
-  const drawCertificate = (pending = false) => {
-    paint(form.querySelector('[data-cert-info]'), certificateInfo(state.certificate, { pending }));
+  const drawAccount = () => paint(accountBox, accountInfo(state.account, { pending: state.accountPending, stale: accountStale() }));
+  const drawCertificate = () => {
+    paint(form.querySelector('[data-cert-info]'), certificateInfo(state.certificate, { pending: state.certificatePending }));
     form.querySelector('[data-action="cert-download"]').hidden = !state.certificate;
     form.querySelector('[data-cert-generate-label]').textContent = state.certificate ? 'Gerar novo certificado' : 'Gerar certificado';
   };
@@ -450,9 +512,10 @@ function wireForm(form, existing) {
   // Com outro servidor, porta ou segurança, as senhas salvas deixam de valer: os avisos acompanham.
   const syncSaved = () => {
     if (!saved) return;
-    const same = form.elements.type.value === 'imap' && form.elements.imapAuth.value !== 'oauth' && sameEndpoint(saved, form);
+    const oauth = form.elements.imapAuth.value === 'oauth';
+    const same = form.elements.type.value === 'imap' && !oauth && sameEndpoint(saved, form);
     const anySaved = saved.hasDefaultPassword || rows.querySelector('[data-saved="1"]');
-    form.querySelector('[data-reenter]').hidden = same || !anySaved || form.elements.imapAuth.value === 'oauth';
+    form.querySelector('[data-reenter]').hidden = same || !anySaved || oauth;
     if (saved.hasDefaultPassword) form.elements.defaultPassword.placeholder = same ? SAVED : 'informe novamente';
     rows.querySelectorAll('[name="mbPassword"][data-saved="1"]').forEach((input) => {
       input.placeholder = same ? 'salva' : 'informe novamente';
@@ -475,25 +538,32 @@ function wireForm(form, existing) {
     form.querySelectorAll('[data-ms-for]').forEach((el) => {
       el.hidden = el.dataset.msFor !== purpose();
     });
-    // IMAP: com OAuth, sem senhas; com senha num servidor da Microsoft, o aviso.
+    // IMAP: com OAuth, sem senhas nem login próprio, e só servidores da Microsoft, com criptografia.
     form.querySelector('[data-imap-oauth-hint]').hidden = !oauth;
     form.querySelectorAll('[data-imap-password]').forEach((el) => {
       el.hidden = oauth;
     });
-    form.querySelectorAll('[data-password-cell]').forEach((el) => {
+    form.querySelectorAll('[data-password-cell], [data-login-cell]').forEach((el) => {
       el.hidden = oauth;
     });
-    form.querySelector('[data-imap-oauth-rows]').hidden = !oauth;
+    form.querySelectorAll('[data-imap-oauth-rows]').forEach((el) => {
+      el.hidden = !oauth || el.dataset.imapOauthRows !== (delegated ? 'delegated' : 'app');
+    });
+    const none = form.querySelector('[name="security"] option[value="none"]');
+    none.disabled = oauth;
+    if (oauth && form.elements.security.value === 'none') form.elements.security.value = 'tls';
     form.querySelector('[data-bulk-label]').textContent = oauth ? 'E-mails (um por linha)' : 'E-mails (um por linha) — usam a senha padrão';
-    form.querySelector('[data-ms-password-warning]').hidden = !(imap && !oauth && isMicrosoftHost(form.elements.host.value));
+    const host = form.elements.host.value.trim();
+    form.querySelector('[data-ms-password-warning]').hidden = !(imap && !oauth && isMicrosoftHost(host));
+    form.querySelector('[data-ms-host-warning]').hidden = !(oauth && host && !isMicrosoftHost(host));
     form.querySelector('[data-scope-box]').hidden = imap;
     form.querySelector('[data-imap-box]').hidden = !imap;
-    // Conta conectada no Microsoft 365: as caixas são as da lista (a da conta e as compartilhadas).
-    const allChoice = form.querySelector('[data-scope-all-choice]');
-    allChoice.hidden = delegated;
-    if (delegated && form.elements.scope.value !== 'list') form.querySelector('[name="scope"][value="list"]').checked = true;
-    form.querySelector('[data-delegated-list-hint]').hidden = !delegated;
-    const scope = form.elements.scope.value || 'all';
+    // Conta conectada no Microsoft 365: as caixas são as da lista (a da conta e as compartilhadas);
+    // a escolha "todas" fica escondida, sem ser alterada (volta ao trocar a forma de autenticação).
+    const listOnly = type === 'graph' && delegated;
+    form.querySelector('[data-scope-choice]').hidden = listOnly;
+    form.querySelector('[data-delegated-list-hint]').hidden = !listOnly;
+    const scope = listOnly ? 'list' : form.elements.scope.value || 'all';
     form.querySelectorAll('[data-scope]').forEach((el) => {
       el.hidden = el.dataset.scope !== scope;
     });
@@ -502,26 +572,47 @@ function wireForm(form, existing) {
     form.querySelector('[data-delete-mode]').hidden = !deletion;
     form.querySelector('[data-delete-help]').hidden = !deletion;
     // Exclusão com a conta conectada (Microsoft Graph): a entrada precisa ter autorizado a escrita.
-    form.querySelector('[data-read-only-warning]').hidden = !(delegated && type === 'graph' && deletion && state.account && state.account.canDelete === false && !accountStale());
+    form.querySelector('[data-read-only-warning]').hidden = !(listOnly && deletion && state.account && state.account.canDelete === false && !accountStale());
     drawAccount();
   };
 
   // ---------- Conta conectada: entrada pelo código de dispositivo ----------
-  const deviceBox = form.querySelector('[data-device]');
-  const stopFlow = ({ cancel = false } = {}) => {
-    const flow = state.flow;
-    if (!flow) return;
-    flow.stopped = true;
-    clearTimeout(flow.timer);
-    state.flow = null;
-    if (cancel) del(`/api/mail-sources/oauth/device/${flow.id}`).catch(() => {});
+  const announce = (text) => {
+    signInStatus.textContent = text;
   };
-  const connected = (flowId, account) => {
+  const showSignInError = (message) => {
+    paint(signInError, message ? html`<div class="alert error" role="alert">${icon('alert')}<div>${message}</div></div>` : '');
+    signInError.hidden = !message;
+  };
+  /** Há uma entrada em andamento (ou o código dela está sendo pedido). */
+  const signingIn = () => Boolean(state.flow || state.requesting);
+  /** Encerra a entrada em andamento (se houver) e esconde o código. */
+  const cancelSignIn = () => {
+    state.attempt++;
+    state.requesting = false;
+    const flow = state.flow;
+    state.flow = null;
+    if (flow) {
+      clearTimeout(flow.timer);
+      post('/api/mail-sources/oauth/device/cancel', { flowId: flow.id }).catch(() => {});
+    }
+    const hadFocus = deviceBox.contains(document.activeElement);
+    deviceBox.hidden = true;
+    paint(deviceBox, '');
+    if (hadFocus) connectButton.focus();
+  };
+  const connected = (flow, account) => {
+    // Uma entrada anterior, concluída e ainda não salva, sai do servidor.
+    const previous = form.elements.signIn.value;
+    if (previous && previous !== flow.id) post('/api/mail-sources/oauth/device/cancel', { flowId: previous }).catch(() => {});
+    const focusInBox = deviceBox.contains(document.activeElement);
     state.account = account;
     state.accountPending = true;
-    state.accountFor = { purpose: purpose(), tenantId: form.elements.tenantId.value, clientId: form.elements.clientId.value };
-    form.elements.signIn.value = flowId;
+    // A conta vale para o que foi enviado ao pedir o código (e não para o que está nos campos agora).
+    state.accountFor = { purpose: flow.request.type === 'imap' ? 'imap' : 'graph', tenantId: flow.request.graph.tenantId, clientId: flow.request.graph.clientId };
+    form.elements.signIn.value = flow.id;
     deviceBox.hidden = true;
+    paint(deviceBox, '');
     // Sem caixas informadas, a lista começa com a caixa da conta.
     const address = account.address || account.username;
     if (address && form.elements.type.value === 'imap') {
@@ -530,81 +621,122 @@ function wireForm(form, existing) {
     } else if (address && !form.elements.mailboxList.value.trim()) {
       form.elements.mailboxList.value = address;
     }
+    clearTest();
     sync();
+    announce(`Conta ${address || ''} conectada. Salve a conexão para guardar a autorização.`);
+    if (focusInBox) accountBox.focus();
     toast(`Conta ${address || ''} conectada. Salve a conexão para guardar a autorização.`, 'success');
   };
   const poll = async (flow) => {
-    if (flow.stopped) return;
-    if (!form.isConnected) return stopFlow({ cancel: true });
+    if (state.flow !== flow || state.closed) return;
     let result;
     try {
-      result = await get(`/api/mail-sources/oauth/device/${flow.id}`);
+      result = await post('/api/mail-sources/oauth/device/status', { flowId: flow.id });
     } catch (err) {
-      result = { status: 'retry', error: err.message };
+      result = { status: 'pending', notice: `Falha momentânea ao consultar o servidor do CLEAN (${err.message}). Tentando de novo…` };
     }
-    if (flow.stopped) return;
+    if (state.flow !== flow || state.closed) return;
     if (result.status === 'connected') {
-      stopFlow();
-      connected(flow.id, result.account);
+      state.flow = null;
+      connected(flow, result.account);
       return;
     }
     if (result.status === 'failed') {
-      stopFlow();
-      paint(deviceBox, html`<div class="alert error">${icon('alert')}<div>${result.error || 'A entrada não foi concluída.'}</div></div>`);
+      const focusInBox = deviceBox.contains(document.activeElement);
+      state.flow = null;
+      deviceBox.hidden = true;
+      paint(deviceBox, '');
+      showSignInError(result.error || 'A entrada não foi concluída.');
+      if (focusInBox) connectButton.focus();
       return;
     }
-    // Pendente (ou falha momentânea ao consultar): consulta de novo em alguns segundos.
+    // Pendente: consulta de novo em alguns segundos (com o aviso de uma falha momentânea, se houver).
+    const notice = deviceBox.querySelector('[data-device-notice]');
+    if (notice) {
+      notice.textContent = result.notice || '';
+      notice.hidden = !result.notice;
+    }
     flow.timer = setTimeout(() => poll(flow), 3000);
   };
   const startSignIn = async (button) => {
-    stopFlow({ cancel: true });
+    cancelSignIn();
+    showSignInError('');
+    const mine = ++state.attempt;
+    const request = {
+      id: existing?.id,
+      type: form.elements.type.value,
+      graph: { tenantId: form.elements.tenantId.value, clientId: form.elements.clientId.value },
+      allowDelete: form.elements.allowDelete.checked,
+    };
+    const hadFocus = document.activeElement === button;
     deviceBox.hidden = false;
-    paint(deviceBox, html`<p class="muted">Pedindo um código de entrada à Microsoft…</p>`);
+    paint(deviceBox, html`<p class="device-waiting">Pedindo um código de entrada à Microsoft…</p>`);
+    announce('Pedindo um código de entrada à Microsoft…');
     button.disabled = true;
+    state.requesting = true;
     let started;
     try {
-      started = await post('/api/mail-sources/oauth/device', {
-        type: form.elements.type.value,
-        graph: { tenantId: form.elements.tenantId.value, clientId: form.elements.clientId.value },
-        allowDelete: form.elements.allowDelete.checked,
-      });
+      started = await post('/api/mail-sources/oauth/device', request);
     } catch (err) {
-      paint(deviceBox, html`<div class="alert error">${icon('alert')}<div>${err.message}</div></div>`);
+      if (mine !== state.attempt || state.closed) return;
+      state.requesting = false;
+      deviceBox.hidden = true;
+      paint(deviceBox, '');
+      showSignInError(err.message);
       return;
     } finally {
       button.disabled = false;
+      if (hadFocus && !started) button.focus();
     }
+    // Cancelada (outra escolha, outro campo ou o formulário fechado) enquanto o código era pedido.
+    if (mine !== state.attempt || state.closed) {
+      post('/api/mail-sources/oauth/device/cancel', { flowId: started.flowId }).catch(() => {});
+      if (hadFocus && !state.closed) button.focus();
+      return;
+    }
+    state.requesting = false;
     const uri = safeUri(started.verificationUri);
+    const shown = uri.replace(/^https:\/\//, '').replace(/\/$/, '');
     paint(
       deviceBox,
       html`<ol>
-          <li>Abra <a href="${uri}" target="_blank" rel="noopener noreferrer">${uri.replace(/^https:\/\//, '').replace(/\/$/, '')}</a> (neste computador ou no celular).</li>
-          <li>Digite o código <code class="device-code">${started.userCode}</code> <button type="button" class="btn small" data-action="copy-code" data-code="${started.userCode}">${icon('copy')} Copiar</button></li>
+          <li>Abra <a href="${uri}" target="_blank" rel="noopener noreferrer">${shown}</a> (neste computador ou no celular).</li>
+          <li>Digite o código <code class="device-code">${started.userCode}</code> <button type="button" class="btn small" data-action="copy-code" data-code="${started.userCode}">${icon('copy')} Copiar o código</button></li>
           <li>Entre com a conta cujas caixas serão analisadas e aceite as permissões pedidas.</li>
         </ol>
-        <p class="small muted" aria-live="polite">Aguardando a entrada na página da Microsoft… O código vale até ${fmtDateTime(started.expiresAt)}.</p>
-        <button type="button" class="btn small" data-action="connect-cancel">Cancelar</button>`,
+        <p class="small device-waiting">Aguardando a entrada na página da Microsoft… O código vale até ${fmtDateTime(started.expiresAt)}.</p>
+        <p class="small warn-text" data-device-notice hidden></p>
+        <button type="button" class="btn small" data-action="connect-cancel">Cancelar a entrada</button>`,
     );
-    const flow = { id: started.flowId, timer: null, stopped: false };
+    announce(`Código de entrada: ${started.userCode.split('').join(' ')}. Abra ${shown} e digite o código.`);
+    if (hadFocus) deviceBox.querySelector('[data-action="copy-code"]').focus();
+    const flow = { id: started.flowId, timer: null, request };
     state.flow = flow;
     flow.timer = setTimeout(() => poll(flow), Math.max(2, Number(started.interval) || 5) * 1000);
   };
-  // Ao fechar o formulário, a entrada em andamento (ou não salva) é descartada no servidor.
-  form.closest('dialog')?.addEventListener(
-    'close',
-    () => {
-      stopFlow({ cancel: true });
-      if (form.elements.signIn.value) del(`/api/mail-sources/oauth/device/${form.elements.signIn.value}`).catch(() => {});
-    },
-    { once: true },
-  );
 
   // ---------- Certificado: gerado no servidor ou importado (PEM) ----------
   const useCertificate = (result) => {
     state.certificate = result.certificate;
+    state.certificatePending = true;
     form.elements.certificateId.value = result.certificateId;
-    drawCertificate(true);
+    clearTest();
+    drawCertificate();
   };
+  const newCertificate = (body) => post('/api/mail-sources/certificate', { ...body, replaces: form.elements.certificateId.value || undefined });
+
+  // Ao fechar o formulário, a entrada em andamento e o que não foi salvo saem da memória do servidor
+  // (depois de salvar, o servidor já os descartou).
+  form.closest('dialog')?.addEventListener(
+    'close',
+    () => {
+      state.closed = true;
+      cancelSignIn();
+      if (form.elements.signIn.value) post('/api/mail-sources/oauth/device/cancel', { flowId: form.elements.signIn.value }).catch(() => {});
+      if (form.elements.certificateId.value) post('/api/mail-sources/certificate/discard', { certificateId: form.elements.certificateId.value }).catch(() => {});
+    },
+    { once: true },
+  );
 
   form.addEventListener('change', (event) => {
     const name = event.target.name;
@@ -613,16 +745,36 @@ function wireForm(form, existing) {
       const defaults = Object.values(SECURITY).map((s) => String(s.port));
       if (!port.value || defaults.includes(port.value)) port.value = SECURITY[event.target.value].port;
     }
-    if (name === 'imapAuth' && event.target.value === 'oauth') {
-      // Servidor da Microsoft, porta 993 e SSL/TLS: o que o login OAuth exige.
-      if (!form.elements.host.value.trim() || !isMicrosoftHost(form.elements.host.value)) form.elements.host.value = 'outlook.office365.com';
-      form.elements.security.value = 'tls';
-      form.elements.port.value = 993;
-      form.elements.allowSelfSigned.checked = false;
-      // No IMAP, o comum é entrar com a conta (o aplicativo exige configurar o Exchange Online).
-      if (!savedGraph) form.querySelector('[name="msAuth"][value="delegated"]').checked = true;
+    if (name === 'imapAuth') {
+      const f = form.elements;
+      if (event.target.value === 'oauth') {
+        // Servidor da Microsoft, porta 993 e SSL/TLS: o que o login OAuth exige. O servidor anterior
+        // volta se a pessoa voltar para a senha sem mexer nele.
+        state.imapBefore = { host: f.host.value, port: f.port.value, security: f.security.value, allowSelfSigned: f.allowSelfSigned.checked };
+        if (!isMicrosoftHost(f.host.value)) f.host.value = 'outlook.office365.com';
+        f.security.value = 'tls';
+        f.port.value = 993;
+        f.allowSelfSigned.checked = false;
+        state.imapBefore.filled = { host: f.host.value, port: f.port.value, security: f.security.value };
+        // No IMAP, o comum é entrar com a conta (o aplicativo exige configurar o Exchange Online).
+        if (!savedGraph) form.querySelector('[name="msAuth"][value="delegated"]').checked = true;
+      } else if (state.imapBefore) {
+        const { filled, ...before } = state.imapBefore;
+        if (f.host.value === filled.host && String(f.port.value) === String(filled.port) && f.security.value === filled.security) {
+          f.host.value = before.host;
+          f.port.value = before.port;
+          f.security.value = before.security;
+          f.allowSelfSigned.checked = before.allowSelfSigned;
+        }
+        state.imapBefore = null;
+      }
     }
-    if (name === 'type' || name === 'imapAuth' || name === 'msAuth') stopFlow({ cancel: true });
+    // A entrada em andamento vale para o tipo, a forma e as permissões com que foi pedida.
+    if (signingIn() && ['type', 'imapAuth', 'msAuth', 'allowDelete'].includes(name)) {
+      cancelSignIn();
+      if (name === 'allowDelete') showSignInError('A opção "Permitir excluir" mudou durante a entrada: clique em "Conectar conta" de novo para pedir as permissões certas.');
+    }
+    if (TEST_FIELDS.has(name)) clearTest();
     sync();
     syncSaved();
   });
@@ -632,17 +784,15 @@ function wireForm(form, existing) {
       syncSaved();
       sync();
     }
-    if (name === 'tenantId' || name === 'clientId') {
-      // A entrada vale para o locatário e o aplicativo em que foi feita.
-      stopFlow({ cancel: true });
-      deviceBox.hidden = true;
-      sync();
-    }
+    if ((name === 'tenantId' || name === 'clientId') && signingIn()) cancelSignIn(); // a entrada vale para o locatário e o aplicativo em que foi pedida
+    if (name === 'tenantId' || name === 'clientId') sync();
+    if (TEST_FIELDS.has(name)) clearTest();
   });
   form.querySelector('[data-sa-file]').addEventListener('change', async (event) => {
     const file = event.target.files[0];
     const info = form.querySelector('[data-sa-info]');
     if (!file) return;
+    clearTest();
     const text = await file.text();
     form.elements.serviceAccountJson.value = text;
     try {
@@ -658,8 +808,14 @@ function wireForm(form, existing) {
     if (!file) return;
     try {
       if (file.size > 200000) throw new Error('O arquivo é grande demais para um certificado.');
-      useCertificate(await post('/api/mail-sources/certificate', { pem: await file.text() }));
-      toast('Certificado lido. Envie o mesmo certificado ao registro do aplicativo (se ainda não estiver lá) e salve a conexão.', 'success');
+      const replacing = Boolean(state.certificate);
+      useCertificate(await newCertificate({ pem: await file.text() }));
+      toast(
+        replacing
+          ? 'Certificado lido: ele substitui o atual quando você salvar a conexão. Envie o mesmo certificado ao registro do aplicativo (se ainda não estiver lá).'
+          : 'Certificado lido. Envie o mesmo certificado ao registro do aplicativo (se ainda não estiver lá) e salve a conexão.',
+        'success',
+      );
     } catch (err) {
       toast(err.message, 'error');
     } finally {
@@ -677,6 +833,7 @@ function wireForm(form, existing) {
     } else if (action === 'remove-row') {
       button.closest('tr').remove();
       if (!rows.children.length) rows.insertAdjacentHTML('beforeend', mailboxRow().toString());
+      clearTest();
       sync();
     } else if (action === 'bulk') {
       const box = form.querySelector('[data-bulk]');
@@ -703,14 +860,15 @@ function wireForm(form, existing) {
       for (const address of added) rows.insertAdjacentHTML('beforeend', mailboxRow({ address }).toString());
       area.value = '';
       form.querySelector('[data-bulk]').hidden = true;
+      clearTest();
       sync();
       toast(`${plural(added.length, 'caixa incluída', 'caixas incluídas')}.`, 'success');
     } else if (action === 'connect') {
       await startSignIn(button);
     } else if (action === 'connect-cancel') {
-      stopFlow({ cancel: true });
-      deviceBox.hidden = true;
-      form.querySelector('[data-action="connect"]').focus();
+      cancelSignIn();
+      announce('Entrada cancelada.');
+      connectButton.focus();
     } else if (action === 'copy-code') {
       try {
         await copyText(button.dataset.code);
@@ -730,7 +888,7 @@ function wireForm(form, existing) {
       const generate = form.querySelector('[data-action="cert-generate"]');
       generate.disabled = true;
       try {
-        useCertificate(await post('/api/mail-sources/certificate', { name: form.elements.name.value }));
+        useCertificate(await newCertificate({ name: form.elements.name.value }));
         toast('Certificado gerado. Baixe o arquivo .cer e envie-o ao registro do aplicativo.', 'success');
       } catch (err) {
         toast(err.message, 'error');
@@ -744,15 +902,14 @@ function wireForm(form, existing) {
     } else if (action === 'cert-download') {
       if (state.certificate) downloadCertificate(state.certificate, form.elements.name.value);
     } else if (action === 'test') {
-      const box = form.querySelector('[data-test-result]');
-      box.className = 'test-result';
-      box.textContent = 'Testando a conexão… (pode levar alguns segundos)';
+      testBox.className = 'test-result';
+      testBox.textContent = 'Testando a conexão… (pode levar alguns segundos)';
       const hadFocus = document.activeElement === button;
       button.disabled = true;
       try {
-        showTest(box, await post('/api/mail-sources/test', readForm(form, existing)));
+        showTest(testBox, await post('/api/mail-sources/test', readForm(form, existing)));
       } catch (err) {
-        showTest(box, { ok: false, message: err.message });
+        showTest(testBox, { ok: false, message: err.message });
       } finally {
         button.disabled = false;
         if (hadFocus) button.focus(); // o botão desabilitado perde o foco do teclado
@@ -761,6 +918,15 @@ function wireForm(form, existing) {
   });
   sync();
   syncSaved();
+
+  return () => {
+    const auth = usesMicrosoft(form) ? form.elements.msAuth.value : '';
+    const account = Boolean(form.elements.signIn.value) && auth === 'delegated';
+    const certificate = Boolean(form.elements.certificateId.value) && auth === 'certificate';
+    if (!account && !certificate) return null;
+    const what = account && certificate ? 'A conta conectada e o certificado novo só são guardados' : account ? 'A conta conectada agora só é guardada' : 'O certificado novo só é guardado';
+    return `${what} ao salvar a conexão. Clique em Salvar — ou em Cancelar de novo para descartar.`;
+  };
 }
 
 function scopeText(s) {
@@ -804,7 +970,7 @@ export async function render(root) {
       html`<div class="page-head">
           <div>
             <h1>Caixas de e-mail</h1>
-            <div class="sub">Conexões com o Microsoft 365, o Google Workspace ou servidores IMAP. Senhas, segredos, certificados e as autorizações das contas conectadas ficam gravados cifrados no servidor do CLEAN e não são exibidos novamente.</div>
+            <div class="sub">Conexões com o Microsoft 365, o Google Workspace ou servidores IMAP. Senhas, segredos, chaves privadas e as autorizações das contas conectadas ficam gravados cifrados no servidor do CLEAN e não são exibidos novamente.</div>
           </div>
           <div class="actions">
             <button class="btn primary" data-action="new">${icon('plus')} Nova conexão</button>
@@ -826,7 +992,7 @@ export async function render(root) {
                         <td class="nowrap">${TYPES[s.type]?.label || s.type}</td>
                         <td class="small">${scopeText(s)}${s.type === 'imap' || s.scope === 'list' ? html`<div class="muted">${s.mailboxes.slice(0, 3).map((m) => m.address).join(', ')}${s.mailboxes.length > 3 ? '…' : ''}</div>` : ''}</td>
                         <td class="small">${credentialText(s)}</td>
-                        <td class="small">${deletionText(s)}</td>
+                        <td class="small nowrap">${deletionText(s)}</td>
                         <td class="actions">
                           <button class="icon-btn" data-action="test" data-id="${s.id}" aria-label="Testar ${s.name}" title="Testar conexão">${icon('check')}</button>
                           <button class="icon-btn" data-action="edit" data-id="${s.id}" aria-label="Editar ${s.name}" title="Editar">${icon('edit')}</button>
@@ -859,12 +1025,16 @@ export async function render(root) {
   };
 
   const edit = async (source) => {
+    let beforeClose = null;
     const saved = await openDialog({
       title: source ? 'Editar conexão de e-mail' : 'Nova conexão de e-mail',
       body: sourceForm(source),
       wide: true,
-      onOpen: (form) => wireForm(form, source),
+      onOpen: (form) => {
+        beforeClose = wireForm(form, source);
+      },
       onSubmit: (form) => (source ? put(`/api/mail-sources/${source.id}`, readForm(form, source)) : post('/api/mail-sources', readForm(form, null))),
+      beforeClose: () => beforeClose?.(),
     });
     if (saved) {
       toast(source ? 'Conexão atualizada.' : 'Conexão cadastrada. Use "Testar conexão" para conferir o acesso.', 'success');
