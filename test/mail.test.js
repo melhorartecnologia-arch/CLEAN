@@ -618,6 +618,24 @@ test('API: análise de e-mail completa em segundo plano, relatório e exportaç�
     }
     assert.equal(current.data.status, 'completed', JSON.stringify(current.data.log));
     assert.equal(current.data.stats.messagesMatched, 5);
+
+    // Raio-X das caixas: censo de TODAS as mensagens analisadas (não só as com ocorrências).
+    const profile = current.data.profile;
+    assert.ok(profile, 'a análise gravou o raio-x');
+    assert.equal(profile.total, 6, 'ana: 3 na entrada, 1 em Projetos, 1 na lixeira; bia: 1');
+    assert.equal(profile.withoutDate, 0);
+    assert.equal(profile.foldersTotal, 3);
+    assert.equal(profile.folders.find((f) => f.path === 'Caixa de Entrada').count, 4, 'entrada de ana (3) + de bia (1)');
+    assert.equal(profile.folders.find((f) => f.path === 'Caixa de Entrada/Projetos').count, 1);
+    assert.equal(profile.mailboxesTotal, 2);
+    assert.deepEqual(
+      profile.mailboxes.map((m) => [m.mailbox, m.count]).sort((a, b) => a[0].localeCompare(b[0])),
+      [['ana@contoso.com', 5], ['bia@contoso.com', 1]],
+    );
+    assert.deepEqual(profile.timeline, [{ month: '2023-01', count: 1 }, { month: '2026-09', count: 5 }]);
+    assert.ok(profile.oldest.date.startsWith('2023-01-01') && profile.oldest.mailbox === 'ana@contoso.com' && profile.oldest.folder === 'Caixa de Entrada/Projetos');
+    assert.ok(profile.newest.date.startsWith('2026-09-23'));
+
     const config = fs.readFileSync(path.join(app.store.scanDir(scan.data.id), 'config.json'), 'utf8');
     assert.ok(!config.includes(GRAPH_SECRET) && !config.includes('enc:v1'), 'a configuração da análise não guarda segredos');
 
@@ -645,11 +663,14 @@ test('API: análise de e-mail completa em segundo plano, relatório e exportaç�
     const xlsx = await app.api('GET', `/api/scans/${scan.data.id}/export.xlsx`);
     const parts = unzipSync(new Uint8Array(xlsx.data));
     const workbook = strFromU8(parts['xl/workbook.xml']);
-    assert.deepEqual([...workbook.matchAll(/<sheet name="([^"]*)"/g)].map((m) => m[1]), ['Resumo', 'Mensagens', 'Ocorrências']);
+    assert.deepEqual([...workbook.matchAll(/<sheet name="([^"]*)"/g)].map((m) => m[1]), ['Resumo', 'Mensagens', 'Ocorrências', 'Raio-X']);
     const html = await app.api('GET', `/api/scans/${scan.data.id}/export.html`);
-    assert.ok(html.data.toString('utf8').includes('Mensagens com ocorrências (5)'));
+    const htmlText = html.data.toString('utf8');
+    assert.ok(htmlText.includes('Mensagens com ocorrências (5)'));
+    assert.ok(htmlText.includes('Raio-X das caixas') && htmlText.includes('Distribuição ao longo do tempo'), 'o raio-x sai no HTML');
     const json = await app.api('GET', `/api/scans/${scan.data.id}/export.json`);
     assert.equal(json.data.results.length, 5);
+    assert.equal(json.data.scan.profile.total, 6, 'o raio-x sai no JSON');
   } finally {
     await app.close();
   }

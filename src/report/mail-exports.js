@@ -103,6 +103,42 @@ function matchRows(r) {
   ]);
 }
 
+const MONTHS_PT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+/** 'AAAA-MM' → 'mês/AAAA' (ex.: 'set/2026'). */
+function monthLabel(ym) {
+  const [y, m] = String(ym).split('-');
+  return `${MONTHS_PT[Number(m) - 1] || m}/${y}`;
+}
+
+/** Raio-X das caixas (censo): aba do Excel com pastas, distribuição no tempo e caixas. */
+function profileSheet(profile) {
+  const header = (...labels) => labels.map((v) => ({ v, s: 'header' }));
+  const where = (p) => (p ? `${p.mailbox}${p.folder ? ` › ${p.folder}` : ''}` : '');
+  const rows = [[{ v: 'Raio-X das caixas', s: 'title' }], []];
+  for (const [label, value] of [
+    ['Mensagens no raio-x', profile.total],
+    ['Sem data de recebimento', profile.withoutDate],
+    ['Recebidas a partir de', profile.since ? toDate(profile.since) : 'todas'],
+    ['E-mail mais antigo', profile.oldest ? toDate(profile.oldest.date) : ''],
+    ['   (onde)', where(profile.oldest)],
+    ['E-mail mais recente', profile.newest ? toDate(profile.newest.date) : ''],
+    ['   (onde)', where(profile.newest)],
+    ['Pastas com mensagens', profile.foldersTotal],
+    ['Caixas analisadas', profile.mailboxesTotal],
+  ]) {
+    rows.push([{ v: label, s: 'bold' }, value]);
+  }
+  rows.push([], header('Pasta', 'Mensagens', 'Mais antigo', 'Mais recente'));
+  for (const f of profile.folders) rows.push([f.path, f.count, f.oldest ? toDate(f.oldest) : '', f.newest ? toDate(f.newest) : '']);
+  rows.push([], header('Período', 'Mensagens'));
+  for (const t of profile.timeline) rows.push([monthLabel(t.month), t.count]);
+  if (profile.mailboxes.length > 1) {
+    rows.push([], header('Caixa', 'Nome', 'Mensagens', 'Mais antigo'));
+    for (const m of profile.mailboxes) rows.push([m.mailbox, m.name, m.count, m.oldest ? toDate(m.oldest) : '']);
+  }
+  return { name: 'Raio-X', cols: [40, 14, 17, 17], rows };
+}
+
 /** Conexão de e-mail no resumo: "Nome (tipo, N caixa(s))". */
 export function sourceText(s) {
   const scope = s.scope === 'all' ? 'todas as caixas' : `${s.mailboxCount ?? 0} caixa(s)`;
@@ -175,6 +211,7 @@ export async function exportMailXlsx(scan, records, errors, out, { deletions = [
       })(),
     },
   ];
+  if (scan.profile) sheets.push(profileSheet(scan.profile));
   if (deletions.length) {
     sheets.push(
       deletionsSheet(
@@ -214,6 +251,32 @@ export async function exportMailCsv(records, out) {
   );
 }
 
+/** Raio-X das caixas no HTML: números, pastas, distribuição no tempo e caixas. */
+function profileHtmlSection(profile) {
+  if (!profile) return '';
+  const d = (iso) => (iso ? new Date(iso).toLocaleDateString('pt-BR') : '—');
+  const where = (p) => (p ? escapeHtml(`${p.mailbox}${p.folder ? ` › ${p.folder}` : ''}`) : '—');
+  const folders = profile.folders
+    .map((f) => `<tr><td>${escapeHtml(f.path)}</td><td class="num">${f.count}</td><td>${d(f.oldest)}</td><td>${d(f.newest)}</td></tr>`)
+    .join('');
+  const timeline = profile.timeline.map((t) => `<tr><td>${escapeHtml(monthLabel(t.month))}</td><td class="num">${t.count}</td></tr>`).join('');
+  const boxes =
+    profile.mailboxes.length > 1
+      ? `<h3>Caixas</h3><table><thead><tr><th>Caixa</th><th>Nome</th><th class="num">Mensagens</th><th>Mais antigo</th></tr></thead><tbody>${profile.mailboxes
+          .map((m) => `<tr><td>${escapeHtml(m.mailbox)}</td><td>${escapeHtml(m.name)}</td><td class="num">${m.count}</td><td>${d(m.oldest)}</td></tr>`)
+          .join('')}</tbody></table>`
+      : '';
+  return `<h2>Raio-X das caixas</h2>
+<table class="info">
+<tr><td>Mensagens no raio-x</td><td>${profile.total}${profile.since ? ` (recebidas a partir de ${d(profile.since)})` : ''}${profile.withoutDate ? ` · ${profile.withoutDate} sem data` : ''}</td></tr>
+<tr><td>E-mail mais antigo</td><td>${d(profile.oldest?.date)} — ${where(profile.oldest)}</td></tr>
+<tr><td>E-mail mais recente</td><td>${d(profile.newest?.date)} — ${where(profile.newest)}</td></tr>
+</table>
+<h3>Pastas</h3><table><thead><tr><th>Pasta</th><th class="num">Mensagens</th><th>Mais antigo</th><th>Mais recente</th></tr></thead><tbody>${folders}</tbody></table>
+<h3>Distribuição ao longo do tempo</h3><table><thead><tr><th>Período</th><th class="num">Mensagens</th></tr></thead><tbody>${timeline}</tbody></table>
+${boxes}`;
+}
+
 export async function exportMailHtml(scan, records, out) {
   const sorted = sortMessages(records);
   const summary = summarizeMail(sorted);
@@ -226,6 +289,7 @@ export async function exportMailHtml(scan, records, out) {
   const boxes = summary.byMailbox
     .map((m) => `<tr><td>${escapeHtml(m.mailbox)}</td><td class="num">${m.messages}</td><td class="num">${m.occurrences}</td></tr>`)
     .join('');
+  const profileHtml = profileHtmlSection(scan.profile);
   const sample = (s) =>
     s ? `<div class="sample">${s.where ? `<b>${escapeHtml(s.where)}:</b> ` : ''}${escapeHtml(s.before)}<mark>${escapeHtml(s.match)}</mark>${escapeHtml(s.after)}</div>` : '';
   const row = (r) => {
@@ -244,6 +308,7 @@ export async function exportMailHtml(scan, records, out) {
 <h2>Resumo</h2><table class="info">${info}</table>
 <h2>Termos encontrados</h2><table><thead><tr><th>Termo</th><th>Lista</th><th class="num">Mensagens</th><th class="num">Ocorrências</th></tr></thead><tbody>${terms}</tbody></table>
 <h2>Caixas</h2><table><thead><tr><th>Caixa</th><th class="num">Mensagens</th><th class="num">Ocorrências</th></tr></thead><tbody>${boxes}</tbody></table>
+${profileHtml}
 <h2>Mensagens com ocorrências (${sorted.length})</h2><table><thead><tr><th>Mensagem</th><th>Remetente</th><th>Data</th><th>Informação encontrada</th></tr></thead><tbody>`;
       for (const r of sorted) yield row(r);
       yield '</tbody></table>\n</body></html>';

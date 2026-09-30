@@ -28,6 +28,9 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   as pastas, assunto, corpo, nomes e conteúdo dos anexos (os mesmos formatos acima, inclusive
   e-mails encaminhados como anexo). O relatório mostra a caixa, a pasta, o remetente, os
   destinatários e a data de cada mensagem encontrada. Senhas e chaves ficam gravadas cifradas.
+- **Raio-X das caixas**: a análise de e-mail também gera um retrato de todas as mensagens analisadas
+  (não só as com ocorrências) — quantidade por pasta, e-mails mais antigos e a distribuição ao longo
+  do tempo.
 - **OAuth 2.0 da Microsoft** em todas as formas usadas pelo Exchange Online e pelo Outlook.com:
   aplicativo com **segredo do cliente**, aplicativo com **certificado** (gerado pelo próprio CLEAN)
   ou **conta Microsoft conectada** (a pessoa entra com a conta pelo código de dispositivo; a
@@ -305,8 +308,15 @@ cadastradas previamente:
    mensagens com ocorrências. Cada mensagem mostra caixa, pasta, datas de recebimento e envio,
    remetente, destinatários, anexos (com a situação da leitura de cada um), Message-ID, o link para
    abrir no Outlook na Web (Microsoft 365) e os trechos encontrados — em anexos, com o nome do anexo
-   e a página, planilha ou slide. Exportações: **Excel** (abas *Resumo*, *Mensagens*, *Ocorrências* e
-   *Erros*), **CSV**, **HTML** e **JSON**.
+   e a página, planilha ou slide. Exportações: **Excel** (abas *Resumo*, *Mensagens*, *Ocorrências*,
+   *Raio-X* e *Erros*), **CSV**, **HTML** e **JSON**.
+4. **Raio-X das caixas** — uma aba do relatório com um retrato de **todas as mensagens analisadas**
+   (não só as que têm ocorrências), montado enquanto a análise processa as caixas: **quantidade de
+   mensagens por pasta** (com a mais antiga e a mais recente de cada pasta), o **e-mail mais antigo**
+   e o **mais recente** (com a caixa e a pasta), a **distribuição ao longo do tempo** (por mês; por
+   ano quando o período é longo) e, quando há mais de uma caixa, a **quantidade por caixa**. Respeita
+   as pastas ignoradas e, se a análise usar "recebidas a partir de", cobre esse período. Também sai
+   nas exportações (aba *Raio-X* no Excel e seção no HTML e no JSON).
 
 Nas mensagens, "quem interagiu" é o **remetente** (quem enviou a informação), os **destinatários** e
 o **dono da caixa** em que a mensagem está guardada.
@@ -1067,7 +1077,7 @@ src/
     owner.js, audit.js, powershell.js      proprietário NTFS e log de auditoria via PowerShell
     extractors/                            leitura de cada formato de arquivo (e das mensagens MIME e anexos)
   mail/
-    scanner.js                             análise das caixas de e-mail (na mesma worker thread)
+    scanner.js                             análise das caixas de e-mail e o raio-x das caixas (na mesma worker thread)
     graph.js, gmail.js, imap.js            conectores Microsoft 365, Google Workspace e IMAP
     http.js, common.js                     requisições com novas tentativas, pastas e caixas ignoradas
   types/

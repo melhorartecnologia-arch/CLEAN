@@ -65,6 +65,18 @@ export function newMailStats(sourcesTotal = 0) {
 const mb = (bytes) => `${Math.round((bytes / 1048576) * 10) / 10} MB`;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
+// Raio-X das caixas: censo de TODAS as mensagens analisadas (não só as com ocorrências) — quantidade
+// por pasta e por caixa, mais antiga/recente e distribuição por mês. Limites do tamanho em memória e no
+// registro da análise: além deles, as mensagens são só contadas (em "outras pastas/caixas").
+const MAX_PROFILE_FOLDERS = 2000;
+const MAX_PROFILE_MAILBOXES = 5000;
+const PROFILE_TOP = 500; // pastas e caixas guardadas no relatório (as demais entram só nos totais)
+const monthKey = (ms) => new Date(ms).toISOString().slice(0, 7); // 'AAAA-MM' (UTC)
+
+function newProfile() {
+  return { total: 0, withoutDate: 0, folders: new Map(), mailboxes: new Map(), timeline: new Map(), oldest: null, newest: null, folderOverflow: 0, mailboxOverflow: 0 };
+}
+
 export class MailScanner {
   /**
    * config: { sources: [conexões com secrets], terms: [...], options: {...}, endpoints? }
@@ -98,6 +110,84 @@ export class MailScanner {
     // Limite de exclusões da execução: vagas em uso (exclusões feitas ou na fila) e falhas.
     this.deleteQueued = 0;
     this.deleteFailures = 0;
+    // Raio-X das caixas (censo), só nas análises por termos — na retenção o relatório já traz pastas e idades.
+    this.profile = this.retention ? null : newProfile();
+    this.lastProfile = 0;
+  }
+
+  /**
+   * Raio-X: soma a mensagem ao censo (quantidade por pasta e por caixa, mais antiga/recente e o mês da
+   * distribuição ao longo do tempo). Vale para toda mensagem real, com ou sem ocorrências.
+   */
+  census(mailbox, item) {
+    const p = this.profile;
+    if (!p) return;
+    p.total++;
+    const path = item.folder || '(sem pasta)';
+    let f = p.folders.get(path);
+    if (!f && p.folders.size >= MAX_PROFILE_FOLDERS) p.folderOverflow++;
+    else if (!f) p.folders.set(path, (f = { count: 0, oldestMs: null, newestMs: null }));
+    if (f) f.count++;
+    const addr = mailbox.address;
+    let mbx = p.mailboxes.get(addr);
+    if (!mbx && p.mailboxes.size >= MAX_PROFILE_MAILBOXES) p.mailboxOverflow++;
+    else if (!mbx) p.mailboxes.set(addr, (mbx = { name: mailbox.name || '', count: 0, oldestMs: null }));
+    if (mbx) {
+      mbx.count++;
+      if (!mbx.name && mailbox.name) mbx.name = mailbox.name;
+    }
+    const t = Date.parse(item.receivedAt);
+    // Sem data de recebimento válida (inclusive datas zeradas de mensagens migradas): fora da linha do tempo.
+    if (!Number.isFinite(t) || t < MIN_VALID_DATE) {
+      p.withoutDate++;
+      return;
+    }
+    p.timeline.set(monthKey(t), (p.timeline.get(monthKey(t)) || 0) + 1);
+    if (p.oldest === null || t < p.oldest.ms) p.oldest = { ms: t, mailbox: addr, folder: path };
+    if (p.newest === null || t > p.newest.ms) p.newest = { ms: t, mailbox: addr, folder: path };
+    if (f) {
+      if (f.oldestMs === null || t < f.oldestMs) f.oldestMs = t;
+      if (f.newestMs === null || t > f.newestMs) f.newestMs = t;
+    }
+    if (mbx && (mbx.oldestMs === null || t < mbx.oldestMs)) mbx.oldestMs = t;
+  }
+
+  /** Snapshot do raio-x para o relatório: ordenado por quantidade e limitado ao tamanho guardado. */
+  buildProfile() {
+    const p = this.profile;
+    if (!p) return null;
+    const iso = (ms) => (ms == null ? null : new Date(ms).toISOString());
+    const folders = [...p.folders.entries()]
+      .map(([path, f]) => ({ path, count: f.count, oldest: iso(f.oldestMs), newest: iso(f.newestMs) }))
+      .sort((a, b) => b.count - a.count);
+    const mailboxes = [...p.mailboxes.entries()]
+      .map(([mailbox, m]) => ({ mailbox, name: m.name, count: m.count, oldest: iso(m.oldestMs) }))
+      .sort((a, b) => b.count - a.count);
+    const timeline = [...p.timeline.entries()].map(([month, count]) => ({ month, count })).sort((a, b) => a.month.localeCompare(b.month));
+    const place = (o) => (o ? { date: iso(o.ms), mailbox: o.mailbox, folder: o.folder } : null);
+    return {
+      total: p.total,
+      withoutDate: p.withoutDate,
+      oldest: place(p.oldest),
+      newest: place(p.newest),
+      timeline,
+      folders: folders.slice(0, PROFILE_TOP),
+      foldersTotal: folders.length,
+      folderOverflow: p.folderOverflow,
+      mailboxes: mailboxes.slice(0, PROFILE_TOP),
+      mailboxesTotal: mailboxes.length,
+      mailboxOverflow: p.mailboxOverflow,
+      since: this.options.receivedAfter || null,
+    };
+  }
+
+  /** Emite o raio-x (para o gerenciador gravar em scan.profile). Limitado no tempo, a não ser no fim. */
+  emitProfile(force = false) {
+    if (!this.profile) return;
+    const now = Date.now();
+    if (!force && now - this.lastProfile < 5000) return;
+    this.lastProfile = now;
+    this.emit({ type: 'profile', profile: this.buildProfile() });
   }
 
   cancel() {
@@ -167,6 +257,7 @@ export class MailScanner {
     }
     this.flushResults();
     this.flushErrors();
+    this.emitProfile(true); // raio-x final (antes do "done", para o gerenciador gravá-lo)
     this.current = null;
     const s = this.stats;
     const seconds = Math.round((Date.now() - started) / 1000);
@@ -211,6 +302,7 @@ export class MailScanner {
         await this.scanMailbox(connector, source, mailbox);
         this.stats.mailboxesDone++;
         this.progress(true);
+        this.emitProfile(); // raio-x parcial durante análises longas
         // Recusa definitiva da Microsoft (autorização revogada, segredo inválido...): as outras caixas
         // da conexão falhariam do mesmo jeito — ficam registradas uma vez, como não analisadas.
         const failure = connector.auth?.failure;
@@ -249,6 +341,7 @@ export class MailScanner {
       });
       for await (const item of items) {
         if (this.cancelled) break;
+        if (item.id) this.census(mailbox, item); // raio-x: conta todo e-mail real (mesmo os que falharam no download)
         if (item.error) {
           const where = [mailbox.address, item.folder, item.id].filter(Boolean).join(' › ');
           this.error(where, item.id ? `Falha ao baixar a mensagem: ${friendlyError(item.error)}` : friendlyError(item.error));

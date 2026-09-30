@@ -493,6 +493,10 @@ export class ScanManager {
           console.error('[CLEAN] Falha ao gravar o token renovado da conta conectada:', err.message);
         }
         break;
+      case 'profile':
+        // Raio-X das caixas (censo por pasta, mais antigas e distribuição no tempo): gravado no relatório.
+        store.updateScan(id, { profile: message.profile });
+        break;
       case 'fatal':
         entry.fatal = message.message;
         break;

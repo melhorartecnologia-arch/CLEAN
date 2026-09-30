@@ -11,6 +11,7 @@ import {
   openDialog,
   fmtNum,
   fmtCompact,
+  fmtDate,
   fmtDateTime,
   fmtServerDateTime,
   fmtDuration,
@@ -354,7 +355,9 @@ const MAIL = {
   noun: ['mensagem', 'mensagens'],
   o: 'a', // gênero: "mensagens excluídas"
   resultsTitle: 'Mensagens com ocorrências',
-  views: { terms: 'chart', mailboxes: 'chart', senders: 'chart', locations: 'chart' },
+  views: { terms: 'chart', mailboxes: 'chart', senders: 'chart', locations: 'chart', 'raiox-folders': 'chart', 'raiox-timeline': 'chart', 'raiox-mailboxes': 'chart' },
+  profileTab: 'Raio-X das caixas',
+  profileSection: (profile, barChart) => mailProfileSection(profile, barChart),
 
   subtitle: (scan) => {
     const s = scan.summary || {};
@@ -550,6 +553,94 @@ const MAIL = {
     empty: 'Nenhum erro de acesso ou leitura.',
   },
 };
+
+// ---------- Raio-X das caixas (censo de todas as mensagens analisadas) ----------
+
+const MONTHS_PT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+const monthLabel = (ym) => {
+  const [y, m] = String(ym).split('-');
+  return `${MONTHS_PT[Number(m) - 1] || m}/${y}`;
+};
+
+/** Distribuição ao longo do tempo: por mês; com muitos meses (mais de 24), agrupa por ano. */
+function timelineRows(timeline = []) {
+  const count = (n) => plural(n, 'mensagem', 'mensagens');
+  if (timeline.length > 24) {
+    const years = new Map();
+    for (const t of timeline) years.set(t.month.slice(0, 4), (years.get(t.month.slice(0, 4)) || 0) + t.count);
+    const rows = [...years.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([year, c]) => ({ label: year, value: c, tipValue: count(c), tipLabel: year }));
+    return { byYear: true, rows };
+  }
+  return { byYear: false, rows: timeline.map((t) => ({ label: monthLabel(t.month), value: t.count, tipValue: count(t.count), tipLabel: monthLabel(t.month) })) };
+}
+
+/** Raio-X das caixas: números, pastas, distribuição no tempo e caixas — a partir do censo (scan.profile). */
+function mailProfileSection(profile, barChart) {
+  if (!profile) {
+    return html`<div class="empty">O raio-x das caixas é gerado enquanto a análise processa as mensagens. Aguarde a análise avançar.</div>`;
+  }
+  const count = (n) => plural(n, 'mensagem', 'mensagens');
+  const date = (iso) => (iso ? fmtDate(iso) : '—');
+  const where = (p) => (p ? `${p.mailbox}${p.folder ? ` › ${p.folder}` : ''}` : '—');
+  const tiles = html`<section class="tiles" aria-label="Números do raio-x">
+    <div class="tile"><div class="label">Mensagens no raio-x</div><div class="value">${fmtCompact(profile.total)}</div><div class="detail">${profile.since ? `recebidas a partir de ${fmtDate(profile.since)}` : 'todas as analisadas'}${profile.withoutDate ? ` · ${fmtNum(profile.withoutDate)} sem data` : ''}</div></div>
+    <div class="tile"><div class="label">Pastas com mensagens</div><div class="value">${fmtCompact(profile.foldersTotal)}</div><div class="detail">${profile.mailboxesTotal > 1 ? `em ${fmtNum(profile.mailboxesTotal)} caixas` : 'na caixa analisada'}</div></div>
+    <div class="tile"><div class="label">E-mail mais antigo</div><div class="value date">${date(profile.oldest?.date)}</div><div class="detail" title="${where(profile.oldest)}">${where(profile.oldest)}</div></div>
+    <div class="tile"><div class="label">E-mail mais recente</div><div class="value date">${date(profile.newest?.date)}</div><div class="detail" title="${where(profile.newest)}">${where(profile.newest)}</div></div>
+  </section>`;
+  const folders = profile.folders.map((f) => ({
+    label: f.path,
+    value: f.count,
+    tipValue: count(f.count),
+    tipLabel: `${f.path} — mais antigo ${date(f.oldest)} · mais recente ${date(f.newest)}`,
+    raw: f,
+  }));
+  const timeline = timelineRows(profile.timeline);
+  const boxes = profile.mailboxes.map((m) => ({
+    label: m.mailbox,
+    value: m.count,
+    tipValue: count(m.count),
+    tipLabel: m.name ? `${m.name} <${m.mailbox}>` : m.mailbox,
+    raw: m,
+  }));
+  const capped = profile.foldersTotal > profile.folders.length || profile.mailboxesTotal > profile.mailboxes.length;
+  return html`${tiles}
+    <div class="grid-2">
+      ${barChart({
+        key: 'raiox-folders',
+        title: 'Pastas',
+        subtitle: 'Quantidade de mensagens em cada pasta das caixas analisadas.',
+        rows: folders,
+        emptyText: 'Nenhuma mensagem analisada.',
+        tableHead: html`<tr><th>Pasta</th><th class="num">Mensagens</th><th>Mais antigo</th><th>Mais recente</th></tr>`,
+        tableRow: (r) => html`<tr><td>${r.raw.path}</td><td class="num">${fmtNum(r.raw.count)}</td><td class="nowrap">${date(r.raw.oldest)}</td><td class="nowrap">${date(r.raw.newest)}</td></tr>`,
+      })}
+      ${barChart({
+        key: 'raiox-timeline',
+        title: 'Distribuição ao longo do tempo',
+        subtitle: `Mensagens recebidas por ${timeline.byYear ? 'ano' : 'mês'}${profile.withoutDate ? ` (${fmtNum(profile.withoutDate)} sem data ficam de fora)` : ''}.`,
+        rows: timeline.rows,
+        limit: 120,
+        emptyText: 'Nenhuma mensagem com data de recebimento.',
+        tableHead: html`<tr><th>Período</th><th class="num">Mensagens</th></tr>`,
+        tableRow: (r) => html`<tr><td>${r.label}</td><td class="num">${fmtNum(r.value)}</td></tr>`,
+      })}
+      ${profile.mailboxes.length > 1
+        ? barChart({
+            key: 'raiox-mailboxes',
+            title: 'Caixas',
+            subtitle: 'Quantidade de mensagens em cada caixa analisada.',
+            rows: boxes,
+            emptyText: 'Nenhuma caixa analisada.',
+            tableHead: html`<tr><th>Caixa</th><th>Nome</th><th class="num">Mensagens</th><th>Mais antigo</th></tr>`,
+            tableRow: (r) => html`<tr><td>${r.raw.mailbox}</td><td>${r.raw.name}</td><td class="num">${fmtNum(r.raw.count)}</td><td class="nowrap">${date(r.raw.oldest)}</td></tr>`,
+          })
+        : ''}
+    </div>
+    ${capped ? html`<p class="muted small">Os gráficos mostram as maiores pastas e caixas; as tabelas trazem as demais (limitadas às ${fmtNum(profile.folders.length)} maiores guardadas no relatório).</p>` : ''}`;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Execuções das políticas de retenção: itens expirados (sem termos), com a data do critério e a idade
@@ -1162,6 +1253,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       <section class="tiles" data-tiles aria-label="Números da ${noun}"></section>
       <div class="tabs" role="tablist">
         <button type="button" role="tab" data-tab="arquivos">${P.resultsTitle}</button>
+        ${P.profileTab ? html`<button type="button" role="tab" data-tab="raiox">${P.profileTab}</button>` : ''}
         <button type="button" role="tab" data-tab="erros">Erros <span data-error-count></span></button>
         <button type="button" role="tab" data-tab="registro">Registro</button>
       </div>
@@ -1175,6 +1267,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         <section class="card" data-results></section>
       </div>
       <p class="sr-only" aria-live="polite" data-live></p>
+      ${P.profileTab ? html`<div data-panel="raiox" hidden data-profile></div>` : ''}
       <div data-panel="erros" hidden><section class="card" data-errors></section></div>
       <div data-panel="registro" hidden><section class="card" data-log></section></div>`,
   );
@@ -1340,9 +1433,9 @@ export async function render(root, { params, query, isCurrent = () => true }) {
 
   // ---------- Gráficos (barras horizontais de uma série: cor única, valor na ponta) ----------
 
-  const barChart = ({ key, title, subtitle, rows, filterKey, emptyText, tableHead, tableRow }) => {
+  const barChart = ({ key, title, subtitle, rows, filterKey, emptyText, tableHead, tableRow, limit = TOP }) => {
     const view = chartView[key];
-    const top = rows.slice(0, TOP);
+    const top = rows.slice(0, limit);
     const max = rows.reduce((m, r) => Math.max(m, r.value), 0); // as faixas de idade não vêm em ordem de valor
     const body =
       rows.length === 0
@@ -1361,7 +1454,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
                   </button>`;
                 })}
               </div>
-              ${rows.length > TOP ? html`<p class="bars-more">+ ${fmtNum(rows.length - TOP)} não exibidos — veja a tabela.</p>` : ''}`;
+              ${rows.length > limit ? html`<p class="bars-more">+ ${fmtNum(rows.length - limit)} não exibidos — veja a tabela.</p>` : ''}`;
     return html`<figure class="card chart-card" data-chart="${key}">
       <figcaption>
         <div><h2>${title}</h2><p>${subtitle}</p></div>
@@ -1377,6 +1470,12 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   const drawCharts = () => {
     if (!summary) return;
     paint($('[data-charts]'), P.charts(summary, barChart));
+  };
+
+  // Raio-X das caixas (censo): vem no próprio registro da análise (scan.profile), não do recorte filtrado.
+  const drawProfile = () => {
+    const box = $('[data-profile]');
+    if (box && P.profileSection) paint(box, P.profileSection(scan.profile, barChart));
   };
 
   // ---------- Exclusão em lote (relatórios de arquivos) ----------
@@ -1763,6 +1862,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     drawAlerts();
     drawProgress();
     drawTiles();
+    drawProfile();
     if (tab === 'registro') drawLog();
   };
 
@@ -1829,8 +1929,9 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     }
     const viewButton = event.target.closest('[data-chart-view]');
     if (viewButton) {
-      chartView[viewButton.closest('[data-chart]').dataset.chart] = viewButton.dataset.chartView;
-      redraw(root, drawCharts);
+      const chart = viewButton.closest('[data-chart]');
+      chartView[chart.dataset.chart] = viewButton.dataset.chartView;
+      redraw(root, chart.closest('[data-profile]') ? drawProfile : drawCharts);
       return;
     }
     const bar = event.target.closest('.bar-row[data-filter-key]');
@@ -2036,6 +2137,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   filtersForm.addEventListener('input', onInput);
   filtersForm.addEventListener('submit', onSubmit);
   bindTooltips($('[data-charts]'));
+  if (P.profileTab) bindTooltips($('[data-profile]'));
 
   drawTabs();
   drawScan();

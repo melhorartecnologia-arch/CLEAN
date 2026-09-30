@@ -283,6 +283,7 @@ async function runMail(sources, retention, endpoints, { deleteMatches = false } 
     records: messages.filter((m) => m.type === 'results').flatMap((m) => m.records),
     events: messages.filter((m) => m.type === 'deletions').flatMap((m) => m.items),
     logs: messages.filter((m) => m.type === 'log').map((m) => m.message),
+    profiles: messages.filter((m) => m.type === 'profile'),
   };
 }
 
@@ -357,6 +358,7 @@ test('e-mail: Microsoft 365, Gmail e IMAP — só os cabeçalhos das mensagens a
     // Simulação, sem o Lixo Eletrônico: a velha e a da lixeira.
     let run = await runMail([m365], { amount: 5, includeJunk: false }, mocks.endpoints);
     assert.deepEqual(run.records.map((r) => r.subject).sort(), ['Apagada há tempo', 'Balanço 2014']);
+    assert.equal(run.profiles.length, 0, 'a retenção não gera o raio-x (o relatório já traz pastas e idades)');
     const velha = run.records.find((r) => r.subject === 'Balanço 2014');
     assert.equal(velha.from, 'Ana Souza <ana@contoso.com>');
     assert.equal(velha.folder, 'Caixa de Entrada');

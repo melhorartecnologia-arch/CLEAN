@@ -553,6 +553,9 @@ table.data .path {
   font-weight: 650;
   line-height: 1.2;
 }
+.tile .value.date {
+  font-size: 22px; /* datas (raio-x): não estouram o cartão em telas estreitas */
+}
 .tile .detail {
   margin-top: 2px;
   font-size: 12px;
