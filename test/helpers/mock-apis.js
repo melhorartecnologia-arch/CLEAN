@@ -551,7 +551,10 @@ export function startMockApis({ graph = null, google = null } = {}) {
           if (url.searchParams.get('format') === 'full') return json(res, 200, { ...common, payload: m.payload });
           if (url.searchParams.get('format') === 'metadata') {
             const wanted = url.searchParams.getAll('metadataHeaders');
-            return json(res, 200, { ...common, payload: { headers: wanted.map((name) => ({ name, value: mimeHeader(m.raw, name) })).filter((h) => h.value) } });
+            const payload = { headers: wanted.map((name) => ({ name, value: mimeHeader(m.raw, name) })).filter((h) => h.value) };
+            // Como o Gmail no formato metadata: a árvore de partes (sem o conteúdo) vem junto dos cabeçalhos.
+            if (m.payload?.parts) payload.parts = m.payload.parts;
+            return json(res, 200, { ...common, payload });
           }
           return json(res, 200, { ...common, raw: m.raw.toString('base64url') });
         }

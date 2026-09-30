@@ -23,25 +23,29 @@ export { GRAPH_ENDPOINTS };
 /** Destinatário do Graph ({ emailAddress: { name, address } }) no formato { name, address }. */
 const mapRecipient = (r) => ({ name: r?.emailAddress?.name || '', address: r?.emailAddress?.address || '' });
 
+// Tipo da conta em português (o Entra ID usa "Member"/"Guest").
+const GRAPH_USER_TYPE = { Member: 'Membro', Guest: 'Convidado' };
+
 /**
  * Um usuário do Microsoft Entra ID no formato do catálogo de contas: endereço principal, apelidos
  * (proxyAddresses smtp:), situação, tipo, licença, data de criação e dados do cadastro.
  */
 function graphAccount(u) {
+  const address = u.mail || u.userPrincipalName || '';
   const proxies = (u.proxyAddresses || []).filter((p) => /^smtp:/i.test(p));
-  const primary = proxies.find((p) => p.startsWith('SMTP:'))?.slice(5) || u.mail || '';
+  const primary = (proxies.find((p) => p.startsWith('SMTP:'))?.slice(5) || u.mail || '').toLowerCase();
   const aliases = proxies
     .filter((p) => p.startsWith('smtp:'))
     .map((p) => p.slice(5))
-    .filter((a) => a && a.toLowerCase() !== primary.toLowerCase());
+    .filter((a) => a && a.toLowerCase() !== primary && a.toLowerCase() !== address.toLowerCase());
   const phones = [u.mobilePhone, ...(u.businessPhones || [])].filter(Boolean);
   return {
-    address: u.mail || u.userPrincipalName || '',
+    address,
     name: u.displayName || '',
     login: u.userPrincipalName || '',
     aliases,
     enabled: u.accountEnabled == null ? null : Boolean(u.accountEnabled),
-    type: u.userType || '',
+    type: GRAPH_USER_TYPE[u.userType] || u.userType || '',
     licensed: (u.assignedLicenses || []).length > 0,
     created: u.createdDateTime || null,
     lastActivity: null, // exige AuditLog.Read.All (signInActivity, beta): fora do catálogo

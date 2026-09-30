@@ -194,7 +194,7 @@ test('Listagem de contas: Microsoft 365 (apelidos, situação, licença, tipo e 
   assert.deepEqual(ana.aliases.sort(), ['a.souza@contoso.com', 'ana.souza@contoso.com'], 'apelidos (smtp:) sem o principal (SMTP:)');
   assert.equal(ana.enabled, true);
   assert.equal(ana.licensed, true);
-  assert.equal(ana.type, 'Member');
+  assert.equal(ana.type, 'Membro', 'userType traduzido para pt-BR');
   assert.equal(ana.department, 'RH');
   assert.equal(ana.title, 'Analista');
   assert.ok(ana.created.startsWith('2020-03-15'));
@@ -202,7 +202,7 @@ test('Listagem de contas: Microsoft 365 (apelidos, situação, licença, tipo e 
   assert.equal(bia.enabled, false);
   assert.equal(bia.licensed, false);
   assert.equal(bia.login, 'bia.lima@contoso.com', 'UPN diferente do endereço');
-  assert.equal(byAddress['parceiro@fornecedor.com'].type, 'Guest');
+  assert.equal(byAddress['parceiro@fornecedor.com'].type, 'Convidado');
 });
 
 test('Listagem de contas: Google Workspace (Admin SDK, tipo, unidade e último acesso)', async () => {
@@ -270,6 +270,7 @@ test('Listagem de mensagens: IMAP (destinatários do envelope, só os cabeçalho
       folders: {
         INBOX: [
           { raw: mail({ subject: 'Reunião', from: 'Chefe <chefe@empresa.com>', to: 'carla@empresa.com, equipe@empresa.com', cc: 'rh@empresa.com', body: 'vamos' }), date: new Date('2026-09-10T12:00:00Z') },
+          { raw: mail({ subject: 'Com anexo', from: 'RH <rh@empresa.com>', to: 'carla@empresa.com', body: 'segue', attachments: [{ name: 'doc.pdf', data: Buffer.from('conteudo') }] }), date: new Date('2026-09-11T12:00:00Z') },
         ],
       },
     },
@@ -288,16 +289,69 @@ test('Listagem de mensagens: IMAP (destinatários do envelope, só os cabeçalho
     };
     const { records, errors, stats } = await runListing([source], { kind: 'messages' });
     assert.deepEqual(errors, []);
-    assert.equal(stats.messagesSeen, 1);
-    const m = records[0];
-    assert.equal(m.subject, 'Reunião');
+    assert.equal(stats.messagesSeen, 2);
+    const byS = Object.fromEntries(records.map((r) => [r.subject, r]));
+    const m = byS['Reunião'];
     assert.equal(m.folder, 'INBOX');
     assert.equal(m.from, 'Chefe <chefe@empresa.com>');
     assert.ok(m.to.some((t) => t.includes('carla@empresa.com')) && m.to.some((t) => t.includes('equipe@empresa.com')));
     assert.ok(m.cc.some((c) => c.includes('rh@empresa.com')));
     assert.ok(m.sent, 'a data de envio vem do envelope');
+    // hasAttachments vem da estrutura do corpo (BODYSTRUCTURE).
+    assert.equal(m.hasAttachments, false);
+    assert.equal(byS['Com anexo'].hasAttachments, true);
   } finally {
     await imap.close();
+  }
+});
+
+test('Listagem de mensagens: Google Workspace (metadados, destinatários e anexos)', async () => {
+  const mock = await startMockApis({
+    google: {
+      publicKey: google.data.publicKey,
+      admin: 'admin@empresa.com',
+      users: [
+        {
+          mail: 'caio@empresa.com',
+          name: 'Caio',
+          labels: [{ id: 'INBOX', name: 'INBOX', type: 'system' }],
+          messages: [
+            { id: 'g1', labelIds: ['INBOX'], internalDate: Date.parse('2026-09-01'), raw: mail({ subject: 'Sem anexo', to: 'rh@empresa.com', body: 'oi' }) },
+            {
+              id: 'g2',
+              labelIds: ['INBOX'],
+              internalDate: Date.parse('2026-09-02'),
+              raw: mail({ subject: 'Com anexo', to: 'rh@empresa.com', cc: 'chefe@empresa.com', body: 'veja', attachments: [{ name: 'nota.pdf', data: Buffer.from('x') }] }),
+              payload: { parts: [{ mimeType: 'text/plain' }, { mimeType: 'application/pdf', filename: 'nota.pdf' }] },
+            },
+          ],
+        },
+      ],
+    },
+  });
+  try {
+    const source = {
+      id: 'g',
+      name: 'Google',
+      type: 'gmail',
+      scope: 'list',
+      mailboxes: [{ address: 'caio@empresa.com' }],
+      excludeMailboxes: [],
+      excludeFolders: [],
+      gmail: { clientEmail: 'clean@projeto.iam.gserviceaccount.com' },
+      secrets: { privateKey: google.privateKeyPem },
+    };
+    const { records, errors, stats } = await runListing([source], { kind: 'messages' }, {}, mock.endpoints);
+    assert.deepEqual(errors, []);
+    assert.equal(stats.messagesSeen, 2);
+    const byS = Object.fromEntries(records.map((r) => [r.subject, r]));
+    assert.ok(byS['Com anexo'].to.some((t) => t.includes('rh@empresa.com')));
+    assert.ok(byS['Com anexo'].cc.some((c) => c.includes('chefe@empresa.com')));
+    assert.ok(byS['Com anexo'].sent, 'a data de envio vem dos cabeçalhos');
+    assert.equal(byS['Com anexo'].hasAttachments, true);
+    assert.equal(byS['Sem anexo'].hasAttachments, false);
+  } finally {
+    await mock.close();
   }
 });
 
@@ -420,6 +474,19 @@ test('API: listagem de mensagens por caixa (metadados, filtros e exportações)'
     const json = await app.api('GET', `/api/scans/${scan.data.id}/export.json`);
     assert.equal(json.data.results.length, 3);
     assert.equal(json.data.scan.listing.kind, 'messages');
+  } finally {
+    await app.close();
+  }
+});
+
+test('API: listagem com tipo inválido ou sem conexões é recusada', async () => {
+  const app = await startApp();
+  try {
+    const source = await app.api('POST', '/api/mail-sources', { name: 'M365', type: 'graph', scope: 'all', graph: { tenantId: GRAPH_TENANT, clientId: GRAPH_CLIENT, clientSecret: GRAPH_SECRET } });
+    const badKind = await app.api('POST', '/api/scans', { listing: { kind: 'xpto' }, sourceIds: [source.data.id] });
+    assert.equal(badKind.status, 400);
+    const noSources = await app.api('POST', '/api/scans', { listing: { kind: 'directory' }, sourceIds: [] });
+    assert.equal(noSources.status, 400);
   } finally {
     await app.close();
   }

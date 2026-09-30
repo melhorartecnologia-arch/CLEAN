@@ -103,7 +103,6 @@ const MODELS = {
         mailboxes: all.byMailbox.map((m) => m.mailbox).sort(byName),
         folders: all.byFolder.map((f) => f.key).filter(Boolean).sort(byName),
         senders: all.bySender.filter((s) => s.sender).slice(0, 500).map((s) => ({ value: s.sender, label: s.label })).sort((a, b) => byName(a.label, b.label)),
-        sources: all.bySource.map((s) => ({ value: s.sourceId, label: s.source })),
       };
     },
     xlsx: exportMessagesXlsx,

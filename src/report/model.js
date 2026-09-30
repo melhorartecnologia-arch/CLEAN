@@ -482,7 +482,7 @@ const MESSAGE_SORTERS = {
   size: (a, b) => (a.size || 0) - (b.size || 0),
 };
 
-export const MESSAGE_FILTER_KEYS = ['q', 'mailbox', 'sender', 'source', 'folder', 'attachments', 'sort', 'dir', 'page'];
+export const MESSAGE_FILTER_KEYS = ['q', 'mailbox', 'sender', 'folder', 'attachments', 'sort', 'dir', 'page'];
 
 /** Filtra e ordena a listagem de mensagens. Padrão: mais recentes primeiro. */
 export function filterMessages(records, filters = {}) {
@@ -490,10 +490,10 @@ export function filterMessages(records, filters = {}) {
   let out = records.filter((r) => {
     if (filters.mailbox && r.mailbox !== filters.mailbox) return false;
     if (filters.sender && (r.fromAddress || '') !== filters.sender) return false;
-    if (filters.source && r.sourceId !== filters.source) return false;
     if (filters.folder && (r.folder || '') !== filters.folder) return false;
-    if (filters.attachments === 'yes' && !r.hasAttachments) return false;
-    if (filters.attachments === 'no' && r.hasAttachments) return false;
+    // hasAttachments pode ser desconhecido (null, ex.: IMAP sem BODYSTRUCTURE): não entra em "com" nem "sem".
+    if (filters.attachments === 'yes' && r.hasAttachments !== true) return false;
+    if (filters.attachments === 'no' && r.hasAttachments !== false) return false;
     if (q && !listingMsgHaystack(r).includes(q)) return false;
     return true;
   });

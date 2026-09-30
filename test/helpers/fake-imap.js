@@ -200,6 +200,19 @@ export function startFakeImap(
               // ENVELOPE: date, subject, from, sender, reply-to, to, cc, bcc, in-reply-to, message-id.
               parts.push(`ENVELOPE (${q(header('Date'))} ${q(header('Subject'))} ${from} NIL NIL ${addrList(header('To'))} ${addrList(header('Cc'))} NIL NIL ${mid ? `"${mid.replace(/["\\]/g, '')}"` : 'NIL'})`);
             }
+            if (items.includes('BODYSTRUCTURE')) {
+              const text = m.raw.toString('utf8');
+              const ct = /^Content-Type:[ \t]*(.*)$/im.exec(text.split(/\r?\n\r?\n/)[0])?.[1] || '';
+              const textPart = '("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 10 1)';
+              if (/multipart\/mixed/i.test(ct)) {
+                const attach = /Content-Disposition:[ \t]*attachment/i.test(text);
+                const nm = /name="([^"]+)"/i.exec(text)?.[1] || 'anexo.bin';
+                const attachPart = `("APPLICATION" "OCTET-STREAM" ("NAME" "${nm}") NIL NIL "BASE64" 100 NIL ("ATTACHMENT" ("FILENAME" "${nm}")) NIL)`;
+                parts.push(`BODYSTRUCTURE (${textPart}${attach ? attachPart : ''} "MIXED")`);
+              } else {
+                parts.push(`BODYSTRUCTURE ${textPart}`);
+              }
+            }
             const partial = /BODY\.PEEK\[\]<(\d+)\.(\d+)>/.exec(items);
             const head = `* ${i + 1} FETCH (${parts.join(' ')}`;
             if (partial) {

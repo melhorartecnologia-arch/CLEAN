@@ -160,6 +160,14 @@ function labelsText(labels) {
 /** Endereço do envelope IMAP ({ name, address, ... }) no formato { name, address }. */
 const envAddress = (a) => ({ name: a?.name || '', address: a?.address || '' });
 
+/** Se a estrutura do corpo (BODYSTRUCTURE) tem alguma parte anexada (com disposição ou nome de arquivo). */
+function attachmentInStructure(node) {
+  if (!node) return false;
+  const disp = String(node.disposition || '').toLowerCase();
+  if (disp === 'attachment' || (disp !== 'inline' && node.dispositionParameters?.filename)) return true;
+  return (node.childNodes || []).some(attachmentInStructure);
+}
+
 export class ImapConnector {
   /**
    * options: signal, log(level, message), endpoints (troca os endereços, nos testes) e
@@ -410,14 +418,14 @@ export class ImapConnector {
       }
       state.validity = validity;
       const meta = [];
-      for await (const m of client.fetch('1:*', { uid: true, size: true, internalDate: true, labels: Boolean(gmail && folder.all), envelope: headersOnly }, { uid: true })) {
+      for await (const m of client.fetch('1:*', { uid: true, size: true, internalDate: true, labels: Boolean(gmail && folder.all), envelope: headersOnly, bodyStructure: fullHeaders }, { uid: true })) {
         if (state.delivered.has(m.uid)) continue;
         // O filtro por data é feito aqui, e não com SEARCH SINCE: a lista de UIDs de uma busca
         // pode passar do tamanho máximo de comando do servidor (10 KB no Exchange).
         if (since && m.internalDate instanceof Date && m.internalDate < since) continue;
         // "Antes de" (retenção): sem data conhecida, a mensagem não entra.
         if (before && !(m.internalDate instanceof Date && m.internalDate < before)) continue;
-        meta.push({ uid: m.uid, size: Number(m.size) || 0, date: m.internalDate, labels: m.labels, envelope: m.envelope });
+        meta.push({ uid: m.uid, size: Number(m.size) || 0, date: m.internalDate, labels: m.labels, envelope: m.envelope, bodyStructure: m.bodyStructure });
       }
       const deliver = (uid, item) => {
         state.delivered.add(uid);
@@ -444,7 +452,7 @@ export class ImapConnector {
                   to: (env.to || []).map(envAddress),
                   cc: (env.cc || []).map(envAddress),
                   sent: env.date instanceof Date && !Number.isNaN(env.date.getTime()) ? env.date.toISOString() : null,
-                  hasAttachments: null, // exigiria a estrutura do corpo (BODYSTRUCTURE): fora da listagem
+                  hasAttachments: info.bodyStructure ? attachmentInStructure(info.bodyStructure) : null,
                 }
               : {}),
           });
