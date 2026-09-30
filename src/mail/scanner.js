@@ -62,6 +62,11 @@ export function newMailStats(sourcesTotal = 0) {
   };
 }
 
+/** Números de uma listagem do catálogo de contas do domínio (sem varrer mensagens). */
+export function newDirectoryStats(sourcesTotal = 0) {
+  return { sourcesTotal, sourcesDone: 0, accounts: 0, errors: 0, gaps: 0 };
+}
+
 const mb = (bytes) => `${Math.round((bytes / 1048576) * 10) / 10} MB`;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
@@ -85,12 +90,14 @@ export class MailScanner {
   constructor(config, emit, { connectorFactory = createConnector } = {}) {
     this.sources = config.sources || [];
     this.options = { ...MAIL_DEFAULT_OPTIONS, ...(config.options || {}) };
+    // Listagens (sem termos): catálogo de contas do domínio ('directory') ou mensagens por caixa ('messages').
+    this.listing = config.listing || null;
     this.matcher = new Matcher(config.terms || [], { maxSamples: this.options.maxSamples, guard: createGuard(config.regexTimeoutMs || 30000) });
     this.abort = new AbortController();
     this.emit = emit;
     this.connectorFactory = connectorFactory;
     this.endpoints = config.endpoints || {};
-    this.stats = newMailStats(this.sources.length);
+    this.stats = this.listing?.kind === 'directory' ? newDirectoryStats(this.sources.length) : newMailStats(this.sources.length);
     this.cancelled = false;
     this.seq = 0;
     this.inFlight = new Set(); // mensagens sendo lidas (para mensagens de erro)
@@ -110,8 +117,8 @@ export class MailScanner {
     // Limite de exclusões da execução: vagas em uso (exclusões feitas ou na fila) e falhas.
     this.deleteQueued = 0;
     this.deleteFailures = 0;
-    // Raio-X das caixas (censo), só nas análises por termos — na retenção o relatório já traz pastas e idades.
-    this.profile = this.retention ? null : newProfile();
+    // Raio-X das caixas (censo), só nas análises por termos — na retenção e nas listagens não se aplica.
+    this.profile = this.retention || this.listing ? null : newProfile();
     this.lastProfile = 0;
   }
 
@@ -241,6 +248,7 @@ export class MailScanner {
 
   async run() {
     const started = Date.now();
+    if (this.listing) return this.runListing(started);
     if (this.retention) {
       const cutoff = new Date(this.retention.cutoffMs).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
       this.log('info', `Retenção iniciada em ${this.sources.length} conexão(ões): mensagens recebidas antes de ${cutoff}.`);
@@ -272,20 +280,145 @@ export class MailScanner {
     return s;
   }
 
+  /** Cria o conector da conexão (com o repasse do token renovado das contas Microsoft conectadas). */
+  makeConnector(source) {
+    const grantId = source.graph?.account?.grantId || null;
+    return this.connectorFactory(source, {
+      signal: this.abort.signal,
+      endpoints: this.endpoints,
+      log: (level, message) => this.log(level, `${source.name}: ${message}`),
+      // Conta Microsoft conectada: o novo token de atualização vai para o servidor, que o grava.
+      onRefreshToken: grantId ? (refreshToken) => this.emit({ type: 'credentials', sourceId: source.id, grantId, refreshToken }) : undefined,
+    });
+  }
+
+  /**
+   * Listagens (sem termos): o catálogo de contas do domínio ('directory') ou a listagem de mensagens
+   * por caixa ('messages', só os cabeçalhos, sem baixar as mensagens). Uma linha por conta ou mensagem.
+   */
+  async runListing(started) {
+    const directory = this.listing.kind === 'directory';
+    this.log('info', `${directory ? 'Listagem das contas do domínio' : 'Listagem de mensagens'} iniciada em ${plural(this.sources.length, 'conexão', 'conexões')}.`);
+    for (const source of this.sources) {
+      if (this.cancelled) break;
+      if (directory) await this.listDirectory(source);
+      else await this.scanSource(source); // reutiliza a varredura das caixas (só os cabeçalhos)
+      this.stats.sourcesDone++;
+      this.progress(true);
+    }
+    this.flushResults();
+    this.flushErrors();
+    this.current = null;
+    const s = this.stats;
+    const seconds = Math.round((Date.now() - started) / 1000);
+    const done = directory ? `${plural(s.accounts, 'conta listada', 'contas listadas')}` : `${plural(s.messagesSeen, 'mensagem listada', 'mensagens listadas')} em ${plural(s.mailboxesDone, 'caixa', 'caixas')}`;
+    this.log('info', `${this.cancelled ? 'Listagem cancelada' : 'Listagem concluída'} em ${seconds}s: ${done}.`);
+    this.emit({ type: 'done', stats: { ...s }, cancelled: this.cancelled });
+    return s;
+  }
+
+  /** Catálogo de contas de uma conexão: uma linha por conta registrada no domínio. */
+  async listDirectory(source) {
+    this.current = { source: source.name, mailbox: null, folder: null, path: source.name };
+    this.progress(true);
+    let connector;
+    try {
+      connector = this.makeConnector(source);
+    } catch (err) {
+      if (this.cancelled) return;
+      this.error(source.name, err);
+      this.stats.gaps++;
+      this.log('error', `Conexão "${source.name}" indisponível: ${friendlyError(err)}`);
+      return;
+    }
+    try {
+      let count = 0;
+      for await (const acct of connector.directory()) {
+        if (this.cancelled) break;
+        this.stats.accounts++;
+        count++;
+        this.pendingResults.push(this.accountRecord(source, acct));
+        this.current = { source: source.name, mailbox: acct.address, folder: null, path: acct.address };
+        if (this.pendingResults.length >= 100) this.flushResults();
+        this.progress();
+      }
+      if (!this.cancelled) this.log('info', `Conexão "${source.name}": ${plural(count, 'conta listada', 'contas listadas')}.`);
+    } catch (err) {
+      if (this.cancelled) return;
+      this.error(source.name, err);
+      this.stats.gaps++;
+      this.log('error', `Conexão "${source.name}": ${friendlyError(err)}`);
+    } finally {
+      await connector.close?.();
+    }
+  }
+
+  /** Uma conta do catálogo do domínio, no formato do relatório. */
+  accountRecord(source, acct) {
+    return {
+      id: ++this.seq,
+      kind: 'mail-account',
+      sourceId: source.id,
+      sourceName: source.name,
+      sourceType: source.type,
+      address: acct.address || '',
+      addressLower: (acct.address || '').toLowerCase(),
+      name: acct.name || '',
+      login: acct.login || '',
+      aliases: Array.isArray(acct.aliases) ? acct.aliases : [],
+      enabled: acct.enabled ?? null,
+      type: acct.type || '',
+      licensed: acct.licensed ?? null,
+      created: acct.created || null,
+      lastActivity: acct.lastActivity || null,
+      department: acct.department || '',
+      title: acct.title || '',
+      location: acct.location || '',
+      phone: acct.phone || '',
+      orgUnit: acct.orgUnit || '',
+      admin: acct.admin ?? null,
+      suspended: acct.suspended ?? null,
+      note: acct.note || '',
+    };
+  }
+
+  /** Uma mensagem listada (só os cabeçalhos), no formato do relatório. */
+  processListedMessage(source, mailbox, item) {
+    this.stats.messagesSeen++;
+    const from = item.from || null;
+    this.pendingResults.push({
+      id: ++this.seq,
+      kind: 'mail-message',
+      sourceId: source.id,
+      sourceName: source.name,
+      sourceType: source.type,
+      mailbox: mailbox.address,
+      mailboxName: mailbox.name || '',
+      folder: item.folder,
+      messageId: item.id,
+      internetMessageId: item.internetMessageId || null,
+      subject: item.subject || '',
+      from: from ? formatAddress(from) : '',
+      fromAddress: (from?.address || '').toLowerCase(),
+      to: (item.to || []).map(formatAddress),
+      cc: (item.cc || []).map(formatAddress),
+      date: item.receivedAt || null,
+      sent: item.sent || null,
+      size: Number(item.size) || 0,
+      hasAttachments: item.hasAttachments ?? null,
+      inTrash: Boolean(item.inTrash),
+      webLink: item.webLink || null,
+    });
+    if (this.pendingResults.length >= 100) this.flushResults();
+  }
+
   async scanSource(source) {
     this.current = { source: source.name, mailbox: null, folder: null, path: source.name };
     this.progress(true);
     let connector;
     let mailboxes;
     try {
-      const grantId = source.graph?.account?.grantId || null;
-      connector = this.connectorFactory(source, {
-        signal: this.abort.signal,
-        endpoints: this.endpoints,
-        log: (level, message) => this.log(level, `${source.name}: ${message}`),
-        // Conta Microsoft conectada: o novo token de atualização vai para o servidor, que o grava.
-        onRefreshToken: grantId ? (refreshToken) => this.emit({ type: 'credentials', sourceId: source.id, grantId, refreshToken }) : undefined,
-      });
+      connector = this.makeConnector(source);
       mailboxes = await connector.mailboxes();
     } catch (err) {
       if (this.cancelled) return;
@@ -295,7 +428,7 @@ export class MailScanner {
       return;
     }
     this.stats.mailboxesTotal += mailboxes.length;
-    this.log('info', `Conexão "${source.name}": ${mailboxes.length} caixa(s) a analisar.`);
+    this.log('info', `Conexão "${source.name}": ${mailboxes.length} caixa(s) a ${this.listing ? 'listar' : 'analisar'}.`);
     try {
       for (const [index, mailbox] of mailboxes.entries()) {
         if (this.cancelled) break;
@@ -325,12 +458,15 @@ export class MailScanner {
     this.progress(true);
     const before = this.stats.messagesSeen;
     this.pendingDeletes = [];
+    const listingMessages = this.listing?.kind === 'messages';
     try {
       const items = connector.messages(mailbox, {
         since: this.since,
         // Retenção: só as recebidas antes da data de corte, sem baixar as mensagens.
         before: this.retention ? new Date(this.retention.cutoffMs) : null,
-        headersOnly: Boolean(this.retention),
+        // Retenção e listagem de mensagens leem só os cabeçalhos (a listagem pede os destinatários também).
+        headersOnly: Boolean(this.retention) || listingMessages,
+        fullHeaders: listingMessages,
         includeTrash: this.options.includeTrash,
         includeJunk: this.options.includeJunk,
         maxBytes: this.maxBytes,
@@ -341,11 +477,13 @@ export class MailScanner {
       });
       for await (const item of items) {
         if (this.cancelled) break;
-        if (item.id) this.census(mailbox, item); // raio-x: conta todo e-mail real (mesmo os que falharam no download)
+        if (item.id && this.profile) this.census(mailbox, item); // raio-x: conta todo e-mail real (mesmo os que falharam no download)
         if (item.error) {
           const where = [mailbox.address, item.folder, item.id].filter(Boolean).join(' › ');
-          this.error(where, item.id ? `Falha ao baixar a mensagem: ${friendlyError(item.error)}` : friendlyError(item.error));
+          this.error(where, item.id ? `Falha ao ${listingMessages ? 'ler os dados da mensagem' : 'baixar a mensagem'}: ${friendlyError(item.error)}` : friendlyError(item.error));
           if (!item.id) this.stats.gaps++; // uma pasta inteira não pôde ser lida
+        } else if (listingMessages) {
+          this.processListedMessage(source, mailbox, item);
         } else if (this.retention) {
           this.processExpiredMessage(source, mailbox, item);
         } else {
@@ -353,7 +491,7 @@ export class MailScanner {
         }
         this.progress();
       }
-      if (!this.cancelled) this.log('info', `Caixa ${mailbox.address}: ${this.stats.messagesSeen - before} mensagem(ns) verificadas.`);
+      if (!this.cancelled) this.log('info', `Caixa ${mailbox.address}: ${this.stats.messagesSeen - before} mensagem(ns) ${this.listing ? 'listadas' : 'verificadas'}.`);
     } catch (err) {
       if (this.cancelled) return;
       if (err?.skipMailbox) {

@@ -92,6 +92,52 @@ function mailDisabled(err) {
   return err instanceof ApiError && (err.status === 400 || err.status === 412) && /failedPrecondition|mail service not enabled/i.test(`${err.code} ${err.message}`);
 }
 
+/** Data do cabeçalho (Date) como ISO, ou null. */
+function headerDate(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/** Se a mensagem tem anexo (procura um filename na estrutura, disponível no formato metadata). */
+function gmailHasAttachments(payload) {
+  for (const p of payload?.parts || []) {
+    if (p.filename) return true;
+    if (p.parts && gmailHasAttachments(p)) return true;
+  }
+  return false;
+}
+
+/**
+ * Um usuário do Google Workspace (Admin SDK, projeção completa) no formato do catálogo de contas.
+ * lastLoginTime vem zerado (1970) quando a pessoa nunca entrou: nesse caso fica sem data.
+ */
+function gmailAccount(u) {
+  const orgs = u.organizations || [];
+  const org = orgs.find((o) => o.primary) || orgs[0] || {};
+  const phones = u.phones || [];
+  const phone = phones.find((p) => p.primary)?.value || phones[0]?.value || '';
+  const loc = (u.locations || [])[0] || {};
+  return {
+    address: u.primaryEmail || '',
+    name: u.name?.fullName || '',
+    login: u.primaryEmail || '',
+    aliases: u.aliases || [],
+    enabled: u.suspended || u.archived ? false : true,
+    type: u.isAdmin ? 'Administrador' : u.isDelegatedAdmin ? 'Administrador delegado' : 'Usuário',
+    licensed: u.isMailboxSetup == null ? null : Boolean(u.isMailboxSetup),
+    created: u.creationTime || null,
+    lastActivity: u.lastLoginTime && !u.lastLoginTime.startsWith('1970') ? u.lastLoginTime : null,
+    department: org.department || '',
+    title: org.title || '',
+    location: loc.area || loc.buildingId || '',
+    phone,
+    orgUnit: u.orgUnitPath || '',
+    admin: Boolean(u.isAdmin),
+    suspended: Boolean(u.suspended),
+  };
+}
+
 export class GmailConnector {
   constructor(source, { endpoints = {}, signal, log = () => {} } = {}) {
     this.source = source;
@@ -191,6 +237,23 @@ export class GmailConnector {
     return (await this.listUsers()).filter((u) => !excluded(u.address)).sort((a, b) => a.address.localeCompare(b.address));
   }
 
+  /**
+   * Catálogo de contas do domínio (listagem): todos os usuários do Google Workspace (Admin SDK,
+   * projeção completa) com os dados do cadastro (nome, apelidos, situação, tipo, unidade
+   * organizacional, data de criação e último acesso). Consultado em nome do administrador informado.
+   */
+  async *directory() {
+    const admin = this.source.gmail?.adminEmail;
+    if (!admin) throw new ApiError('Informe o e-mail de um administrador para listar as contas do domínio (Admin SDK).');
+    let pageToken = '';
+    do {
+      const url = `${this.endpoints.directory}/users?customer=my_customer&maxResults=500&projection=full&orderBy=email${pageToken ? `&pageToken=${enc(pageToken)}` : ''}`;
+      const page = await this.api(admin, DIRECTORY_SCOPE, url);
+      for (const u of page?.users || []) if (u.primaryEmail) yield gmailAccount(u);
+      pageToken = page?.nextPageToken;
+    } while (pageToken);
+  }
+
   /** Nomes de exibição dos marcadores (as "pastas" do Gmail). */
   async labels(address) {
     const res = await this.api(address, GMAIL_SCOPE, `${this.endpoints.gmail}/users/${enc(address)}/labels`);
@@ -211,7 +274,7 @@ export class GmailConnector {
    * ignorada são descartadas. Mensagens maiores que maxBytes não são baixadas inteiras: vêm só o
    * corpo e a lista de anexos (formato "full"), sem o conteúdo dos anexos.
    */
-  async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
+  async *messages(mailbox, { since = null, before = null, headersOnly = false, fullHeaders = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
     const { address } = mailbox;
     const base = `${this.endpoints.gmail}/users/${enc(address)}`;
     const labels = await this.labels(address);
@@ -239,11 +302,14 @@ export class GmailConnector {
       yield* list(`larger:${limit - 1}`, true);
     }
     if (headersOnly) {
-      // Retenção: só os cabeçalhos (sem baixar a mensagem nem os anexos).
+      // Retenção e listagem: só os cabeçalhos (sem baixar a mensagem nem os anexos). A listagem
+      // (fullHeaders) pede também os destinatários e a data de envio.
       const header = (msg, name) => msg?.payload?.headers?.find((h) => h.name.toLowerCase() === name)?.value || '';
+      const addrs = (value) => parseAddresses(value).map((a) => ({ name: a.name || '', address: a.address || '' }));
+      const metaHeaders = ['Subject', 'From', 'Message-ID', ...(fullHeaders ? ['To', 'Cc', 'Date'] : [])].map((h) => `metadataHeaders=${h}`).join('&');
       yield* pool(list('', false), Math.max(1, Math.min(concurrency, MAX_CONCURRENCY)), async ({ id }) => {
         try {
-          const msg = await this.api(address, GMAIL_SCOPE, `${base}/messages/${enc(id)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Message-ID`, { retries: 4 });
+          const msg = await this.api(address, GMAIL_SCOPE, `${base}/messages/${enc(id)}?format=metadata&${metaHeaders}`, { retries: 4 });
           const names = (msg?.labelIds || []).map((l) => labels.get(l)).filter(Boolean);
           if (names.some((n) => excluded(n))) return undefined;
           const received = Number(msg?.internalDate);
@@ -261,6 +327,9 @@ export class GmailConnector {
             internetMessageId: header(msg, 'message-id') || null,
             inTrash: (msg?.labelIds || []).includes('TRASH'),
             headersOnly: true,
+            ...(fullHeaders
+              ? { to: addrs(header(msg, 'to')), cc: addrs(header(msg, 'cc')), sent: headerDate(header(msg, 'date')), hasAttachments: gmailHasAttachments(msg?.payload) }
+              : {}),
           };
         } catch (err) {
           if (this.signal?.aborted) throw err;

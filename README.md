@@ -31,6 +31,11 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
 - **Raio-X das caixas**: a análise de e-mail também gera um retrato de todas as mensagens analisadas
   (não só as com ocorrências) — quantidade por pasta, e-mails mais antigos e a distribuição ao longo
   do tempo.
+- **Listagens de e-mail** (somente leitura, sem procurar termos e sem excluir): o **catálogo de todas
+  as contas registradas no domínio** (nome, endereço principal, apelidos, situação, tipo, licença,
+  data de criação, departamento) e a **listagem de todas as mensagens de cada caixa** com os dados de
+  cada uma (remetente, destinatários, data, assunto, pasta, tamanho) — com relatório, filtros,
+  gráficos e exportação.
 - **OAuth 2.0 da Microsoft** em todas as formas usadas pelo Exchange Online e pelo Outlook.com:
   aplicativo com **segredo do cliente**, aplicativo com **certificado** (gerado pelo próprio CLEAN)
   ou **conta Microsoft conectada** (a pessoa entra com a conta pelo código de dispositivo; a
@@ -65,6 +70,7 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
    - [Autenticação na Microsoft (OAuth 2.0)](#autenticação-na-microsoft-oauth-20)
    - [Google Workspace (Gmail)](#google-workspace-gmail)
    - [Servidores IMAP](#servidores-imap)
+   - [Listagens de e-mail (contas e mensagens)](#listagens-de-e-mail-contas-e-mensagens)
 9. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
    - [Exclusão em lote pelo relatório](#exclusão-em-lote-pelo-relatório)
 10. [Agendamentos](#agendamentos)
@@ -554,6 +560,31 @@ Outlook na Web e o tamanho de cada mensagem sem baixá-la).
   `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`), exporte o certificado raiz da empresa em formato PEM
   (Base-64) e defina, também antes de iniciar, `NODE_EXTRA_CA_CERTS=C:\CLEAN\certificado-empresa.pem`
   (há uma linha pronta no `iniciar.bat`).
+
+### Listagens de e-mail (contas e mensagens)
+
+Além das análises por termos, o menu **Listagens de e-mail** faz dois inventários **somente leitura**
+(não procuram nada, não baixam o conteúdo das mensagens e não excluem nada), usando as mesmas conexões
+já cadastradas em *Caixas de e-mail*:
+
+- **Contas do domínio** — lista **todas as contas registradas no domínio**, com os dados do cadastro:
+  nome, endereço principal, apelidos (aliases), situação (ativa/inativa), tipo (no Microsoft 365,
+  *Member*/*Guest*; no Google, usuário/administrador), se tem licença, data de criação, último acesso,
+  departamento, cargo, telefone e unidade organizacional. No **Microsoft 365** exige a permissão
+  `User.Read.All` (tipo Aplicativo com consentimento do administrador, ou a mesma permissão delegada
+  na conta conectada); no **Google Workspace**, é consultada pela Admin SDK em nome do administrador
+  informado; no **IMAP**, que não tem um catálogo de contas, traz apenas as caixas cadastradas na
+  conexão, com um aviso.
+- **Mensagens por caixa** — lista **todas as mensagens de todas as pastas** das caixas escolhidas, com
+  os dados de cada uma: remetente, destinatários (Para e Cc), data de recebimento e de envio, assunto,
+  pasta, tamanho, se tem anexos e o Message-ID. Lê só os cabeçalhos — o corpo e os anexos não são
+  baixados —, então é bem mais rápida e leve que uma análise por termos. Aceita filtrar por período
+  (recebidas a partir de uma data) e incluir ou não a Lixeira e o Lixo Eletrônico.
+
+Cada listagem gera um relatório na tela com filtros e gráficos (por situação/tipo/conexão, no caso das
+contas; por caixa, pasta e remetente, no caso das mensagens) e exportação para **Excel**, **CSV**,
+**HTML** e **JSON**. As listagens rodam em segundo plano (como as análises), podem ser canceladas e
+ficam separadas das *Análises de e-mail*, na própria seção.
 
 ## Exclusão dos itens encontrados
 
@@ -1077,8 +1108,8 @@ src/
     owner.js, audit.js, powershell.js      proprietário NTFS e log de auditoria via PowerShell
     extractors/                            leitura de cada formato de arquivo (e das mensagens MIME e anexos)
   mail/
-    scanner.js                             análise das caixas de e-mail e o raio-x das caixas (na mesma worker thread)
-    graph.js, gmail.js, imap.js            conectores Microsoft 365, Google Workspace e IMAP
+    scanner.js                             análise das caixas, o raio-x e as listagens (contas e mensagens), na mesma worker thread
+    graph.js, gmail.js, imap.js            conectores Microsoft 365, Google Workspace e IMAP (varredura, catálogo de contas e exclusão)
     http.js, common.js                     requisições com novas tentativas, pastas e caixas ignoradas
   types/
     catalog.js                             busca por tipo: categorias, extensões e validação

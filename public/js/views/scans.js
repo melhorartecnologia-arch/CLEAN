@@ -101,7 +101,8 @@ export async function render(root, { props = {} }) {
   const refresh = async () => {
     const latest = await get(`/api/scans?kind=${kind}`);
     if (stopped) return;
-    scans = latest;
+    // As listagens de e-mail (somente leitura) têm a própria seção.
+    scans = latest.filter((s) => !s.listing);
     draw();
     clearTimeout(timer);
     if (scans.some(active)) timer = setTimeout(() => refresh().catch(() => {}), 2000);

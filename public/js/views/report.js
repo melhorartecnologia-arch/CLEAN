@@ -1136,7 +1136,266 @@ const RETENTION_MAIL = {
   },
 };
 
+// ---------------------------------------------------------------------------------------------
+// Listagens de e-mail (somente leitura): catálogo de contas do domínio e mensagens por caixa
+
+const ACCOUNT_STATE = { active: 'Ativa', inactive: 'Inativa/bloqueada', unknown: 'Não informado' };
+
+const ACCOUNTS = {
+  base: '#/email/listagens',
+  nav: 'email-listagens',
+  filterKeys: ['q', 'source', 'state', 'type', 'licensed', 'sort', 'page'],
+  criteria: ['q', 'source', 'state', 'type', 'licensed'],
+  descSorts: new Set(['created', 'activity', 'aliases']),
+  defaultSort: 'address',
+  noun: ['conta', 'contas'],
+  o: 'a',
+  scanNoun: 'listagem',
+  resultsTitle: 'Contas',
+  columns: 6,
+  views: { states: 'chart', types: 'chart', sources: 'chart' },
+
+  subtitle: (scan) => (scan.summary?.sources || []).map((x) => `${x.name} (${TYPE_LABELS[x.type] || x.type})`).join(', '),
+
+  filterFields: (filters) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Endereço, nome, login, apelido, departamento" /></label>
+    <label class="field"><span>Conexão</span><select name="source"><option value="">Todas</option></select></label>
+    <label class="field"><span>Situação</span>
+      <select name="state"><option value="">Todas</option>${Object.entries(ACCOUNT_STATE).map(([v, l]) => option(v, l, filters.state))}</select>
+    </label>
+    <label class="field"><span>Tipo</span><select name="type"><option value="">Todos</option></select></label>
+    <label class="field"><span>Licença</span>
+      <select name="licensed"><option value="">Todas</option>${option('yes', 'Com licença', filters.licensed)}${option('no', 'Sem licença', filters.licensed)}</select>
+    </label>
+    <label class="field"><span>Ordenar por</span>
+      <select name="sort">${[
+        ['address', 'Endereço'],
+        ['name', 'Nome'],
+        ['created', 'Mais recentes'],
+        ['activity', 'Último acesso'],
+        ['aliases', 'Mais apelidos'],
+      ].map(([v, l]) => option(v, l, filters.sort))}</select>
+    </label>`,
+
+  fillOptions: (form, options, filters, fill) => {
+    const o = options || { sources: [], types: [] };
+    const sources = new Map((o.sources || []).map((s) => [s.value, s.label]));
+    fill(form.elements.source, [...sources.keys()], filters.source, (v) => sources.get(v) || v);
+    fill(form.elements.type, o.types || [], filters.type);
+  },
+
+  progress: (st) => html`<span><b>${fmtNum(st.accounts)}</b> contas listadas</span>
+    <span><b>${fmtNum(st.errors)}</b> erros</span>
+    <span>conexão <b>${Math.min((st.sourcesDone || 0) + 1, st.sourcesTotal || 1)}</b> de <b>${st.sourcesTotal || 1}</b></span>`,
+
+  tiles: (st) => html`<div class="tile"><div class="label">Contas listadas</div><div class="value">${fmtCompact(st.accounts)}</div><div class="detail">registradas no domínio</div></div>
+    <div class="tile"><div class="label">Conexões</div><div class="value">${fmtCompact(st.sourcesDone)}</div><div class="detail">de ${fmtNum(st.sourcesTotal || 0)}</div></div>
+    <div class="tile"><div class="label">Erros</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`,
+
+  charts: (summary, barChart) => {
+    const count = (n) => plural(n, 'conta', 'contas');
+    const rows = (list, key) => (list || []).map((g) => ({ label: g.label || g.source, value: g.accounts, filterValue: key === 'source' ? g.sourceId : g.key, tipValue: count(g.accounts), tipLabel: g.label || g.source, raw: g }));
+    const simpleTable = (head) => ({ tableHead: html`<tr><th>${head}</th><th class="num">Contas</th></tr>`, tableRow: (r) => html`<tr><td>${r.label}</td><td class="num">${fmtNum(r.value)}</td></tr>` });
+    return html`${barChart({ key: 'states', title: 'Situação', subtitle: 'Contas por situação. Clique para filtrar.', rows: rows(summary.byState, 'state'), filterKey: 'state', emptyText: 'Nenhuma conta.', ...simpleTable('Situação') })}
+    ${barChart({ key: 'types', title: 'Tipos de conta', subtitle: 'Contas por tipo. Clique para filtrar.', rows: rows(summary.byType, 'type'), filterKey: 'type', emptyText: 'Nenhuma conta.', ...simpleTable('Tipo') })}
+    ${barChart({ key: 'sources', title: 'Conexões', subtitle: 'Contas por conexão de e-mail. Clique para filtrar.', rows: rows(summary.bySource, 'source'), filterKey: 'source', emptyText: 'Nenhuma conta.', ...simpleTable('Conexão') })}`;
+  },
+
+  tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Conta</th><th>Situação</th><th>Tipo</th><th>Departamento / cargo</th><th>Criada em</th></tr>`,
+
+  row: (r) => html`<td><div class="name">${r.address || '(sem endereço)'}</div><div class="path">${r.name || ''}${r.aliases?.length ? html` · ${plural(r.aliases.length, 'apelido', 'apelidos')}` : ''}</div></td>
+    <td>${r.enabled === true ? html`<span class="chip">ativa</span>` : r.enabled === false ? html`<span class="chip danger">inativa</span>` : html`<span class="muted">—</span>`}${r.licensed === true ? html` <span class="chip">licenciada</span>` : ''}</td>
+    <td>${r.type || html`<span class="muted">—</span>`}</td>
+    <td>${[r.department, r.title].filter(Boolean).join(' · ') || html`<span class="muted">—</span>`}</td>
+    <td class="nowrap">${r.created ? fmtDate(r.created) : '—'}</td>`,
+
+  rowLabel: (r) => r.address || 'conta',
+
+  detail: (r) => html`<div class="detail-grid two">
+    <div>
+      <h4>Conta</h4>
+      <dl class="kv">
+        <dt>Endereço principal</dt><dd><b>${r.address || '—'}</b> <button type="button" class="btn small" data-action="copy" data-copy="${r.address}" data-copied="Endereço copiado.">${icon('copy')} Copiar</button></dd>
+        ${r.name ? html`<dt>Nome</dt><dd>${r.name}</dd>` : ''}
+        ${r.login && r.login !== r.address ? html`<dt>Login (UPN)</dt><dd>${r.login}</dd>` : ''}
+        ${r.aliases?.length ? html`<dt>Apelidos</dt><dd>${r.aliases.join('; ')}</dd>` : ''}
+        <dt>Situação</dt><dd>${ACCOUNT_STATE[r.enabled === true ? 'active' : r.enabled === false ? 'inactive' : 'unknown']}</dd>
+        <dt>Tipo</dt><dd>${r.type || '—'}</dd>
+        <dt>Licenciada</dt><dd>${r.licensed === true ? 'Sim' : r.licensed === false ? 'Não' : '—'}</dd>
+        <dt>Conexão</dt><dd>${r.sourceName} (${TYPE_LABELS[r.sourceType] || r.sourceType})</dd>
+        ${r.note ? html`<dt>Observação</dt><dd class="muted small">${r.note}</dd>` : ''}
+      </dl>
+    </div>
+    <div>
+      <h4>Cadastro</h4>
+      <dl class="kv">
+        <dt>Criada em</dt><dd>${r.created ? fmtDateTime(r.created) : '—'}</dd>
+        <dt>Último acesso</dt><dd>${r.lastActivity ? fmtDateTime(r.lastActivity) : '—'}</dd>
+        ${r.department ? html`<dt>Departamento</dt><dd>${r.department}</dd>` : ''}
+        ${r.title ? html`<dt>Cargo</dt><dd>${r.title}</dd>` : ''}
+        ${r.location ? html`<dt>Local</dt><dd>${r.location}</dd>` : ''}
+        ${r.phone ? html`<dt>Telefone</dt><dd>${r.phone}</dd>` : ''}
+        ${r.orgUnit ? html`<dt>Unidade organizacional</dt><dd>${r.orgUnit}</dd>` : ''}
+        ${r.admin === true ? html`<dt>Administrador</dt><dd>Sim</dd>` : ''}
+      </dl>
+    </div>
+  </div>`,
+
+  empty: {
+    filtered: 'Nenhuma conta corresponde aos filtros.',
+    running: 'Nenhuma conta listada até agora.',
+    none: 'Nenhuma conta encontrada nas conexões escolhidas.',
+  },
+  errors: {
+    column: 'Local',
+    help: 'Conexões cujo catálogo de contas não pôde ser lido (credenciais, permissões, ou provedor sem catálogo). Elas não foram listadas.',
+    empty: 'Nenhum erro.',
+  },
+};
+
+const MESSAGES = {
+  base: '#/email/listagens',
+  nav: 'email-listagens',
+  filterKeys: ['q', 'mailbox', 'sender', 'folder', 'attachments', 'sort', 'page'],
+  criteria: ['q', 'mailbox', 'sender', 'folder', 'attachments'],
+  descSorts: new Set(['date', 'size']),
+  defaultSort: 'date',
+  noun: ['mensagem', 'mensagens'],
+  o: 'a',
+  scanNoun: 'listagem',
+  resultsTitle: 'Mensagens',
+  columns: 5,
+  views: { mailboxes: 'chart', folders: 'chart', senders: 'chart' },
+
+  subtitle: (scan) => (scan.summary?.sources || []).map((x) => `${x.name} (${TYPE_LABELS[x.type] || x.type}${x.scope === 'all' ? ', todas as caixas' : ''})`).join(', '),
+
+  filterFields: (filters) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Assunto, pessoa, caixa ou pasta" /></label>
+    <label class="field"><span>Caixa</span><select name="mailbox"><option value="">Todas</option></select></label>
+    <label class="field"><span>Remetente</span><select name="sender"><option value="">Todos</option></select></label>
+    <label class="field"><span>Pasta</span><select name="folder"><option value="">Todas</option></select></label>
+    <label class="field"><span>Anexos</span>
+      <select name="attachments"><option value="">Todas</option>${option('yes', 'Com anexos', filters.attachments)}${option('no', 'Sem anexos', filters.attachments)}</select>
+    </label>
+    <label class="field"><span>Ordenar por</span>
+      <select name="sort">${[
+        ['date', 'Mais recentes'],
+        ['mailbox', 'Caixa'],
+        ['sender', 'Remetente'],
+        ['subject', 'Assunto'],
+        ['size', 'Maiores'],
+      ].map(([v, l]) => option(v, l, filters.sort))}</select>
+    </label>`,
+
+  fillOptions: (form, options, filters, fill) => {
+    const o = options || { mailboxes: [], senders: [], folders: [] };
+    fill(form.elements.mailbox, o.mailboxes, filters.mailbox);
+    fill(form.elements.folder, o.folders, filters.folder);
+    const senders = new Map((o.senders || []).map((s) => [s.value, s.label]));
+    fill(form.elements.sender, [...senders.keys()], filters.sender, (v) => senders.get(v) || v);
+  },
+
+  progress: (st) => html`<span><b>${fmtNum(st.messagesSeen)}</b> mensagens listadas</span>
+    <span><b>${fmtNum(st.errors)}</b> erros</span>
+    <span>${st.mailboxesTotal ? html`caixa <b>${Math.min((st.mailboxesDone || 0) + 1, st.mailboxesTotal)}</b> de <b>${fmtNum(st.mailboxesTotal)}</b>` : 'listando as caixas…'}</span>`,
+
+  tiles: (st) => html`<div class="tile"><div class="label">Mensagens listadas</div><div class="value">${fmtCompact(st.messagesSeen)}</div><div class="detail">em ${plural(Math.max(0, (st.mailboxesDone || 0) - (st.mailboxesSkipped || 0)), 'caixa', 'caixas')}${st.mailboxesSkipped ? ` · ${fmtNum(st.mailboxesSkipped)} sem e-mail` : ''}</div></div>
+    <div class="tile"><div class="label">Pastas percorridas</div><div class="value">${fmtCompact(st.folders)}</div><div class="detail">somando as caixas</div></div>
+    <div class="tile"><div class="label">Erros</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`,
+
+  charts: (summary, barChart) => {
+    const count = (n) => plural(n, 'mensagem', 'mensagens');
+    const boxes = (summary.byMailbox || []).map((m) => ({ label: m.mailbox, value: m.messages, filterValue: m.mailbox, tipValue: `${count(m.messages)} · ${fmtBytes(m.bytes)}`, tipLabel: m.name ? `${m.name} <${m.mailbox}>` : m.mailbox, raw: m }));
+    const folders = (summary.byFolder || []).map((f) => ({ label: f.folder, value: f.messages, filterValue: f.key, tipValue: count(f.messages), tipLabel: f.folder, raw: f }));
+    const senders = (summary.bySender || []).map((s) => ({ label: s.label, value: s.messages, filterValue: s.sender, tipValue: count(s.messages), tipLabel: s.label, raw: s }));
+    return html`${barChart({
+      key: 'mailboxes',
+      title: 'Caixas',
+      subtitle: 'Mensagens por caixa. Clique para filtrar.',
+      rows: boxes,
+      filterKey: 'mailbox',
+      emptyText: 'Nenhuma mensagem.',
+      tableHead: html`<tr><th>Caixa</th><th>Nome</th><th class="num">Mensagens</th><th class="num">Espaço</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.mailbox}</td><td>${r.raw.name}</td><td class="num">${fmtNum(r.raw.messages)}</td><td class="num">${fmtBytes(r.raw.bytes)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'folders',
+      title: 'Pastas',
+      subtitle: 'Mensagens por pasta (somando as caixas). Clique para filtrar.',
+      rows: folders,
+      filterKey: 'folder',
+      emptyText: 'Nenhuma mensagem.',
+      tableHead: html`<tr><th>Pasta</th><th class="num">Mensagens</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.label}</td><td class="num">${fmtNum(r.value)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'senders',
+      title: 'Remetentes',
+      subtitle: 'Quem mais enviou. Clique para filtrar.',
+      rows: senders,
+      filterKey: 'sender',
+      emptyText: 'Nenhuma mensagem.',
+      tableHead: html`<tr><th>Remetente</th><th class="num">Mensagens</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.label}</td><td class="num">${fmtNum(r.raw.messages)}</td></tr>`,
+    })}`;
+  },
+
+  tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Mensagem</th><th>Remetente</th><th>Recebida</th><th class="num">Tamanho</th></tr>`,
+
+  row: (r) => html`<td><div class="name">${r.subject || '(sem assunto)'}</div><div class="path">${r.mailbox} › ${r.folder}${r.hasAttachments ? ' · com anexos' : ''}</div></td>
+    <td>${r.from || html`<span class="muted">sem remetente</span>`}${r.to?.length ? html`<div class="muted small">para ${r.to[0]}${r.to.length > 1 ? ` e mais ${r.to.length - 1}` : ''}</div>` : ''}</td>
+    <td class="nowrap">${fmtDateTime(r.date)}</td>
+    <td class="num nowrap">${fmtBytes(r.size)}</td>`,
+
+  rowLabel: (r) => r.subject || 'mensagem sem assunto',
+
+  detail: (r) => {
+    const safeLink = /^https:\/\//i.test(r.webLink || '') ? r.webLink : null;
+    const messageId = String(r.internetMessageId || '').replace(/^<|>$/g, '');
+    const people = (list) => (list?.length ? list.join('; ') : '—');
+    return html`<div class="detail-grid two">
+      <div>
+        <h4>Mensagem</h4>
+        <dl class="kv">
+          <dt>Assunto</dt><dd><b>${r.subject || '(sem assunto)'}</b></dd>
+          <dt>Caixa</dt><dd>${r.mailboxName ? `${r.mailboxName} <${r.mailbox}>` : r.mailbox}</dd>
+          <dt>Pasta</dt><dd>${r.folder}</dd>
+          <dt>Recebida em</dt><dd>${fmtDateTime(r.date)}</dd>
+          ${r.sent && r.sent !== r.date ? html`<dt>Enviada em</dt><dd>${fmtDateTime(r.sent)}</dd>` : ''}
+          <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
+          <dt>Anexos</dt><dd>${r.hasAttachments === true ? 'Sim' : r.hasAttachments === false ? 'Não' : '—'}</dd>
+          ${messageId
+            ? html`<dt>Message-ID</dt><dd><span class="mono small">${messageId}</span> <button type="button" class="btn small" data-action="copy" data-copy="${messageId}" data-copied="Message-ID copiado.">${icon('copy')} Copiar</button></dd>`
+            : ''}
+          <dt>Conexão</dt><dd>${r.sourceName} (${TYPE_LABELS[r.sourceType] || r.sourceType})</dd>
+          ${safeLink ? html`<dt>Abrir</dt><dd><a href="${safeLink}" target="_blank" rel="noopener noreferrer">Abrir no Outlook na Web</a> <span class="muted small">(exige acesso à caixa)</span></dd>` : ''}
+        </dl>
+      </div>
+      <div>
+        <h4>Remetente e destinatários</h4>
+        <dl class="kv">
+          <dt>De</dt><dd><b>${r.from || '—'}</b></dd>
+          <dt>Para</dt><dd>${people(r.to)}</dd>
+          ${r.cc?.length ? html`<dt>Cc</dt><dd>${people(r.cc)}</dd>` : ''}
+        </dl>
+        <p class="muted small">A listagem lê só os cabeçalhos das mensagens: o corpo e os anexos não são baixados.</p>
+      </div>
+    </div>`;
+  },
+
+  empty: {
+    filtered: 'Nenhuma mensagem corresponde aos filtros.',
+    running: 'Nenhuma mensagem listada até agora.',
+    none: 'Nenhuma mensagem nas caixas escolhidas.',
+  },
+  errors: {
+    column: 'Local',
+    help: 'Caixas, pastas ou mensagens que não puderam ser lidas (credenciais, permissões, limites do provedor...). Elas não foram listadas.',
+    empty: 'Nenhum erro.',
+  },
+};
+
 function profileOf(scan) {
+  if (scan.listing?.kind === 'directory') return ACCOUNTS;
+  if (scan.listing?.kind === 'messages') return MESSAGES;
   if (scan.retention) return scan.kind === 'mail' ? RETENTION_MAIL : RETENTION_FILES;
   if (scan.fileTypes) return TYPES_FILES;
   return scan.kind === 'mail' ? MAIL : FILES;

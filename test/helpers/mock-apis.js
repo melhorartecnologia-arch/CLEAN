@@ -165,6 +165,31 @@ function mimeHeader(raw, name) {
   return (new RegExp(`^${name}:[ \t]*(.*)$`, 'im').exec(head)?.[1] || '').trim();
 }
 
+/** Destinatários de um cabeçalho ("A <a@x>, B <b@x>") no formato do Graph. */
+function graphRecipients(value) {
+  return String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => ({ emailAddress: { name: /^(.*?)\s*</.exec(s)?.[1]?.replace(/"/g, '') || '', address: /<([^>]+)>/.exec(s)?.[1] || s } }));
+}
+
+/** Campos de cadastro de um usuário do Graph (catálogo de contas): só os presentes no fixture. */
+function graphDirectoryFields(u) {
+  const keep = ['proxyAddresses', 'accountEnabled', 'userType', 'createdDateTime', 'department', 'jobTitle', 'officeLocation', 'mobilePhone', 'businessPhones', 'assignedLicenses'];
+  const out = {};
+  for (const k of keep) if (u[k] !== undefined) out[k] = u[k];
+  return out;
+}
+
+/** Campos de cadastro de um usuário do Google (Admin SDK): só os presentes no fixture. */
+function googleDirectoryFields(u) {
+  const keep = ['aliases', 'suspended', 'archived', 'isAdmin', 'isDelegatedAdmin', 'isMailboxSetup', 'creationTime', 'lastLoginTime', 'orgUnitPath', 'organizations', 'phones', 'locations'];
+  const out = {};
+  for (const k of keep) if (u[k] !== undefined) out[k] = u[k];
+  return out;
+}
+
 const b64json = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
 const unb64json = (text) => JSON.parse(Buffer.from(String(text), 'base64url').toString('utf8'));
 const IMAP_SCOPE = 'https://outlook.office.com/IMAP.AccessAsUser.All';
@@ -348,7 +373,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
             return json(res, 200, { value: users.filter((u) => u.mail === mail).map((u) => ({ id: u.id, mail: u.mail, displayName: u.displayName })) });
           }
           const skip = Number(url.searchParams.get('$skiptoken') || 0);
-          const page = users.slice(skip, skip + 2).map((u) => ({ id: u.id, mail: u.mail, displayName: u.displayName, userPrincipalName: u.upn || u.mail }));
+          const page = users.slice(skip, skip + 2).map((u) => ({ id: u.id, mail: u.mail, displayName: u.displayName, userPrincipalName: u.upn || u.mail, ...graphDirectoryFields(u) }));
           const next = skip + 2 < users.length ? { '@odata.nextLink': `${base}/graph/v1.0/users?$skiptoken=${skip + 2}` } : {};
           return json(res, 200, { value: page, ...next });
         }
@@ -389,7 +414,9 @@ export function startMockApis({ graph = null, google = null } = {}) {
           const since = ge ? new Date(ge[1]) : null;
           const before = lt ? new Date(lt[1]) : null;
           const all = list.filter((x) => (!since || new Date(x.received) >= since) && (!before || new Date(x.received) < before));
-          const headers = (url.searchParams.get('$select') || '').includes('subject');
+          const select = url.searchParams.get('$select') || '';
+          const headers = select.includes('subject');
+          const full = select.includes('toRecipients'); // listagem de mensagens: destinatários, envio e anexos
           const skip = Number(url.searchParams.get('$skip') || 0);
           const page = all.slice(skip, skip + 2);
           const next = skip + 2 < all.length ? { '@odata.nextLink': `${base}/graph/v1.0/users/${user.id}/mailFolders/${m[1]}/messages?$skip=${skip + 2}${filter ? `&$filter=${encodeURIComponent(filter)}` : ''}` } : {};
@@ -404,6 +431,14 @@ export function startMockApis({ graph = null, google = null } = {}) {
                     subject: mimeHeader(x.raw, 'Subject'),
                     internetMessageId: mimeHeader(x.raw, 'Message-ID') || null,
                     from: { emailAddress: { name: /^(.*?)\s*</.exec(mimeHeader(x.raw, 'From'))?.[1]?.replace(/"/g, '') || '', address: /<([^>]+)>/.exec(mimeHeader(x.raw, 'From'))?.[1] || mimeHeader(x.raw, 'From') } },
+                    ...(full
+                      ? {
+                          sentDateTime: mimeHeader(x.raw, 'Date') ? new Date(mimeHeader(x.raw, 'Date')).toISOString() : null,
+                          toRecipients: graphRecipients(mimeHeader(x.raw, 'To')),
+                          ccRecipients: graphRecipients(mimeHeader(x.raw, 'Cc')),
+                          hasAttachments: /multipart\/mixed/i.test(mimeHeader(x.raw, 'Content-Type')),
+                        }
+                      : {}),
                   }
                 : {}),
             })),
@@ -458,7 +493,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
       }
       if (url.pathname === '/directory/v1/users') {
         if (req.headers.authorization !== `Bearer g|${google.admin}|dir`) return json(res, 403, { error: { code: 403, message: 'Not Authorized to access this resource/api' } });
-        return json(res, 200, { users: google.users.map((u) => ({ primaryEmail: u.mail, name: { fullName: u.name } })) });
+        return json(res, 200, { users: google.users.map((u) => ({ primaryEmail: u.mail, name: { fullName: u.name }, ...googleDirectoryFields(u) })) });
       }
       const g = /^\/gmail\/v1\/users\/([^/]+)\/(.*)$/.exec(url.pathname);
       if (g) {

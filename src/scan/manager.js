@@ -1,7 +1,7 @@
 // Fila de análises: cada análise roda em uma worker thread; o resultado é gravado conforme chega.
 import { Worker } from 'node:worker_threads';
 import { newStats, DEFAULT_OPTIONS } from './scanner.js';
-import { newMailStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
+import { newMailStats, newDirectoryStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
 import { cleanPaths, keptPaths, isCloudRepo, deletionScope, mailDeletionScope } from './delete.js';
 import { keptCloud } from '../cloud/drives.js';
 import { sanitizeRetention, cutoffDate } from '../retention/policy.js';
@@ -55,6 +55,31 @@ export function sanitizeMailOptions(input) {
     o.receivedAfter = d.toISOString();
   }
   if (!MAIL_CHECKS.some((k) => o[k])) throw new ScanError('Selecione ao menos uma verificação: assunto, corpo ou anexos.');
+  return o;
+}
+
+/** Normaliza o tipo de uma listagem de e-mail: catálogo de contas ('directory') ou mensagens ('messages'). */
+export function sanitizeListing(input) {
+  const kind = input?.kind === 'directory' ? 'directory' : input?.kind === 'messages' ? 'messages' : null;
+  if (!kind) throw new ScanError('Tipo de listagem inválido (escolha "contas do domínio" ou "mensagens").');
+  return { kind };
+}
+
+/** Opções de uma listagem (sem termos e sem exclusão). Só a listagem de mensagens usa filtros. */
+function listingOptions(input, kind) {
+  const i = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const o = { ...MAIL_DEFAULT_OPTIONS, deleteMatches: false, receivedAfter: null };
+  if (kind === 'messages') {
+    o.includeTrash = i.includeTrash !== false;
+    o.includeJunk = Boolean(i.includeJunk);
+    const concurrency = Number(i.concurrency);
+    o.concurrency = Number.isInteger(concurrency) && concurrency > 0 ? Math.min(concurrency, 8) : 4;
+    if (i.receivedAfter) {
+      const d = new Date(i.receivedAfter);
+      if (Number.isNaN(d.getTime())) throw new ScanError('Data "recebidas a partir de" inválida.');
+      o.receivedAfter = d.toISOString();
+    }
+  }
   return o;
 }
 
@@ -167,6 +192,7 @@ export class ScanManager {
     };
     if (body?.retention) return this.#startRetention(body, origin);
     if (body?.fileTypes) return this.#startTypes(body, origin);
+    if (body?.listing) return this.#startListing(body, origin);
     if (body?.kind === 'mail') return this.#startMail(body, origin);
     const { name, repositoryIds, listIds, options } = body || {};
     const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
@@ -226,6 +252,43 @@ export class ScanManager {
       error: null,
     });
     await this.store.writeScanConfig(scan.id, { kind: 'mail', sources: sources.map(mailSnapshot), terms, options: opts });
+    this.queue.push(scan.id);
+    this.#pump();
+    return scan;
+  }
+
+  /**
+   * Listagem de e-mail (somente leitura, sem termos e sem exclusão): o catálogo de contas do domínio
+   * ('directory') ou a listagem de mensagens por caixa ('messages', só os cabeçalhos).
+   */
+  async #startListing(body, origin) {
+    const { name, sourceIds, options } = body;
+    const listing = sanitizeListing(body.listing);
+    const sources = ids(sourceIds).map((id) => this.store.getMailSource(id));
+    if (sources.length === 0 || sources.some((s) => !s)) throw new ScanError('Selecione conexões de e-mail válidas.');
+    const opts = listingOptions(options, listing.kind);
+    const prefix = listing.kind === 'directory' ? 'Contas do domínio' : 'Listagem de mensagens';
+    const scan = this.store.createScan({
+      kind: 'mail',
+      listing,
+      name: this.#scanName(name, prefix),
+      status: 'queued',
+      sourceIds: sources.map((s) => s.id),
+      listIds: [],
+      options: opts,
+      ...origin,
+      summary: {
+        sources: sources.map((s) => ({ id: s.id, name: s.name, type: s.type, scope: s.scope, mailboxCount: s.scope === 'all' ? null : (s.mailboxes || []).length })),
+        lists: [],
+        termCount: 0,
+      },
+      stats: listing.kind === 'directory' ? newDirectoryStats(sources.length) : newMailStats(sources.length),
+      current: null,
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+    });
+    await this.store.writeScanConfig(scan.id, { kind: 'mail', listing, sources: sources.map(mailSnapshot), terms: [], options: opts });
     this.queue.push(scan.id);
     this.#pump();
     return scan;

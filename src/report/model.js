@@ -390,6 +390,170 @@ export function summarizeMail(records) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Listagens (somente leitura): catálogo de contas do domínio e listagem de mensagens por caixa
+
+/** Situação de uma conta ('active' | 'inactive' | 'unknown') a partir do campo enabled. */
+const accountState = (r) => (r.enabled === true ? 'active' : r.enabled === false ? 'inactive' : 'unknown');
+
+function accountHaystack(record) {
+  if (!record._search) {
+    record._search = foldText(
+      [record.address, record.name, record.login, record.department, record.title, record.location, record.orgUnit, ...(record.aliases || [])].filter(Boolean).join(' | '),
+    );
+  }
+  return record._search;
+}
+
+const ACCOUNT_SORTERS = {
+  address: (a, b) => String(a.address || '').localeCompare(String(b.address || ''), 'pt-BR'),
+  name: (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR'),
+  created: (a, b) => String(a.created || '').localeCompare(String(b.created || '')),
+  activity: (a, b) => String(a.lastActivity || '').localeCompare(String(b.lastActivity || '')),
+  aliases: (a, b) => (a.aliases?.length || 0) - (b.aliases?.length || 0),
+};
+
+export const ACCOUNT_FILTER_KEYS = ['q', 'source', 'state', 'type', 'licensed', 'sort', 'dir', 'page'];
+
+/** Filtra e ordena o catálogo de contas do domínio. Padrão: por endereço, crescente. */
+export function filterAccounts(records, filters = {}) {
+  const q = filters.q ? foldText(filters.q) : '';
+  let out = records.filter((r) => {
+    if (filters.source && r.sourceId !== filters.source) return false;
+    if (filters.state && accountState(r) !== filters.state) return false;
+    if (filters.type && (r.type || '') !== filters.type) return false;
+    if (filters.licensed === 'yes' && r.licensed !== true) return false;
+    if (filters.licensed === 'no' && r.licensed !== false) return false;
+    if (q && !accountHaystack(r).includes(q)) return false;
+    return true;
+  });
+  const known = Object.hasOwn(ACCOUNT_SORTERS, filters.sort || '');
+  out = out.slice().sort(known ? ACCOUNT_SORTERS[filters.sort] : ACCOUNT_SORTERS.address);
+  if (filters.dir === 'desc') out.reverse();
+  return out;
+}
+
+/** Agregações do catálogo de contas: por conexão, situação, tipo e licença. */
+export function summarizeAccounts(records) {
+  const group = (keyFn, make) => {
+    const map = new Map();
+    for (const r of records) {
+      const k = keyFn(r);
+      if (k === undefined || k === null) continue;
+      let g = map.get(k);
+      if (!g) {
+        g = { ...make(r), accounts: 0 };
+        map.set(k, g);
+      }
+      g.accounts++;
+    }
+    return [...map.values()].sort((a, b) => b.accounts - a.accounts);
+  };
+  const stateLabels = { active: 'Ativas', inactive: 'Inativas/bloqueadas', unknown: 'Não informado' };
+  return {
+    accounts: records.length,
+    withAliases: records.filter((r) => (r.aliases?.length || 0) > 0).length,
+    aliasesTotal: records.reduce((sum, r) => sum + (r.aliases?.length || 0), 0),
+    licensed: records.filter((r) => r.licensed === true).length,
+    disabled: records.filter((r) => r.enabled === false).length,
+    byState: group(accountState, (r) => ({ key: accountState(r), label: stateLabels[accountState(r)] })),
+    byType: group(
+      (r) => r.type || '',
+      (r) => ({ key: r.type || '', label: r.type || '(não informado)' }),
+    ),
+    bySource: group(
+      (r) => r.sourceId,
+      (r) => ({ sourceId: r.sourceId, source: r.sourceName }),
+    ),
+  };
+}
+
+function listingMsgHaystack(record) {
+  if (!record._search) {
+    record._search = foldText([record.subject, record.from, ...(record.to || []), ...(record.cc || []), record.mailbox, record.folder].filter(Boolean).join(' | '));
+  }
+  return record._search;
+}
+
+const MESSAGE_SORTERS = {
+  date: byDate,
+  mailbox: (a, b) => a.mailbox.localeCompare(b.mailbox, 'pt-BR') || byDate(a, b),
+  sender: (a, b) => String(a.from || '').localeCompare(String(b.from || ''), 'pt-BR') || byDate(a, b),
+  subject: (a, b) => String(a.subject || '').localeCompare(String(b.subject || ''), 'pt-BR'),
+  size: (a, b) => (a.size || 0) - (b.size || 0),
+};
+
+export const MESSAGE_FILTER_KEYS = ['q', 'mailbox', 'sender', 'source', 'folder', 'attachments', 'sort', 'dir', 'page'];
+
+/** Filtra e ordena a listagem de mensagens. Padrão: mais recentes primeiro. */
+export function filterMessages(records, filters = {}) {
+  const q = filters.q ? foldText(filters.q) : '';
+  let out = records.filter((r) => {
+    if (filters.mailbox && r.mailbox !== filters.mailbox) return false;
+    if (filters.sender && (r.fromAddress || '') !== filters.sender) return false;
+    if (filters.source && r.sourceId !== filters.source) return false;
+    if (filters.folder && (r.folder || '') !== filters.folder) return false;
+    if (filters.attachments === 'yes' && !r.hasAttachments) return false;
+    if (filters.attachments === 'no' && r.hasAttachments) return false;
+    if (q && !listingMsgHaystack(r).includes(q)) return false;
+    return true;
+  });
+  const known = Object.hasOwn(MESSAGE_SORTERS, filters.sort || '');
+  out = out.slice().sort(known ? MESSAGE_SORTERS[filters.sort] : byDate);
+  if (known ? filters.dir === 'desc' : filters.dir !== 'asc') out.reverse();
+  return out;
+}
+
+/** Agregações da listagem de mensagens: por caixa, pasta, remetente e conexão, com espaço e datas. */
+export function summarizeMessages(records) {
+  const group = (keyFn, make) => {
+    const map = new Map();
+    for (const r of records) {
+      const k = keyFn(r);
+      if (k === undefined || k === null) continue;
+      let g = map.get(k);
+      if (!g) {
+        g = { ...make(r), messages: 0, bytes: 0 };
+        map.set(k, g);
+      }
+      g.messages++;
+      g.bytes += Number(r.size) || 0;
+    }
+    return [...map.values()].sort((a, b) => b.messages - a.messages);
+  };
+  let oldest = null;
+  let newest = null;
+  for (const r of records) {
+    const t = Date.parse(r.date);
+    if (!Number.isFinite(t)) continue;
+    if (!oldest || t < oldest.t) oldest = { t, date: r.date };
+    if (!newest || t > newest.t) newest = { t, date: r.date };
+  }
+  return {
+    messages: records.length,
+    bytes: records.reduce((sum, r) => sum + (Number(r.size) || 0), 0),
+    withAttachments: records.filter((r) => r.hasAttachments).length,
+    oldest: oldest?.date || null,
+    newest: newest?.date || null,
+    byMailbox: group(
+      (r) => r.mailbox,
+      (r) => ({ mailbox: r.mailbox, name: r.mailboxName || '' }),
+    ),
+    byFolder: group(
+      (r) => r.folder || '',
+      (r) => ({ key: r.folder || '', folder: r.folder || '(sem pasta)' }),
+    ),
+    bySender: group(
+      (r) => r.fromAddress || '',
+      (r) => ({ sender: r.fromAddress || '', label: r.from || '(sem remetente)' }),
+    ),
+    bySource: group(
+      (r) => r.sourceId,
+      (r) => ({ sourceId: r.sourceId, source: r.sourceName }),
+    ),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Retenção
 
 /**

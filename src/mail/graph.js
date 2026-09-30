@@ -20,6 +20,40 @@ const IMMUTABLE_IDS = { Prefer: 'IdType="ImmutableId"' };
 
 export { GRAPH_ENDPOINTS };
 
+/** Destinatário do Graph ({ emailAddress: { name, address } }) no formato { name, address }. */
+const mapRecipient = (r) => ({ name: r?.emailAddress?.name || '', address: r?.emailAddress?.address || '' });
+
+/**
+ * Um usuário do Microsoft Entra ID no formato do catálogo de contas: endereço principal, apelidos
+ * (proxyAddresses smtp:), situação, tipo, licença, data de criação e dados do cadastro.
+ */
+function graphAccount(u) {
+  const proxies = (u.proxyAddresses || []).filter((p) => /^smtp:/i.test(p));
+  const primary = proxies.find((p) => p.startsWith('SMTP:'))?.slice(5) || u.mail || '';
+  const aliases = proxies
+    .filter((p) => p.startsWith('smtp:'))
+    .map((p) => p.slice(5))
+    .filter((a) => a && a.toLowerCase() !== primary.toLowerCase());
+  const phones = [u.mobilePhone, ...(u.businessPhones || [])].filter(Boolean);
+  return {
+    address: u.mail || u.userPrincipalName || '',
+    name: u.displayName || '',
+    login: u.userPrincipalName || '',
+    aliases,
+    enabled: u.accountEnabled == null ? null : Boolean(u.accountEnabled),
+    type: u.userType || '',
+    licensed: (u.assignedLicenses || []).length > 0,
+    created: u.createdDateTime || null,
+    lastActivity: null, // exige AuditLog.Read.All (signInActivity, beta): fora do catálogo
+    department: u.department || '',
+    title: u.jobTitle || '',
+    location: u.officeLocation || '',
+    phone: phones.join(', '),
+    orgUnit: '',
+    admin: null,
+  };
+}
+
 /** Traduz erros do Graph/Entra ID para mensagens com a providência a tomar. delegated: conta conectada. */
 export function graphError(err, { delegated = false } = {}) {
   if (!(err instanceof ApiError)) return err;
@@ -82,6 +116,25 @@ export class GraphConnector extends GraphClient {
       url = this.next(page);
     }
     return out.sort((a, b) => a.address.localeCompare(b.address));
+  }
+
+  /**
+   * Catálogo de contas do domínio (listagem): todos os usuários do locatário com os dados do cadastro
+   * (nome, endereço principal, apelidos, situação, tipo, licença, data de criação, departamento etc.).
+   * Exige a permissão User.Read.All (aplicativo ou, com a conta conectada, delegada).
+   */
+  async *directory() {
+    const select =
+      'id,displayName,userPrincipalName,mail,proxyAddresses,accountEnabled,userType,createdDateTime,department,jobTitle,officeLocation,mobilePhone,businessPhones,assignedLicenses';
+    let url = `/users?$select=${select}&$top=999`;
+    while (url) {
+      const page = await this.api(url);
+      for (const u of page?.value || []) {
+        const acct = graphAccount(u);
+        if (acct.address) yield acct;
+      }
+      url = this.next(page);
+    }
   }
 
   /**
@@ -158,14 +211,19 @@ export class GraphConnector extends GraphClient {
    * before: só as recebidas antes desta data; headersOnly: sem baixar a mensagem (retenção) —
    * entrega também { subject, from, internetMessageId, headersOnly: true }.
    */
-  async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
+  async *messages(mailbox, { since = null, before = null, headersOnly = false, fullHeaders = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
     const user = await this.resolveUser(mailbox);
     mailbox.name ||= user.name;
     const folders = await this.folders(user.path, { includeTrash, includeJunk, address: mailbox.address });
     const userPath = user.path;
     const conditions = [since && `receivedDateTime ge ${since.toISOString()}`, before && `receivedDateTime lt ${before.toISOString()}`].filter(Boolean);
     const filter = conditions.length ? `&$filter=${enc(conditions.join(' and '))}` : '';
-    const fields = headersOnly ? 'id,receivedDateTime,webLink,subject,from,internetMessageId' : 'id,receivedDateTime,webLink';
+    // A listagem de mensagens (fullHeaders) traz também destinatários, data de envio e se há anexos.
+    const fields = headersOnly
+      ? fullHeaders
+        ? 'id,receivedDateTime,sentDateTime,webLink,subject,from,toRecipients,ccRecipients,internetMessageId,hasAttachments'
+        : 'id,receivedDateTime,webLink,subject,from,internetMessageId'
+      : 'id,receivedDateTime,webLink';
     const size = `&$expand=${enc("singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')")}`;
     const self = this;
     async function* list() {
@@ -185,7 +243,21 @@ export class GraphConnector extends GraphClient {
                 webLink: m.webLink || null,
                 size: Number(m.singleValueExtendedProperties?.[0]?.value) || 0,
                 ...(headersOnly
-                  ? { subject: m.subject || '', from: from ? { name: from.name || '', address: from.address || '' } : null, internetMessageId: m.internetMessageId || null, inTrash: folder.inTrash, headersOnly: true }
+                  ? {
+                      subject: m.subject || '',
+                      from: from ? { name: from.name || '', address: from.address || '' } : null,
+                      internetMessageId: m.internetMessageId || null,
+                      inTrash: folder.inTrash,
+                      headersOnly: true,
+                      ...(fullHeaders
+                        ? {
+                            sent: m.sentDateTime || null,
+                            to: (m.toRecipients || []).map(mapRecipient),
+                            cc: (m.ccRecipients || []).map(mapRecipient),
+                            hasAttachments: Boolean(m.hasAttachments),
+                          }
+                        : {}),
+                    }
                   : {}),
               };
             }

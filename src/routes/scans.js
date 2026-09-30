@@ -12,6 +12,12 @@ import {
   filterMailRecords,
   summarizeMail,
   MAIL_FILTER_KEYS,
+  filterAccounts,
+  summarizeAccounts,
+  ACCOUNT_FILTER_KEYS,
+  filterMessages,
+  summarizeMessages,
+  MESSAGE_FILTER_KEYS,
   applyDeletions,
   deletionTotals,
   summarizeRetention,
@@ -28,6 +34,7 @@ import { friendlyError } from '../scan/errors.js';
 import { PROJECT_ROOT } from '../config.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
 import { exportMailXlsx, exportMailCsv, exportMailHtml } from '../report/mail-exports.js';
+import { exportAccountsXlsx, exportAccountsCsv, exportAccountsHtml, exportMessagesXlsx, exportMessagesCsv, exportMessagesHtml } from '../report/listing-exports.js';
 import { RETENTION_EXPORTS } from '../report/retention-exports.js';
 import { TYPE_EXPORTS } from '../report/type-exports.js';
 import { fileDate } from '../retention/policy.js';
@@ -70,9 +77,46 @@ const MODELS = {
     csv: exportMailCsv,
     html: exportMailHtml,
   },
+  accounts: {
+    keys: ACCOUNT_FILTER_KEYS,
+    filter: filterAccounts,
+    summarize: summarizeAccounts,
+    options: (records) => {
+      const all = summarizeAccounts(records);
+      return {
+        sources: all.bySource.map((s) => ({ value: s.sourceId, label: s.source })),
+        types: all.byType.map((t) => t.key).filter(Boolean),
+        states: all.byState.map((s) => s.key),
+      };
+    },
+    xlsx: exportAccountsXlsx,
+    csv: exportAccountsCsv,
+    html: exportAccountsHtml,
+  },
+  messages: {
+    keys: MESSAGE_FILTER_KEYS,
+    filter: filterMessages,
+    summarize: summarizeMessages,
+    options: (records) => {
+      const all = summarizeMessages(records);
+      return {
+        mailboxes: all.byMailbox.map((m) => m.mailbox).sort(byName),
+        folders: all.byFolder.map((f) => f.key).filter(Boolean).sort(byName),
+        senders: all.bySender.filter((s) => s.sender).slice(0, 500).map((s) => ({ value: s.sender, label: s.label })).sort((a, b) => byName(a.label, b.label)),
+        sources: all.bySource.map((s) => ({ value: s.sourceId, label: s.source })),
+      };
+    },
+    xlsx: exportMessagesXlsx,
+    csv: exportMessagesCsv,
+    html: exportMessagesHtml,
+  },
 };
 
-const modelOf = (scan) => (scan.kind === 'mail' ? MODELS.mail : MODELS.files);
+const modelOf = (scan) => {
+  if (scan.listing?.kind === 'directory') return MODELS.accounts;
+  if (scan.listing?.kind === 'messages') return MODELS.messages;
+  return scan.kind === 'mail' ? MODELS.mail : MODELS.files;
+};
 
 /** Retenção, na exclusão manual: o motivo para não excluir um arquivo que deixou de estar expirado. */
 function expiredCheck(retention, st) {
@@ -271,9 +315,13 @@ export function scansRouter({ store, manager, endpoints = {} }) {
 
   router.get('/', (req, res) => {
     const kind = req.query.kind === 'mail' || req.query.kind === 'files' ? req.query.kind : '';
+    // As listagens de e-mail (somente leitura) têm a própria seção: listing=only traz só elas; por
+    // padrão elas ficam de fora das listas de análises.
+    const onlyListings = req.query.listing === 'only';
     const scans = store
       .listScans()
       .filter((scan) => !kind || (scan.kind || 'files') === kind)
+      .filter((scan) => (onlyListings ? Boolean(scan.listing) : !scan.listing))
       .map(listFields)
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
     res.json(scans);
@@ -338,7 +386,8 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       pageSize,
       bulkCandidates,
       items: list.slice((page - 1) * pageSize, page * pageSize).map((r) => {
-        const target = deletionTarget(scan, r);
+        // Listagens (contas e mensagens) são somente leitura: nunca oferecem exclusão.
+        const target = scan.listing ? {} : deletionTarget(scan, r);
         const gone = r.deletion?.status === 'deleted' || r.deletion?.status === 'missing';
         const inProgress = deleting.has(`${scan.id}:${r.id}`);
         return {
@@ -355,6 +404,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   // Exclusão manual de um item do relatório (arquivo ou mensagem), com registro de quem excluiu.
   router.post('/:id/results/:rid/delete', async (req, res) => {
     const scan = getScan(req);
+    if (scan.listing) throw new HttpError(400, 'Este é um relatório de listagem (somente leitura): nada é excluído por aqui.');
     if (manager.isActive(scan.id)) throw new HttpError(409, 'Aguarde o fim da análise para excluir itens pelo relatório.');
     if (req.body?.confirm !== true) throw new HttpError(400, 'Confirme a exclusão.');
     const rid = Number(req.params.rid);

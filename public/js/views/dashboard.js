@@ -27,12 +27,12 @@ export async function render(root, { ctx }) {
   // Os números de ocorrências vêm das análises por termos (as execuções da retenção e as buscas por
   // tipo não têm termos).
   const lastFiles = scans.find((s) => !isMail(s) && !s.retention && !s.fileTypes && s.status === 'completed');
-  const lastMail = scans.find((s) => isMail(s) && !s.retention && s.status === 'completed');
+  const lastMail = scans.find((s) => isMail(s) && !s.retention && !s.listing && s.status === 'completed');
   const active = scans.filter(running);
   // Pronto para usar: com locais cadastrados e uma lista com termos (ou uma política de retenção ou
   // uma busca por tipo de arquivo).
   const ready = (repos.length > 0 || sources.length > 0) && (terms > 0 || policies.length > 0 || scans.some((s) => s.fileTypes) || schedules.some((s) => s.purpose === 'types'));
-  const link = (s) => `${isMail(s) ? '#/email/analises' : '#/analises'}/${s.id}`;
+  const link = (s) => `${s.listing ? '#/email/listagens' : isMail(s) ? '#/email/analises' : '#/analises'}/${s.id}`;
 
   paint(
     root,

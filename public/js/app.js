@@ -12,6 +12,8 @@ import * as lists from './views/lists.js';
 import * as listEdit from './views/list-edit.js';
 import * as mailSources from './views/mail-sources.js';
 import * as mailScanNew from './views/mail-scan-new.js';
+import * as mailListings from './views/mail-listings.js';
+import * as mailListingNew from './views/mail-listing-new.js';
 import * as schedules from './views/schedules.js';
 import * as scheduleEdit from './views/schedule-edit.js';
 import * as retention from './views/retention.js';
@@ -28,6 +30,9 @@ const ROUTES = [
   [/^\/email\/analises$/, scans, 'email-analises', { kind: 'mail' }],
   [/^\/email\/analises\/nova$/, mailScanNew, 'email-analises'],
   [/^\/email\/analises\/([\w-]+)$/, report, 'email-analises'],
+  [/^\/email\/listagens$/, mailListings, 'email-listagens'],
+  [/^\/email\/listagens\/nova$/, mailListingNew, 'email-listagens'],
+  [/^\/email\/listagens\/([\w-]+)$/, report, 'email-listagens'],
   [/^\/listas$/, lists, 'listas'],
   [/^\/listas\/nova$/, listEdit, 'listas'],
   [/^\/listas\/([\w-]+)$/, listEdit, 'listas'],

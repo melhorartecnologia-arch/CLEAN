@@ -184,7 +184,21 @@ export function startFakeImap(
               const name = /^(.*?)\s*</.exec(fromText)?.[1]?.replace(/"/g, '') || '';
               const [user, host] = address.split('@');
               const from = address ? `((${q(name)} NIL ${q(user)} ${q(host)}))` : 'NIL';
-              parts.push(`ENVELOPE (${q(header('Date'))} ${q(header('Subject'))} ${from} NIL NIL NIL NIL NIL NIL ${mid ? `"${mid.replace(/["\\]/g, '')}"` : 'NIL'})`);
+              const addrList = (value) => {
+                const list = String(value || '')
+                  .split(',')
+                  .map((s) => s.trim())
+                  .filter(Boolean)
+                  .map((s) => {
+                    const addr = /<([^>]+)>/.exec(s)?.[1] || s;
+                    const nm = /^(.*?)\s*</.exec(s)?.[1]?.replace(/"/g, '') || '';
+                    const [u, h] = addr.split('@');
+                    return `(${q(nm)} NIL ${q(u)} ${q(h || '')})`;
+                  });
+                return list.length ? `(${list.join('')})` : 'NIL';
+              };
+              // ENVELOPE: date, subject, from, sender, reply-to, to, cc, bcc, in-reply-to, message-id.
+              parts.push(`ENVELOPE (${q(header('Date'))} ${q(header('Subject'))} ${from} NIL NIL ${addrList(header('To'))} ${addrList(header('Cc'))} NIL NIL ${mid ? `"${mid.replace(/["\\]/g, '')}"` : 'NIL'})`);
             }
             const partial = /BODY\.PEEK\[\]<(\d+)\.(\d+)>/.exec(items);
             const head = `* ${i + 1} FETCH (${parts.join(' ')}`;

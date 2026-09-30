@@ -157,6 +157,9 @@ function labelsText(labels) {
     .join('; ');
 }
 
+/** Endereço do envelope IMAP ({ name, address, ... }) no formato { name, address }. */
+const envAddress = (a) => ({ name: a?.name || '', address: a?.address || '' });
+
 export class ImapConnector {
   /**
    * options: signal, log(level, message), endpoints (troca os endereços, nos testes) e
@@ -179,6 +182,36 @@ export class ImapConnector {
   async mailboxes() {
     const excluded = addressMatcher(this.source.excludeMailboxes);
     return (this.source.mailboxes || []).filter((m) => !excluded(m.address)).map((m) => ({ address: m.address, login: m.login || m.address, name: '' }));
+  }
+
+  /**
+   * Catálogo de contas (listagem): o IMAP não expõe a lista de contas do servidor, então traz apenas
+   * as caixas cadastradas nesta conexão, com um aviso.
+   */
+  async *directory() {
+    const excluded = addressMatcher(this.source.excludeMailboxes);
+    const note = 'O IMAP não tem um catálogo de contas do servidor: a listagem traz apenas as caixas cadastradas nesta conexão.';
+    for (const m of this.source.mailboxes || []) {
+      if (excluded(m.address)) continue;
+      yield {
+        address: m.address,
+        name: '',
+        login: m.login || m.address,
+        aliases: [],
+        enabled: null,
+        type: 'Caixa cadastrada (IMAP)',
+        licensed: null,
+        created: null,
+        lastActivity: null,
+        department: '',
+        title: '',
+        location: '',
+        phone: '',
+        orgUnit: '',
+        admin: null,
+        note,
+      };
+    }
   }
 
   /**
@@ -270,7 +303,7 @@ export class ImapConnector {
    * { folder, id, error } (pasta que não pôde ser lida). Se a sessão cair (ex.: o Exchange Online a
    * encerra quando o token OAuth vence), a leitura continua numa nova sessão, de onde parou.
    */
-  async *messages(mailbox, { since = null, before = null, headersOnly = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, onFolder } = {}) {
+  async *messages(mailbox, { since = null, before = null, headersOnly = false, fullHeaders = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, onFolder } = {}) {
     let session = await this.connect(mailbox);
     let read = 0; // mensagens entregues pela sessão atual
     let failures = 0; // falhas seguidas sem ler nenhuma mensagem (quedas e reconexões recusadas)
@@ -331,7 +364,7 @@ export class ImapConnector {
           }
           let failure = null;
           try {
-            for await (const item of this.folderMessages(session.client, folder, state, { gmail, since, before, headersOnly, maxBytes, renewDue })) {
+            for await (const item of this.folderMessages(session.client, folder, state, { gmail, since, before, headersOnly, fullHeaders, maxBytes, renewDue })) {
               read++;
               failures = 0;
               yield item;
@@ -358,7 +391,7 @@ export class ImapConnector {
    * pasta vem com folderProblem. renewDue(): o token da sessão está para vencer — entre um lote e
    * outro, a leitura para (renewSession) e continua numa nova sessão.
    */
-  async *folderMessages(client, folder, state, { gmail, since, before, headersOnly, maxBytes, renewDue = () => false }) {
+  async *folderMessages(client, folder, state, { gmail, since, before, headersOnly, fullHeaders = false, maxBytes, renewDue = () => false }) {
     const pause = () => Object.assign(new Error('Renovar a sessão IMAP.'), { renewSession: true });
     let lock;
     try {
@@ -391,7 +424,8 @@ export class ImapConnector {
         return item;
       };
       if (headersOnly) {
-        // Retenção: só os dados do envelope (sem baixar a mensagem).
+        // Retenção e listagem: só os dados do envelope (sem baixar a mensagem). A listagem
+        // (fullHeaders) usa também os destinatários e a data de envio do envelope.
         for (const info of meta) {
           const env = info.envelope || {};
           const from = env.from?.[0];
@@ -405,6 +439,14 @@ export class ImapConnector {
             internetMessageId: env.messageId || null,
             inTrash: folder.inTrash,
             headersOnly: true,
+            ...(fullHeaders
+              ? {
+                  to: (env.to || []).map(envAddress),
+                  cc: (env.cc || []).map(envAddress),
+                  sent: env.date instanceof Date && !Number.isNaN(env.date.getTime()) ? env.date.toISOString() : null,
+                  hasAttachments: null, // exigiria a estrutura do corpo (BODYSTRUCTURE): fora da listagem
+                }
+              : {}),
           });
         }
         return;
