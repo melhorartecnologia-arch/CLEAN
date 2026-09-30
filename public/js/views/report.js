@@ -357,7 +357,7 @@ const MAIL = {
   resultsTitle: 'Mensagens com ocorrências',
   views: { terms: 'chart', mailboxes: 'chart', senders: 'chart', locations: 'chart', 'raiox-folders': 'chart', 'raiox-timeline': 'chart', 'raiox-mailboxes': 'chart' },
   profileTab: 'Raio-X das caixas',
-  profileSection: (profile, barChart) => mailProfileSection(profile, barChart),
+  profileSection: (profile, barChart, ctx) => mailProfileSection(profile, barChart, ctx),
 
   subtitle: (scan) => {
     const s = scan.summary || {};
@@ -577,9 +577,11 @@ function timelineRows(timeline = []) {
 }
 
 /** Raio-X das caixas: números, pastas, distribuição no tempo e caixas — a partir do censo (scan.profile). */
-function mailProfileSection(profile, barChart) {
+function mailProfileSection(profile, barChart, { running = false } = {}) {
   if (!profile) {
-    return html`<div class="empty">O raio-x das caixas é gerado enquanto a análise processa as mensagens. Aguarde a análise avançar.</div>`;
+    return html`<div class="empty">${running
+      ? 'O raio-x das caixas é gerado enquanto a análise processa as mensagens. Ele aparece aqui assim que a análise avança.'
+      : 'Esta análise não tem raio-x das caixas (foi feita antes deste recurso ou não chegou a analisar mensagens). Faça uma nova análise de e-mail para gerá-lo.'}</div>`;
   }
   const count = (n) => plural(n, 'mensagem', 'mensagens');
   const date = (iso) => (iso ? fmtDate(iso) : '—');
@@ -605,7 +607,12 @@ function mailProfileSection(profile, barChart) {
     tipLabel: m.name ? `${m.name} <${m.mailbox}>` : m.mailbox,
     raw: m,
   }));
-  const capped = profile.foldersTotal > profile.folders.length || profile.mailboxesTotal > profile.mailboxes.length;
+  const notes = [];
+  if (profile.foldersTotal > profile.folders.length || profile.mailboxesTotal > profile.mailboxes.length) {
+    notes.push(`Os gráficos mostram as maiores pastas${profile.mailboxes.length > 1 ? ' e caixas' : ''}; as tabelas trazem as demais (até as ${fmtNum(profile.folders.length)} maiores guardadas no relatório).`);
+  }
+  if (profile.folderOverflow) notes.push(`${fmtNum(profile.folderOverflow)} mensagem(ns) estão em pastas além do limite do raio-x: entram no total, mas não no detalhamento por pasta.`);
+  if (profile.mailboxOverflow) notes.push(`${fmtNum(profile.mailboxOverflow)} mensagem(ns) estão em caixas além do limite do raio-x: entram no total, mas não no detalhamento por caixa.`);
   return html`${tiles}
     <div class="grid-2">
       ${barChart({
@@ -639,7 +646,7 @@ function mailProfileSection(profile, barChart) {
           })
         : ''}
     </div>
-    ${capped ? html`<p class="muted small">Os gráficos mostram as maiores pastas e caixas; as tabelas trazem as demais (limitadas às ${fmtNum(profile.folders.length)} maiores guardadas no relatório).</p>` : ''}`;
+    ${notes.map((n) => html`<p class="muted small">${n}</p>`)}`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1210,7 +1217,9 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   setActiveNav(P.nav);
 
   const filters = Object.fromEntries(P.filterKeys.map((k) => [k, query.get(k) || '']));
-  let tab = ['arquivos', 'erros', 'registro'].includes(query.get('aba')) ? query.get('aba') : 'arquivos';
+  // Abas restauráveis pelo endereço (a de raio-x só existe nas análises de e-mail).
+  const tabs = ['arquivos', 'erros', 'registro', ...(P.profileTab ? ['raiox'] : [])];
+  let tab = tabs.includes(query.get('aba')) ? query.get('aba') : 'arquivos';
   let results = null;
   let summary = null;
   let errors = null;
@@ -1475,7 +1484,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   // Raio-X das caixas (censo): vem no próprio registro da análise (scan.profile), não do recorte filtrado.
   const drawProfile = () => {
     const box = $('[data-profile]');
-    if (box && P.profileSection) paint(box, P.profileSection(scan.profile, barChart));
+    if (box && P.profileSection) paint(box, P.profileSection(scan.profile, barChart, { running: isActive(scan) }));
   };
 
   // ---------- Exclusão em lote (relatórios de arquivos) ----------
