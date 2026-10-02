@@ -133,7 +133,12 @@ function deletionBlock(r, noun, { active, deleting, bulk = false, scanNoun = 'an
   } else if (r.canDelete) {
     action = html`<button type="button" class="btn small danger" data-action="delete-item" data-rid="${r.id}">${icon('trash')} ${d && !isGone(d) ? 'Tentar excluir de novo' : `Excluir ${noun}`}</button>`;
   } else if (!isGone(d)) {
-    const blocked = { removed: w.removed, changed: changedRepo(scanNoun), excluded: EXCLUDED_REPO };
+    const blocked = {
+      removed: w.removed,
+      changed: changedRepo(scanNoun),
+      excluded: EXCLUDED_REPO,
+      chat: 'A exclusão de mensagens de chat do Teams não é oferecida pelo Microsoft Graph: exclua pelo próprio Teams.',
+    };
     const why = active ? `A exclusão manual fica disponível ao fim da ${scanNoun}.` : blocked[r.deleteBlocked] || w.notAllowed;
     action = html`<p class="muted small">${why}</p>`;
   }
@@ -1393,9 +1398,189 @@ const MESSAGES = {
   },
 };
 
+// ---------------------------------------------------------------------------------------------
+// Microsoft Teams (mensagens de canais e chats)
+
+const TEAMS_SCOPE = { channel: 'Canal', chat: 'Chat' };
+const TEAMS_LOCATION = { subject: 'assunto', body: 'mensagem', attachmentName: 'nome do anexo', attachment: 'anexo' };
+const TEAMS_PHRASE = { subject: 'no assunto', body: 'na mensagem', attachmentName: 'no nome do anexo', attachment: 'no conteúdo do anexo' };
+const TEAMS_LOC_TITLE = { subject: 'Assunto', body: 'Mensagem', attachmentName: 'Nome do anexo', attachment: 'Conteúdo do anexo' };
+
+const TEAMS = {
+  base: '#/teams/analises',
+  nav: 'teams-analises',
+  filterKeys: ['q', 'term', 'scope', 'team', 'sender', 'location', 'deletion', 'sort', 'page'],
+  criteria: ['q', 'term', 'scope', 'team', 'sender', 'location', 'deletion'],
+  descSorts: new Set(['date', 'occurrences', 'terms', 'size']),
+  defaultSort: 'date',
+  noun: ['mensagem', 'mensagens'],
+  o: 'a',
+  resultsTitle: 'Mensagens com ocorrências',
+  columns: 5,
+  views: { terms: 'chart', teams: 'chart', senders: 'chart', locations: 'chart' },
+
+  subtitle: (scan) => {
+    const s = scan.summary || {};
+    const t = s.teams || {};
+    const scope = t.scanChannels && t.scanChats ? 'canais e chats' : t.scanChannels ? 'canais' : 'chats';
+    const sources = (s.sources || []).map((x) => x.name).join(', ');
+    return `${sources} · ${scope} · ${(s.lists || []).map((l) => `${l.name} (${fmtNum(l.termCount)})`).join(', ')}`;
+  },
+
+  filterFields: (filters) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Assunto, pessoa, equipe, canal ou termo" /></label>
+    <label class="field"><span>Termo</span><select name="term"><option value="">Todos</option></select></label>
+    <label class="field"><span>Âmbito</span>
+      <select name="scope"><option value="">Canais e chats</option>${option('channel', 'Canais de equipes', filters.scope)}${option('chat', 'Chats', filters.scope)}</select>
+    </label>
+    <label class="field"><span>Equipe</span><select name="team"><option value="">Todas</option></select></label>
+    <label class="field"><span>Autor</span><select name="sender"><option value="">Todos</option></select></label>
+    <label class="field"><span>Encontrado em</span>
+      <select name="location"><option value="">Qualquer parte</option>${Object.entries(TEAMS_LOC_TITLE).map(([v, l]) => option(v, l, filters.location))}</select>
+    </label>
+    ${deletionFilter(filters, 'a')}
+    <label class="field"><span>Ordenar por</span>
+      <select name="sort">${[
+        ['date', 'Mais recentes'],
+        ['occurrences', 'Mais ocorrências'],
+        ['terms', 'Mais termos'],
+        ['team', 'Equipe/canal'],
+        ['sender', 'Autor'],
+        ['subject', 'Assunto'],
+        ['size', 'Maiores mensagens'],
+      ].map(([v, l]) => option(v, l, filters.sort))}</select>
+    </label>`,
+
+  fillOptions: (form, options, filters, fill) => {
+    const o = options || { terms: [], teams: [], senders: [] };
+    fill(form.elements.term, o.terms, filters.term);
+    const teams = new Map((o.teams || []).map((t) => [t.value, t.label]));
+    fill(form.elements.team, [...teams.keys()], filters.team, (v) => teams.get(v) || v);
+    const senders = new Map((o.senders || []).map((s) => [s.value, s.label]));
+    fill(form.elements.sender, [...senders.keys()], filters.sender, (v) => senders.get(v) || v);
+  },
+
+  progress: (st) => html`<span><b>${fmtNum(st.messagesSeen)}</b> mensagens verificadas</span>
+    <span><b>${fmtNum(st.messagesMatched)}</b> com ocorrências</span>
+    <span><b>${fmtNum(st.attachmentsAnalyzed)}</b> anexos lidos</span>
+    <span><b>${fmtNum(st.errors)}</b> erros</span>
+    <span>${st.conversationsTotal ? html`conversa <b>${Math.min((st.conversationsDone || 0) + 1, st.conversationsTotal)}</b> de <b>${fmtNum(st.conversationsTotal)}</b>` : 'listando as conversas…'}</span>`,
+
+  tiles: (st) => {
+    const pct = st.messagesSeen ? Math.round((st.messagesMatched / st.messagesSeen) * 1000) / 10 : 0;
+    return html`<div class="tile"><div class="label">Mensagens verificadas</div><div class="value">${fmtCompact(st.messagesSeen)}</div><div class="detail">em ${plural(st.channels || 0, 'canal', 'canais')} e ${plural(st.chats || 0, 'chat', 'chats')}</div></div>
+      <div class="tile"><div class="label">Com ocorrências</div><div class="value">${fmtCompact(st.messagesMatched)}</div><div class="detail">${pct.toLocaleString('pt-BR')}% das verificadas</div></div>
+      <div class="tile"><div class="label">Ocorrências</div><div class="value">${fmtCompact(st.occurrences)}</div><div class="detail">no assunto, no corpo e nos anexos</div></div>
+      <div class="tile"><div class="label">Anexos lidos</div><div class="value">${fmtCompact(st.attachmentsAnalyzed)}</div><div class="detail">${st.attachmentsErrors ? `${fmtNum(st.attachmentsErrors)} com erro` : `${fmtBytes(st.bytesDownloaded)} baixados`}</div></div>
+      <div class="tile"><div class="label">Erros</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`;
+  },
+
+  charts: (summary, barChart) => {
+    const count = (n) => plural(n, 'mensagem', 'mensagens');
+    const terms = summary.byTerm.map((t) => ({ label: t.term, value: t.messages, filterValue: t.term, tipValue: `${count(t.messages)} · ${plural(t.occurrences, 'ocorrência', 'ocorrências')}`, tipLabel: `${t.term} — lista ${t.list}`, raw: t }));
+    const teams = summary.byTeam.map((g) => ({ label: g.team, value: g.messages, filterValue: g.teamId, tipValue: count(g.messages), tipLabel: g.team, raw: g }));
+    const senders = summary.bySender.map((s) => ({ label: s.label, value: s.messages, filterValue: s.sender, tipValue: count(s.messages), tipLabel: s.label, raw: s }));
+    const locations = Object.entries(summary.byLocation)
+      .filter(([, n]) => n > 0)
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, n]) => ({ label: TEAMS_LOC_TITLE[key], value: n, filterValue: key, tipValue: count(n), tipLabel: `Termos encontrados ${TEAMS_PHRASE[key]}`, raw: { key, n } }));
+    return html`${barChart({
+      key: 'terms',
+      title: 'Termos encontrados',
+      subtitle: 'Mensagens em que cada termo aparece. Clique para filtrar.',
+      rows: terms,
+      filterKey: 'term',
+      emptyText: 'Nenhum termo encontrado.',
+      tableHead: html`<tr><th>Termo</th><th>Lista</th><th class="num">Mensagens</th><th class="num">Ocorrências</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.term}</td><td>${r.raw.list}</td><td class="num">${fmtNum(r.raw.messages)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'teams',
+      title: 'Equipes',
+      subtitle: 'Equipes com mensagens de canal encontradas. Clique para filtrar.',
+      rows: teams,
+      filterKey: 'team',
+      emptyText: 'Nenhuma mensagem de canal encontrada.',
+      tableHead: html`<tr><th>Equipe</th><th class="num">Mensagens</th><th class="num">Ocorrências</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.team}</td><td class="num">${fmtNum(r.raw.messages)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'senders',
+      title: 'Autores',
+      subtitle: 'Quem escreveu as mensagens encontradas. Clique para filtrar.',
+      rows: senders,
+      filterKey: 'sender',
+      emptyText: 'Nenhuma mensagem encontrada.',
+      tableHead: html`<tr><th>Autor</th><th class="num">Mensagens</th><th class="num">Ocorrências</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.label}</td><td class="num">${fmtNum(r.raw.messages)}</td><td class="num">${fmtNum(r.raw.occurrences)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'locations',
+      title: 'Onde foi encontrado',
+      subtitle: 'Mensagens por parte em que os termos aparecem. Clique para filtrar.',
+      rows: locations,
+      filterKey: 'location',
+      emptyText: 'Nenhuma mensagem encontrada.',
+      tableHead: html`<tr><th>Parte</th><th class="num">Mensagens</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.label}</td><td class="num">${fmtNum(r.value)}</td></tr>`,
+    })}`;
+  },
+
+  tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Mensagem</th><th>Autor</th><th>Data</th><th>Informação encontrada</th></tr>`,
+
+  row: (r) => html`<td><div class="name">${r.subject || '(sem assunto)'}</div>${deletionChip(r, 'a')}<div class="path"><span class="chip source">${TEAMS_SCOPE[r.scopeKind] || r.scopeKind}</span> ${r.folder}${(r.attachments || []).length ? html` · ${plural(r.attachments.length, 'anexo', 'anexos')}` : ''}</div></td>
+    <td>${r.from || html`<span class="muted">—</span>`}</td>
+    <td class="nowrap">${fmtDateTime(r.date)}</td>
+    <td><div class="chips">${r.matches.map((m) => html`<span class="chip"><b>${m.term}</b> ${fmtNum(m.count)}× · ${TEAMS_LOCATION[m.location] || m.location}</span>`)}</div></td>`,
+
+  rowLabel: (r) => r.subject || 'mensagem sem assunto',
+
+  detail: (r, ctx) => {
+    const safeLink = /^https:\/\//i.test(r.webUrl || '') ? r.webUrl : null;
+    return html`<div class="detail-grid">
+      <div>
+        <h4>Mensagem</h4>
+        <dl class="kv">
+          <dt>Assunto</dt><dd><b>${r.subject || '(sem assunto)'}</b></dd>
+          <dt>Âmbito</dt><dd>${TEAMS_SCOPE[r.scopeKind] || r.scopeKind}${r.scopeKind === 'channel' && r.membershipType && r.membershipType !== 'standard' ? html` <span class="muted small">(${r.membershipType})</span>` : ''}</dd>
+          ${r.scopeKind === 'channel' ? html`<dt>Equipe</dt><dd>${r.team}</dd><dt>Canal</dt><dd>${r.channel}</dd>` : html`<dt>Conversa</dt><dd>${r.folder.replace(/^Chat:\s*/, '')}</dd>`}
+          <dt>Autor</dt><dd>${r.from || '—'}</dd>
+          <dt>Data</dt><dd>${fmtDateTime(r.date)}${r.edited ? html` <span class="muted small">(editada em ${fmtDateTime(r.edited)})</span>` : ''}</dd>
+          <dt>Conexão</dt><dd>${r.sourceName} (${TYPE_LABELS[r.sourceType] || r.sourceType})</dd>
+          ${safeLink ? html`<dt>Abrir</dt><dd><a href="${safeLink}" target="_blank" rel="noopener noreferrer">Abrir no Teams</a> <span class="muted small">(exige acesso à conversa)</span></dd>` : ''}
+        </dl>
+        ${deletionBlock(r, 'mensagem', ctx)}
+      </div>
+      <div>
+        <h4>Anexos</h4>
+        ${(r.attachments || []).length
+          ? html`<ul class="attachment-list">
+              ${r.attachments.map((a) => html`<li>${icon('file')} ${a.name} <span class="muted small">${a.status ? `· ${CONTENT_STATUS[a.status] || a.status}` : ''}</span>${a.note ? html`<div class="muted small">${a.note}</div>` : ''}</li>`)}
+            </ul>`
+          : html`<p class="muted small">Sem anexos.</p>`}
+      </div>
+      <div>
+        <h4>Informação encontrada</h4>
+        ${matchesHtml(r, TEAMS_PHRASE)}
+      </div>
+    </div>`;
+  },
+
+  empty: {
+    filtered: 'Nenhuma mensagem corresponde aos filtros.',
+    running: 'Nenhuma ocorrência encontrada até agora.',
+    none: 'Nenhum termo da lista foi encontrado nas mensagens do Teams analisadas.',
+  },
+  errors: {
+    column: 'Local',
+    help: 'Equipes, canais, chats ou mensagens que não puderam ser lidos (permissões do aplicativo, limites do Graph...). Eles não foram analisados.',
+    empty: 'Nenhum erro de acesso ou leitura.',
+  },
+};
+
 function profileOf(scan) {
   if (scan.listing?.kind === 'directory') return ACCOUNTS;
   if (scan.listing?.kind === 'messages') return MESSAGES;
+  if (scan.kind === 'teams') return TEAMS;
   if (scan.retention) return scan.kind === 'mail' ? RETENTION_MAIL : RETENTION_FILES;
   if (scan.fileTypes) return TYPES_FILES;
   return scan.kind === 'mail' ? MAIL : FILES;
@@ -1486,7 +1671,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
   const deletingNow = new Set(); // itens com exclusão manual em andamento nesta tela
   // Exclusão em lote (relatórios de arquivos): os itens marcados (mantidos entre as páginas, até os
   // filtros mudarem) e o andamento da exclusão no servidor.
-  const canBulk = scan.kind !== 'mail';
+  const canBulk = scan.kind === 'files';
   const selection = new Set();
   let bulk = null;
   let bulkTimer = null;

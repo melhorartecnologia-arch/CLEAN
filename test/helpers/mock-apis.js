@@ -159,6 +159,86 @@ function drivesApi({ req, res, path, url, base, graph, find, json }) {
  * google: { publicKey, admin, users: [{ mail, name, disabled?, labels: [{ id, name, type }],
  *          messages: [{ id, raw, labelIds, internalDate }] }], flakyDelete? }
  */
+/** Uma mensagem do Teams (chatMessage) do simulador no formato do Graph. */
+function teamsMessageJson(m) {
+  return {
+    id: m.id,
+    messageType: m.messageType || 'message',
+    createdDateTime: m.createdDateTime || '2026-09-20T10:00:00Z',
+    lastModifiedDateTime: m.createdDateTime || null,
+    lastEditedDateTime: m.edited || null,
+    deletedDateTime: m.deleted ? '2026-09-21T00:00:00Z' : null,
+    subject: m.subject || null,
+    body: { contentType: m.contentType || 'html', content: m.body || '' },
+    from: m.from ? { user: { id: m.fromId || `u-${m.id}`, displayName: m.from, userIdentityType: 'aadUser' } } : null,
+    webUrl: m.webUrl || `https://teams.microsoft.com/l/message/${m.id}`,
+    attachments: (m.attachments || []).map((a) => ({ id: a.id || a.name, contentType: a.contentType || 'reference', contentUrl: a.contentUrl || '', name: a.name })),
+    ...(m.replies ? { replies: { '@odata.count': m.replies.length } } : {}),
+  };
+}
+
+/**
+ * Rotas do Microsoft Teams (e chats e /shares) do simulador. Ativa só quando graph.teamsData existe.
+ * graph.teamsData: { teams: [{ id, displayName, channels: [{ id, displayName, membershipType,
+ * messages: [{ id, from, body, subject?, createdDateTime, attachments?, replies?: [...] }] }] }],
+ * chats: { [userId]: [chatId] }, chatsById: { [chatId]: { id, topic, chatType, members, messages } },
+ * sharesByUrl: { [contentUrl]: { driveId, itemId, name, size } } }
+ */
+function teamsApi({ req, res, path, graph, json }) {
+  const data = graph.teamsData;
+  if (!data) return false;
+  const channelOf = (teamId, channelId) => data.teams.find((t) => t.id === teamId)?.channels.find((c) => c.id === channelId);
+  let m;
+  if (path === '/teams') return json(res, 200, { value: data.teams.map((t) => ({ id: t.id, displayName: t.displayName })) }), true;
+  m = /^\/teams\/([^/]+)$/.exec(path);
+  if (m) {
+    const t = data.teams.find((x) => x.id === m[1]);
+    return (t ? json(res, 200, { id: t.id, displayName: t.displayName }) : json(res, 404, { error: { code: 'NotFound', message: 'Equipe não encontrada' } })), true;
+  }
+  m = /^\/teams\/([^/]+)\/channels$/.exec(path);
+  if (m) {
+    const t = data.teams.find((x) => x.id === m[1]);
+    return json(res, 200, { value: (t?.channels || []).map((c) => ({ id: c.id, displayName: c.displayName, membershipType: c.membershipType || 'standard' })) }), true;
+  }
+  m = /^\/teams\/([^/]+)\/channels\/([^/]+)\/messages$/.exec(path);
+  if (m) return json(res, 200, { value: (channelOf(m[1], m[2])?.messages || []).map(teamsMessageJson) }), true;
+  m = /^\/teams\/([^/]+)\/channels\/([^/]+)\/messages\/([^/]+)\/replies$/.exec(path);
+  if (m) {
+    const root = (channelOf(m[1], m[2])?.messages || []).find((x) => x.id === m[3]);
+    return json(res, 200, { value: (root?.replies || []).map(teamsMessageJson) }), true;
+  }
+  m = /^\/teams\/([^/]+)\/channels\/([^/]+)\/messages\/([^/]+)(?:\/replies\/([^/]+))?\/softDelete$/.exec(path);
+  if (m && req.method === 'POST') {
+    graph.teamsDeleted = [...(graph.teamsDeleted || []), { teamId: m[1], channelId: m[2], messageId: m[4] || m[3], replyTo: m[4] ? m[3] : null }];
+    res.writeHead(204);
+    res.end();
+    return true;
+  }
+  m = /^\/users\/([^/]+)\/chats$/.exec(path);
+  if (m) {
+    const ids = data.chats?.[m[1]] || [];
+    const value = ids.map((id) => {
+      const c = data.chatsById[id];
+      return { id: c.id, topic: c.topic || '', chatType: c.chatType || 'group', members: (c.members || []).map((x) => ({ displayName: x.displayName || '', email: x.email || '' })) };
+    });
+    return json(res, 200, { value }), true;
+  }
+  m = /^\/chats\/([^/]+)\/messages$/.exec(path);
+  if (m) return json(res, 200, { value: (data.chatsById[m[1]]?.messages || []).map(teamsMessageJson) }), true;
+  m = /^\/shares\/([^/]+)\/driveItem$/.exec(path);
+  if (m) {
+    let url = '';
+    try {
+      url = Buffer.from(m[1].replace(/^u!/, '').replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    } catch {
+      // id inválido
+    }
+    const s = data.sharesByUrl?.[url];
+    return (s ? json(res, 200, { id: s.itemId, name: s.name || 'anexo', size: s.size || 0, parentReference: { driveId: s.driveId } }) : json(res, 404, { error: { code: 'itemNotFound', message: 'Compartilhamento não encontrado' } })), true;
+  }
+  return false;
+}
+
 /** Cabeçalho de uma mensagem MIME do simulador (primeira ocorrência). */
 function mimeHeader(raw, name) {
   const head = raw.toString('utf8').split(/\r?\n\r?\n/)[0];
@@ -366,6 +446,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
         }
         if (principal.app && path.startsWith('/me')) return json(res, 400, { error: { code: 'BadRequest', message: '/me request is only valid with delegated authentication flow.' } });
         if (drivesApi({ req, res, path, url, base, graph, find, json })) return;
+        if (teamsApi({ req, res, path, graph, json })) return;
         if (path === '/users') {
           const filter = url.searchParams.get('$filter');
           if (filter) {

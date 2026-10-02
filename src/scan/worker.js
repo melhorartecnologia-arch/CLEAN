@@ -3,9 +3,10 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { Scanner } from './scanner.js';
 import { MailScanner } from '../mail/scanner.js';
+import { TeamsScanner } from '../teams/scanner.js';
 
 const emit = (message) => parentPort.postMessage(message);
-const scanner = workerData.kind === 'mail' ? new MailScanner(workerData, emit) : new Scanner(workerData, emit);
+const scanner = workerData.kind === 'teams' ? new TeamsScanner(workerData, emit) : workerData.kind === 'mail' ? new MailScanner(workerData, emit) : new Scanner(workerData, emit);
 
 // Bibliotecas de leitura (ex.: pdf.js com um PDF danificado) podem gerar erros fora da promessa
 // aguardada. Sem estes tratadores a thread inteira seria encerrada e a análise falharia; com eles o

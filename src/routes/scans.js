@@ -18,6 +18,9 @@ import {
   filterMessages,
   summarizeMessages,
   MESSAGE_FILTER_KEYS,
+  filterTeams,
+  summarizeTeams,
+  TEAMS_FILTER_KEYS,
   applyDeletions,
   deletionTotals,
   summarizeRetention,
@@ -35,6 +38,8 @@ import { PROJECT_ROOT } from '../config.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
 import { exportMailXlsx, exportMailCsv, exportMailHtml } from '../report/mail-exports.js';
 import { exportAccountsXlsx, exportAccountsCsv, exportAccountsHtml, exportMessagesXlsx, exportMessagesCsv, exportMessagesHtml } from '../report/listing-exports.js';
+import { exportTeamsXlsx, exportTeamsCsv, exportTeamsHtml } from '../report/teams-exports.js';
+import { TeamsConnector } from '../teams/connector.js';
 import { RETENTION_EXPORTS } from '../report/retention-exports.js';
 import { TYPE_EXPORTS } from '../report/type-exports.js';
 import { fileDate } from '../retention/policy.js';
@@ -109,11 +114,28 @@ const MODELS = {
     csv: exportMessagesCsv,
     html: exportMessagesHtml,
   },
+  teams: {
+    keys: TEAMS_FILTER_KEYS,
+    filter: filterTeams,
+    summarize: summarizeTeams,
+    options: (records) => {
+      const all = summarizeTeams(records);
+      return {
+        terms: [...new Set(all.byTerm.map((t) => t.term))].sort(byName),
+        teams: all.byTeam.map((t) => ({ value: t.teamId, label: t.team })).sort((a, b) => byName(a.label, b.label)),
+        senders: all.bySender.filter((s) => s.sender).slice(0, 500).map((s) => ({ value: s.sender, label: s.label })).sort((a, b) => byName(a.label, b.label)),
+      };
+    },
+    xlsx: exportTeamsXlsx,
+    csv: exportTeamsCsv,
+    html: exportTeamsHtml,
+  },
 };
 
 const modelOf = (scan) => {
   if (scan.listing?.kind === 'directory') return MODELS.accounts;
   if (scan.listing?.kind === 'messages') return MODELS.messages;
+  if (scan.kind === 'teams') return MODELS.teams;
   return scan.kind === 'mail' ? MODELS.mail : MODELS.files;
 };
 
@@ -212,7 +234,7 @@ function mailboxFor(source, record) {
   return { address: record.mailbox, name: record.mailboxName || '', ...(box?.login ? { login: box.login } : {}) };
 }
 
-const METHOD_TEXT = { permanent: 'exclusão definitiva', trash: 'mover para a lixeira', file: 'exclusão definitiva' };
+const METHOD_TEXT = { permanent: 'exclusão definitiva', trash: 'mover para a lixeira', file: 'exclusão definitiva', teams: 'exclusão no Teams (recuperável)' };
 const EXCLUDED_NOW = (repo) => `O arquivo está numa pasta (ou tem um nome) que o repositório "${repo.name}" passou a ignorar: ele não é excluído pelo relatório.`;
 
 /**
@@ -276,6 +298,14 @@ export function scansRouter({ store, manager, endpoints = {} }) {
    * repositório/conexão saiu do cadastro, 'not-allowed' sem "Permitir exclusão" }).
    */
   const deletionTarget = (scan, record, memo = null) => {
+    // Teams: só as mensagens de canal podem ser excluídas (softDelete); os chats, não (pelo Graph).
+    if (scan.kind === 'teams') {
+      if (record.scopeKind !== 'channel') return { blocked: 'chat' };
+      const src = store.getMailSource(record.sourceId);
+      if (!src || src.type !== 'graph') return { blocked: 'removed' };
+      if (!src.allowDelete) return { blocked: 'not-allowed' };
+      return { method: 'teams' };
+    }
     const target = scan.kind === 'mail' ? store.getMailSource(record.sourceId) : store.getRepository(record.repositoryId);
     if (!target) return { blocked: 'removed' };
     if (scan.kind !== 'mail' && cloudChanged(record, target)) return { blocked: 'changed' };
@@ -313,7 +343,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
   };
 
   router.get('/', (req, res) => {
-    const kind = req.query.kind === 'mail' || req.query.kind === 'files' ? req.query.kind : '';
+    const kind = ['mail', 'files', 'teams'].includes(req.query.kind) ? req.query.kind : '';
     // As listagens de e-mail (somente leitura) têm a própria seção: listing=only traz só elas; por
     // padrão elas ficam de fora das listas de análises.
     const onlyListings = req.query.listing === 'only';
@@ -369,7 +399,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     // Arquivos do recorte que ainda podem ser excluídos em lote, pelo cadastro atual de cada repositório
     // (aproximado: as pastas ignoradas e os locais protegidos são conferidos na prévia).
     let bulkCandidates = 0;
-    if (scan.kind !== 'mail' && !manager.isActive(scan.id)) {
+    if (scan.kind === 'files' && !manager.isActive(scan.id)) {
       const allowed = new Map();
       for (const r of list) {
         if (r.deletion?.status === 'deleted' || r.deletion?.status === 'missing') continue;
@@ -525,6 +555,34 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       } finally {
         await connector.close?.();
       }
+    } else if (scan.kind === 'teams') {
+      if (record.scopeKind !== 'channel') throw new HttpError(400, 'A exclusão de mensagens de chat do Teams não é oferecida pelo Microsoft Graph: exclua pelo próprio Teams.');
+      const source = store.getMailSource(record.sourceId);
+      if (!source || source.type !== 'graph') throw new HttpError(409, 'A conexão Microsoft 365 desta mensagem foi removida ou alterada no cadastro.');
+      if (!source.allowDelete) throw new HttpError(403, `A exclusão não está permitida na conexão "${source.name}". Ative "Permitir exclusão" em Caixas de e-mail.`);
+      method = 'teams';
+      checkMethod(method);
+      label = `da mensagem "${record.subject || '(sem assunto)'}" (${record.folder})`;
+      item = `${record.folder} › ${record.subject || '(sem assunto)'}`;
+      let secrets;
+      try {
+        secrets = store.openMailSecrets(source);
+      } catch (err) {
+        throw new HttpError(409, err.message);
+      }
+      const grantId = source.graph?.account?.grantId;
+      const onRefreshToken = grantId ? (token) => store.saveRefreshToken(source.id, grantId, token) : undefined;
+      const connector = new TeamsConnector({ ...source, secrets, teams: {} }, { signal: AbortSignal.timeout(120000), endpoints, onRefreshToken });
+      try {
+        const conv = { kind: 'channel', teamId: record.teamId, channelId: record.channelId, path: record.folder };
+        const map = await connector.deleteMessages([{ recordId: record.id, messageId: record.messageId, replyTo: record.replyTo || null, conv }], {});
+        const r = map.get(record.id) || { ok: false, error: 'O servidor não confirmou a exclusão.' };
+        result = { status: r.ok ? 'deleted' : r.missing ? 'missing' : 'failed', error: r.ok ? null : r.error, note: r.note };
+      } catch (err) {
+        result = { status: 'failed', error: friendlyError(err) };
+      } finally {
+        await connector.close?.();
+      }
     } else {
       ({ result, method } = await removeFile(scan, record, { force: req.body?.force === true, expectMethod: req.body?.method, signal: AbortSignal.timeout(120000) }));
       label = `do arquivo ${record.path}`;
@@ -532,7 +590,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       if (result.status === 'changed') return res.status(409).json({ error: `${result.error} Confirme para excluir mesmo assim.`, code: 'changed' });
     }
     const event = deletionEvent(record.id, result, { mode: 'manual', method, by, item });
-    const labels = mail ? MAIL_DELETION_LABELS : DELETION_LABELS;
+    const labels = mail || scan.kind === 'teams' ? MAIL_DELETION_LABELS : DELETION_LABELS;
     const outcome = result.status === 'failed' ? `falhou: ${result.error}` : `${labels[result.status].toLowerCase()}${result.note ? ` (${result.note})` : ''}`;
     memo.forget(scan.id);
     try {
@@ -593,7 +651,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
    * ou não encontrados).
    */
   async function bulkTargets(scan, body) {
-    if (scan.kind === 'mail') throw new HttpError(400, 'A exclusão em lote vale para os relatórios de arquivos.');
+    if (scan.kind !== 'files') throw new HttpError(400, 'A exclusão em lote vale para os relatórios de arquivos.');
     let pick;
     if (Array.isArray(body?.ids)) {
       const wanted = new Set(body.ids.map(Number).filter(Number.isInteger));

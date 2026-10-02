@@ -31,10 +31,19 @@ const KINDS = {
     columns: ['Mensagens verificadas', 'Com ocorrências'],
     values: (s) => [s.stats?.messagesSeen, s.stats?.messagesMatched],
   },
+  teams: {
+    title: 'Análises do Microsoft Teams',
+    sub: 'Cada análise percorre as conversas (canais das equipes e chats) do Microsoft Teams das conexões escolhidas e gera um relatório com as mensagens em que algum termo foi encontrado.',
+    base: '#/teams/analises',
+    empty: 'Nenhuma análise do Teams realizada ainda.',
+    where: (s) => (s.summary?.sources || []).map((r) => r.name).join(', '),
+    columns: ['Mensagens verificadas', 'Com ocorrências'],
+    values: (s) => [s.stats?.messagesSeen, s.stats?.messagesMatched],
+  },
 };
 
 export async function render(root, { props = {} }) {
-  const kind = props.kind === 'mail' ? 'mail' : 'files';
+  const kind = KINDS[props.kind] ? props.kind : 'files';
   const K = KINDS[kind];
   let scans = [];
   let timer = null;

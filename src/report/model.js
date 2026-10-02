@@ -554,6 +554,115 @@ export function summarizeMessages(records) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Microsoft Teams (mensagens de canais e chats)
+
+export const TEAMS_SCOPE_LABELS = { channel: 'Canais de equipes', chat: 'Chats' };
+
+function teamsHaystack(record) {
+  if (!record._search) {
+    record._search = foldText(
+      [record.subject, record.from, record.team, record.channel, record.folder, ...(record.attachments || []).map((a) => a.name), ...record.terms].filter(Boolean).join(' | '),
+    );
+  }
+  return record._search;
+}
+
+const TEAMS_SORTERS = {
+  date: byDate,
+  team: (a, b) => String(a.folder || '').localeCompare(String(b.folder || ''), 'pt-BR') || byDate(a, b),
+  sender: (a, b) => String(a.from || '').localeCompare(String(b.from || ''), 'pt-BR') || byDate(a, b),
+  subject: (a, b) => String(a.subject || '').localeCompare(String(b.subject || ''), 'pt-BR'),
+  occurrences: (a, b) => a.occurrences - b.occurrences,
+  terms: (a, b) => a.terms.length - b.terms.length,
+  size: (a, b) => (a.size || 0) - (b.size || 0),
+};
+
+export const TEAMS_FILTER_KEYS = ['q', 'term', 'scope', 'team', 'sender', 'location', 'deletion', 'sort', 'dir', 'page'];
+
+/** Filtra e ordena as mensagens do Teams. Padrão: mais recentes primeiro. */
+export function filterTeams(records, filters = {}) {
+  const q = filters.q ? foldText(filters.q) : '';
+  let out = records.filter((r) => {
+    if (filters.term && !r.terms.includes(filters.term)) return false;
+    if (filters.scope && r.scopeKind !== filters.scope) return false;
+    if (filters.team && r.teamId !== filters.team) return false;
+    if (filters.sender && (r.from || '') !== filters.sender) return false;
+    if (filters.location && !r.matches.some((m) => m.location === filters.location)) return false;
+    if (filters.deletion && !matchesDeletion(r, filters.deletion)) return false;
+    if (q && !teamsHaystack(r).includes(q)) return false;
+    return true;
+  });
+  const known = Object.hasOwn(TEAMS_SORTERS, filters.sort || '');
+  out = out.slice().sort(known ? TEAMS_SORTERS[filters.sort] : byDate);
+  if (known ? filters.dir === 'desc' : filters.dir !== 'asc') out.reverse();
+  return out;
+}
+
+/** Agregações do relatório do Teams. */
+export function summarizeTeams(records) {
+  const terms = new Map();
+  for (const r of records) {
+    for (const m of r.matches) {
+      let t = terms.get(m.termId);
+      if (!t) {
+        t = { termId: m.termId, term: m.term, list: m.list, kind: m.kind, messages: new Set(), occurrences: 0, inSubject: 0, inBody: 0, inAttachments: 0 };
+        terms.set(m.termId, t);
+      }
+      t.messages.add(r.id);
+      t.occurrences += m.count;
+      if (m.location === 'subject') t.inSubject++;
+      else if (m.location === 'body') t.inBody++;
+      else if (m.location === 'attachment' || m.location === 'attachmentName') t.inAttachments++;
+    }
+  }
+  const byTerm = [...terms.values()]
+    .map(({ messages, ...t }) => ({ ...t, messages: messages.size }))
+    .sort((a, b) => b.messages - a.messages || b.occurrences - a.occurrences);
+
+  const group = (keyFn, make, filter = () => true) => {
+    const map = new Map();
+    for (const r of records) {
+      if (!filter(r)) continue;
+      const k = keyFn(r);
+      if (k === undefined || k === null) continue;
+      let g = map.get(k);
+      if (!g) {
+        g = { ...make(r), messages: 0, occurrences: 0 };
+        map.set(k, g);
+      }
+      g.messages++;
+      g.occurrences += r.occurrences;
+    }
+    return [...map.values()].sort((a, b) => b.messages - a.messages || b.occurrences - a.occurrences);
+  };
+  const locations = Object.fromEntries(['subject', 'body', 'attachmentName', 'attachment'].map((k) => [k, records.filter((r) => r.matches.some((m) => m.location === k)).length]));
+  return {
+    messages: records.length,
+    occurrences: records.reduce((sum, r) => sum + r.occurrences, 0),
+    withAttachments: records.filter((r) => (r.attachments || []).length > 0).length,
+    byTerm,
+    byScope: Object.entries(TEAMS_SCOPE_LABELS)
+      .map(([key, label]) => ({ key, label, messages: records.filter((r) => r.scopeKind === key).length }))
+      .filter((g) => g.messages > 0),
+    byTeam: group(
+      (r) => r.teamId,
+      (r) => ({ teamId: r.teamId, team: r.team }),
+      (r) => r.scopeKind === 'channel' && r.teamId,
+    ),
+    bySender: group(
+      (r) => r.from || '',
+      (r) => ({ sender: r.from || '', label: r.from || '(sem autor)' }),
+    ),
+    bySource: group(
+      (r) => r.sourceId,
+      (r) => ({ sourceId: r.sourceId, source: r.sourceName }),
+    ),
+    byLocation: locations,
+    byStatus: Object.fromEntries(countBy(records, (r) => r.contentStatus || 'none')),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Retenção
 
 /**

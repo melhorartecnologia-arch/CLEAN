@@ -16,6 +16,7 @@ import { PRESETS, VALIDATORS } from './scan/presets.js';
 import { DEFAULT_OPTIONS } from './scan/scanner.js';
 import { DEFAULT_EXCLUDES } from './scan/walker.js';
 import { MAIL_DEFAULT_OPTIONS } from './mail/scanner.js';
+import { TEAMS_DEFAULT_OPTIONS } from './teams/scanner.js';
 import { MAIL_TYPES } from './mail/connectors.js';
 import { CATEGORIES, CUSTOM, DEFAULT_MAX_DELETIONS } from './types/catalog.js';
 
@@ -151,6 +152,7 @@ export function createApp({ store, manager, config, scheduler = new Scheduler({ 
       defaults: DEFAULT_OPTIONS,
       defaultExcludes: DEFAULT_EXCLUDES,
       mailDefaults: MAIL_DEFAULT_OPTIONS,
+      teamsDefaults: TEAMS_DEFAULT_OPTIONS,
       mailTypes: MAIL_TYPES,
       // Busca por tipo: as categorias (na ordem da tela) e o limite padrão de exclusões automáticas.
       fileTypes: {

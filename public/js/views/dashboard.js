@@ -32,7 +32,7 @@ export async function render(root, { ctx }) {
   // Pronto para usar: com locais cadastrados e uma lista com termos (ou uma política de retenção ou
   // uma busca por tipo de arquivo).
   const ready = (repos.length > 0 || sources.length > 0) && (terms > 0 || policies.length > 0 || scans.some((s) => s.fileTypes) || schedules.some((s) => s.purpose === 'types'));
-  const link = (s) => `${s.listing ? '#/email/listagens' : isMail(s) ? '#/email/analises' : '#/analises'}/${s.id}`;
+  const link = (s) => `${s.kind === 'teams' ? '#/teams/analises' : s.listing ? '#/email/listagens' : isMail(s) ? '#/email/analises' : '#/analises'}/${s.id}`;
 
   paint(
     root,

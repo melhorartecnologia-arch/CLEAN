@@ -36,6 +36,11 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   data de criação, departamento) e a **listagem de todas as mensagens de cada caixa** com os dados de
   cada uma (remetente, destinatários, data, assunto, pasta, tamanho) — com relatório, filtros,
   gráficos e exportação.
+- **Microsoft Teams**: procura os termos das listas de referência nas **mensagens dos canais das
+  equipes** (e nas respostas) e nos **chats** (1:1, em grupo e de reunião), no assunto, no corpo e nos
+  **nomes e no conteúdo dos arquivos anexados** (baixados do SharePoint/OneDrive). Usa o mesmo
+  aplicativo Microsoft 365 do e-mail (com as permissões do Teams consentidas pelo administrador). Com
+  a exclusão permitida, remove (softDelete, recuperável) as mensagens de canal encontradas.
 - **OAuth 2.0 da Microsoft** em todas as formas usadas pelo Exchange Online e pelo Outlook.com:
   aplicativo com **segredo do cliente**, aplicativo com **certificado** (gerado pelo próprio CLEAN)
   ou **conta Microsoft conectada** (a pessoa entra com a conta pelo código de dispositivo; a
@@ -71,6 +76,7 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
    - [Google Workspace (Gmail)](#google-workspace-gmail)
    - [Servidores IMAP](#servidores-imap)
    - [Listagens de e-mail (contas e mensagens)](#listagens-de-e-mail-contas-e-mensagens)
+   - [Microsoft Teams](#microsoft-teams)
 9. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
    - [Exclusão em lote pelo relatório](#exclusão-em-lote-pelo-relatório)
 10. [Agendamentos](#agendamentos)
@@ -585,6 +591,49 @@ Cada listagem gera um relatório na tela com filtros e gráficos (por situação
 contas; por caixa, pasta e remetente, no caso das mensagens) e exportação para **Excel**, **CSV**,
 **HTML** e **JSON**. As listagens rodam em segundo plano (como as análises), podem ser canceladas e
 ficam separadas das *Análises de e-mail*, na própria seção.
+
+### Microsoft Teams
+
+O menu **Análises do Teams** procura os termos das listas de referência nas conversas do Microsoft
+Teams da sua organização, pela API Microsoft Graph — do mesmo jeito que a análise de e-mail percorre
+as caixas do Microsoft 365. Cobre:
+
+- **Canais das equipes** — as mensagens dos canais (padrão, privados e compartilhados) e as respostas
+  de cada mensagem;
+- **Chats** — as conversas 1:1, em grupo e de reunião.
+
+Em cada mensagem, procura no **assunto**, no **corpo** (o HTML é convertido em texto) e nos **nomes e
+no conteúdo dos arquivos anexados** (que ficam no SharePoint/OneDrive e são baixados sob demanda,
+respeitando o tamanho máximo). O relatório mostra a equipe/canal ou o chat, o autor, a data e os
+trechos encontrados, com filtros e gráficos (por termo, equipe, autor e parte da mensagem) e
+exportação para Excel, CSV, HTML e JSON.
+
+**Conexão.** O Teams usa a **mesma conexão Microsoft 365** cadastrada em *Caixas de e-mail* (o mesmo
+registro de aplicativo no Microsoft Entra ID) — não é preciso cadastrar nada novo, apenas escolher a
+conexão ao criar a análise. O aplicativo precisa das permissões do Teams, do **tipo Aplicativo** e com
+**consentimento do administrador**:
+
+| Permissão | Para quê |
+| --- | --- |
+| `Team.ReadBasic.All` | listar as equipes |
+| `Channel.ReadBasic.All` | listar os canais |
+| `ChannelMessage.Read.All` | ler as mensagens dos canais |
+| `Chat.Read.All` | ler os chats e as mensagens dos chats |
+| `User.Read.All` | listar os usuários (para enumerar os chats) |
+| `ChannelMessage.ReadWrite.All` | apenas se for excluir mensagens de canal |
+
+Uma conexão com **conta Microsoft conectada** (entrada pelo código de dispositivo) vê apenas as
+conversas de quem entrou e não recebe os escopos do Teams: para varrer todo o locatário, use um
+aplicativo com **segredo do cliente** ou **certificado**.
+
+**Escopo.** "Todo o locatário" varre todas as equipes e, nos chats, todos os usuários; "Apenas uma
+lista" limita às equipes (pelo identificador) e aos usuários (pelo e-mail) informados.
+
+**Exclusão.** Com "Permitir exclusão" ativado na conexão e a confirmação digitada, a opção *Analisar e
+excluir* remove as mensagens de **canal** encontradas por **softDelete** (ficam recuperáveis por um
+administrador por um período) — item a item pelo relatório ou automaticamente ao fim de cada conversa.
+A exclusão de mensagens de **chat** não é oferecida pelo Microsoft Graph com permissões de aplicativo;
+nesses casos, o relatório indica que a exclusão deve ser feita pelo próprio Teams.
 
 ## Exclusão dos itens encontrados
 
@@ -1111,6 +1160,9 @@ src/
     scanner.js                             análise das caixas, o raio-x e as listagens (contas e mensagens), na mesma worker thread
     graph.js, gmail.js, imap.js            conectores Microsoft 365, Google Workspace e IMAP (varredura, catálogo de contas e exclusão)
     http.js, common.js                     requisições com novas tentativas, pastas e caixas ignoradas
+  teams/
+    connector.js                           conector do Microsoft Teams (equipes, canais, chats, anexos no SharePoint e softDelete)
+    scanner.js                             motor da análise do Teams (na mesma worker thread), reaproveitando o Matcher e os extratores
   types/
     catalog.js                             busca por tipo: categorias, extensões e validação
     signature.js                           tipo real pelos primeiros bytes (arquivos renomeados)

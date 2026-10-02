@@ -2,6 +2,7 @@
 import { Worker } from 'node:worker_threads';
 import { newStats, DEFAULT_OPTIONS } from './scanner.js';
 import { newMailStats, newDirectoryStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
+import { newTeamsStats, TEAMS_DEFAULT_OPTIONS } from '../teams/scanner.js';
 import { cleanPaths, keptPaths, isCloudRepo, deletionScope, mailDeletionScope } from './delete.js';
 import { keptCloud } from '../cloud/drives.js';
 import { sanitizeRetention, cutoffDate } from '../retention/policy.js';
@@ -58,6 +59,58 @@ export function sanitizeMailOptions(input) {
   return o;
 }
 
+const TEAMS_CHECKS = ['checkSubject', 'checkBody', 'checkAttachmentNames', 'checkAttachments'];
+
+/** Normaliza as opções de busca/desempenho de uma análise do Teams. */
+export function sanitizeTeamsOptions(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) input = {};
+  const o = { ...TEAMS_DEFAULT_OPTIONS };
+  for (const k of [...TEAMS_CHECKS, 'scanChannels', 'scanChats', 'includeReplies']) if (input[k] !== undefined) o[k] = Boolean(input[k]);
+  o.deleteMatches = input.deleteMatches === true;
+  const size = Number(input.maxMessageSizeMB);
+  if (Number.isFinite(size) && size > 0) o.maxMessageSizeMB = Math.min(size, 500);
+  const concurrency = Number(input.concurrency);
+  if (Number.isInteger(concurrency) && concurrency > 0) o.concurrency = Math.min(concurrency, 8);
+  if (input.receivedAfter) {
+    const d = new Date(input.receivedAfter);
+    if (Number.isNaN(d.getTime())) throw new ScanError('Data "a partir de" inválida.');
+    o.receivedAfter = d.toISOString();
+  }
+  if (!o.scanChannels && !o.scanChats) throw new ScanError('Escolha o que varrer no Teams: canais, chats ou os dois.');
+  if (!TEAMS_CHECKS.some((k) => o[k])) throw new ScanError('Selecione ao menos uma verificação: assunto, corpo ou anexos.');
+  return o;
+}
+
+const strList = (value, max = 1000) =>
+  (Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[\n,;]+/) : [])
+    .map((v) => String(v).trim())
+    .filter(Boolean)
+    .slice(0, max);
+
+/** Escopo da análise do Teams (quais equipes/usuários), combinado às opções de busca. */
+export function sanitizeTeamsScope(input, opts) {
+  const i = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const scope = i.scope === 'list' ? 'list' : 'all';
+  const teams = {
+    scope,
+    scanChannels: opts.scanChannels,
+    scanChats: opts.scanChats,
+    includeReplies: opts.includeReplies,
+    teamIds: scope === 'list' ? strList(i.teamIds) : [],
+    userEmails: scope === 'list' ? strList(i.userEmails) : [],
+    excludeTeams: strList(i.excludeTeams),
+    excludeChannels: strList(i.excludeChannels),
+    excludeUsers: strList(i.excludeUsers),
+  };
+  if (scope === 'list' && opts.scanChannels && teams.teamIds.length === 0 && !opts.scanChats) {
+    throw new ScanError('No escopo por lista, informe ao menos uma equipe (ou inclua os chats e informe usuários).');
+  }
+  if (scope === 'list' && opts.scanChats && teams.userEmails.length === 0 && !opts.scanChannels) {
+    throw new ScanError('No escopo por lista, informe ao menos um usuário para os chats (ou inclua os canais e informe equipes).');
+  }
+  return teams;
+}
+
 /** Normaliza o tipo de uma listagem de e-mail: catálogo de contas ('directory') ou mensagens ('messages'). */
 export function sanitizeListing(input) {
   const kind = input?.kind === 'directory' ? 'directory' : input?.kind === 'messages' ? 'messages' : null;
@@ -95,6 +148,12 @@ function repoSnapshot(repo) {
 function mailSnapshot(source) {
   const { id, name, type, scope, mailboxes, excludeMailboxes, excludeFolders, graph, gmail, imap, allowDelete, deleteMode } = source;
   return { id, name, type, scope, mailboxes, excludeMailboxes, excludeFolders, graph, gmail, imap, allowDelete: Boolean(allowDelete), deleteMode: deleteMode === 'trash' ? 'trash' : 'permanent' };
+}
+
+/** Conexão Microsoft 365 usada pela análise do Teams (sem os segredos; só as credenciais do Graph). */
+function teamsSnapshot(source) {
+  const { id, name, type, graph, allowDelete } = source;
+  return { id, name, type, graph, allowDelete: Boolean(allowDelete) };
 }
 
 /**
@@ -193,6 +252,7 @@ export class ScanManager {
     if (body?.retention) return this.#startRetention(body, origin);
     if (body?.fileTypes) return this.#startTypes(body, origin);
     if (body?.listing) return this.#startListing(body, origin);
+    if (body?.kind === 'teams') return this.#startTeams(body, origin);
     if (body?.kind === 'mail') return this.#startMail(body, origin);
     const { name, repositoryIds, listIds, options } = body || {};
     const repositories = ids(repositoryIds).map((id) => this.store.getRepository(id));
@@ -252,6 +312,50 @@ export class ScanManager {
       error: null,
     });
     await this.store.writeScanConfig(scan.id, { kind: 'mail', sources: sources.map(mailSnapshot), terms, options: opts });
+    this.queue.push(scan.id);
+    this.#pump();
+    return scan;
+  }
+
+  /**
+   * Análise do Microsoft Teams: procura os termos nas mensagens dos canais e dos chats das conexões
+   * Microsoft 365 escolhidas (reaproveitando as credenciais do Graph). Com a exclusão permitida,
+   * remove (softDelete, recuperável) as mensagens de canal encontradas.
+   */
+  async #startTeams(body, origin) {
+    const { name, sourceIds, listIds, options } = body;
+    const sources = ids(sourceIds).map((id) => this.store.getMailSource(id));
+    if (sources.length === 0 || sources.some((s) => !s)) throw new ScanError('Selecione conexões Microsoft 365 válidas.');
+    const nonGraph = sources.filter((s) => s.type !== 'graph');
+    if (nonGraph.length) {
+      throw new ScanError(`A análise do Teams usa conexões Microsoft 365 (Graph): ${nonGraph.map((s) => `"${s.name}"`).join(', ')} ${nonGraph.length === 1 ? 'não é desse tipo' : 'não são desse tipo'}.`);
+    }
+    const { lists, terms } = this.#terms(listIds);
+    const opts = sanitizeTeamsOptions(options);
+    const teams = sanitizeTeamsScope(body.teams, opts);
+    checkDeletion(opts, body, sources, 'da conexão');
+    const scan = this.store.createScan({
+      kind: 'teams',
+      name: this.#scanName(name, 'Análise do Teams'),
+      status: 'queued',
+      sourceIds: sources.map((s) => s.id),
+      listIds: lists.map((l) => l.id),
+      options: opts,
+      teams,
+      ...origin,
+      summary: {
+        sources: sources.map((s) => ({ id: s.id, name: s.name, type: s.type })),
+        lists: lists.map((l) => ({ id: l.id, name: l.name, termCount: (l.terms || []).length })),
+        termCount: terms.length,
+        teams: { scope: teams.scope, scanChannels: teams.scanChannels, scanChats: teams.scanChats },
+      },
+      stats: newTeamsStats(sources.length),
+      current: null,
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+    });
+    await this.store.writeScanConfig(scan.id, { kind: 'teams', sources: sources.map(teamsSnapshot), terms, options: opts, teams });
     this.queue.push(scan.id);
     this.#pump();
     return scan;
@@ -399,6 +503,23 @@ export class ScanManager {
       this.store.updateScan(id, { options: { ...scan.options, deleteMatches: false }, deletionBlocked: blocked });
     }
     const extra = { startedBy: scan?.startedBy || null, protect: cleanPaths({ dataDir: this.store.dataDir, appDir: PROJECT_ROOT }) };
+    if (config.kind === 'teams') {
+      const sources = config.sources.map((s) => {
+        const current = this.store.getMailSource(s.id);
+        if (!current) throw new ScanError(`A conexão "${s.name}" foi excluída antes do início da análise.`);
+        if (current.type !== 'graph') throw new ScanError(`A conexão "${s.name}" não é mais do tipo Microsoft 365.`);
+        // Como no e-mail: só exclui no mesmo locatário e com a exclusão ainda permitida no cadastro.
+        const reason = !current.allowDelete
+          ? 'a opção "Permitir exclusão" foi desligada'
+          : String(current.graph?.tenantId || '').toLowerCase() !== String(s.graph?.tenantId || '').toLowerCase()
+            ? 'o locatário da conexão foi alterado'
+            : null;
+        const allowDelete = deleting && s.allowDelete && !reason;
+        if (deleting && s.allowDelete && reason) warn(`Exclusão automática desativada para "${s.name}": ${reason} depois que a análise foi criada.`);
+        return { ...teamsSnapshot(current), teams: config.teams, allowDelete, secrets: this.store.openMailSecrets(current) };
+      });
+      return { ...config, options: { ...config.options, deleteMatches: deleting }, sources, endpoints: this.mailEndpoints, ...extra };
+    }
     if (config.kind !== 'mail') {
       const all = this.store.listRepositories();
       const repositories = config.repositories.map((r) => {
