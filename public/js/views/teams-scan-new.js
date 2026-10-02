@@ -146,6 +146,10 @@ export async function render(root, { ctx }) {
     if (sourceIds.length === 0) return toast('Selecione ao menos uma conexão Microsoft 365.', 'error');
     if (listIds.length === 0) return toast('Selecione ao menos uma lista de referência.', 'error');
     if (!on('scanChannels') && !on('scanChats')) return toast('Escolha o que varrer: canais, chats ou os dois.', 'error');
+    if (f.get('scope') === 'list') {
+      if (on('scanChannels') && !String(f.get('teamIds') || '').trim()) return toast('No escopo por lista, informe ao menos uma equipe (ou desmarque "Canais das equipes").', 'error');
+      if (on('scanChats') && !String(f.get('userEmails') || '').trim()) return toast('No escopo por lista, informe ao menos um usuário para os chats (ou desmarque "Chats").', 'error');
+    }
     if (deleting) {
       const blocked = graph.filter((s) => sourceIds.includes(s.id) && !s.allowDelete).map((s) => s.name);
       if (blocked.length) return toast(`A exclusão não está permitida em: ${blocked.join(', ')}. Ative em Caixas de e-mail ou escolha "Somente analisar".`, 'error');

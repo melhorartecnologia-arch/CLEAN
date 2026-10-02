@@ -110,6 +110,7 @@ function scanInfoRows(scan) {
     ['Anexos lidos', s.attachmentsAnalyzed ?? 0],
     ['Erros', s.errors ?? 0],
     ...deletionInfoRows(o, s, { noun: 'Excluídas (softDelete)', gone: 'Já não existiam', changed: 'Mantidas', blocked: scan.deletionBlocked, revoked: scan.deletionRevoked }),
+    ...(o.deleteMatches && s.deleteSkipped ? [['Chats não excluídos (sem suporte do Graph)', s.deleteSkipped]] : []),
   ];
 }
 

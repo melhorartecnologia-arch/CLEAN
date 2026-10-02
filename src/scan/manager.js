@@ -102,11 +102,10 @@ export function sanitizeTeamsScope(input, opts) {
     excludeChannels: strList(i.excludeChannels),
     excludeUsers: strList(i.excludeUsers),
   };
-  if (scope === 'list' && opts.scanChannels && teams.teamIds.length === 0 && !opts.scanChats) {
-    throw new ScanError('No escopo por lista, informe ao menos uma equipe (ou inclua os chats e informe usuários).');
-  }
-  if (scope === 'list' && opts.scanChats && teams.userEmails.length === 0 && !opts.scanChannels) {
-    throw new ScanError('No escopo por lista, informe ao menos um usuário para os chats (ou inclua os canais e informe equipes).');
+  // No escopo por lista, cada parte ativada precisa da sua lista — senão a análise não varreria nada.
+  if (scope === 'list') {
+    if (opts.scanChannels && teams.teamIds.length === 0) throw new ScanError('No escopo por lista, informe ao menos uma equipe (ou desmarque "Canais das equipes").');
+    if (opts.scanChats && teams.userEmails.length === 0) throw new ScanError('No escopo por lista, informe ao menos um usuário para os chats (ou desmarque "Chats").');
   }
   return teams;
 }

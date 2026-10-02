@@ -275,3 +275,23 @@ test('API: análise do Teams completa, relatório, exportações e exclusão man
     await app.close();
   }
 });
+
+test('API: escopo por lista sem equipes/usuários é recusado (não varre nada em silêncio)', async () => {
+  const app = await startApp();
+  try {
+    const source = await app.api('POST', '/api/mail-sources', { name: 'M365', type: 'graph', scope: 'all', graph: { tenantId: GRAPH_TENANT, clientId: GRAPH_CLIENT, clientSecret: GRAPH_SECRET } });
+    const list = await app.api('POST', '/api/lists', { name: 'L', terms: [{ type: 'text', value: 'x' }] });
+    const common = { kind: 'teams', sourceIds: [source.data.id], listIds: [list.data.id] };
+    const noTeams = await app.api('POST', '/api/scans', { ...common, teams: { scope: 'list', teamIds: '', userEmails: '' }, options: { scanChannels: true, scanChats: true } });
+    assert.equal(noTeams.status, 400);
+    assert.match(noTeams.data.error, /informe ao menos uma equipe/i);
+    const noUsers = await app.api('POST', '/api/scans', { ...common, teams: { scope: 'list', teamIds: 't1', userEmails: '' }, options: { scanChannels: true, scanChats: true } });
+    assert.equal(noUsers.status, 400);
+    assert.match(noUsers.data.error, /informe ao menos um usuário/i);
+    // Só canais, com a equipe informada: aceito.
+    const ok = await app.api('POST', '/api/scans', { ...common, teams: { scope: 'list', teamIds: 't1', userEmails: '' }, options: { scanChannels: true, scanChats: false } });
+    assert.equal(ok.status, 201);
+  } finally {
+    await app.close();
+  }
+});

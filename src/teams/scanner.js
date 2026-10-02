@@ -8,6 +8,7 @@ import { extractBuffer, DEFAULT_LIMITS } from '../scan/extractors/index.js';
 import { friendlyError, withTimeout } from '../scan/errors.js';
 import { deletionEvent } from '../scan/delete.js';
 import { validDate } from '../mail/common.js';
+import { pool } from '../mail/http.js';
 import { TeamsConnector } from './connector.js';
 
 const MESSAGE_TIMEOUT = 5 * 60 * 1000;
@@ -208,12 +209,17 @@ export class TeamsScanner {
   async scanConversation(connector, source, conv) {
     this.current = { source: source.name, mailbox: conv.path, folder: conv.path, path: conv.path };
     this.pendingDeletes = [];
+    // Mensagens processadas em paralelo (o custo está em baixar e ler os anexos), respeitando o limite.
+    const concurrency = Math.min(Math.max(1, Number(this.options.concurrency) || 4), 8);
     try {
-      for await (const item of connector.messages(conv, { since: this.since })) {
-        if (this.cancelled) break;
+      const items = connector.messages(conv, { since: this.since });
+      const run = pool(items, concurrency, async (item) => {
+        if (this.cancelled) return undefined;
         await this.processMessage(connector, source, conv, item);
         this.progress();
-      }
+        return undefined;
+      });
+      for await (const _ of run) if (this.cancelled) break; // eslint-disable-line no-unused-vars
     } catch (err) {
       if (this.cancelled) return;
       this.error(`${source.name} › ${conv.path}`, err);
@@ -344,6 +350,8 @@ export class TeamsScanner {
       }
     }
     if (this.cancelled) return;
+    // A exclusão foi desligada no cadastro durante a análise: as que não foram tentadas ficam claras.
+    if (!failure && !source.allowDelete) failure = 'A exclusão foi desativada no cadastro da conexão durante a análise.';
     for (const recordId of [...byId.keys()]) record(recordId, { ok: false, error: failure || 'O servidor não confirmou a exclusão.' });
     this.progress(true);
   }
