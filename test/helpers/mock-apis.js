@@ -214,6 +214,11 @@ function teamsApi({ req, res, path, graph, json }) {
     res.end();
     return true;
   }
+  m = /^\/users\/([^/]+)\/joinedTeams$/.exec(path);
+  if (m) {
+    const joined = data.joinedTeams?.[m[1]] || data.teams.map((t) => t.id);
+    return json(res, 200, { value: data.teams.filter((t) => joined.includes(t.id)).map((t) => ({ id: t.id, displayName: t.displayName })) }), true;
+  }
   m = /^\/users\/([^/]+)\/chats$/.exec(path);
   if (m) {
     const ids = data.chats?.[m[1]] || [];

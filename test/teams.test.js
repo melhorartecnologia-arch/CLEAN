@@ -276,6 +276,50 @@ test('API: análise do Teams completa, relatório, exportações e exclusão man
   }
 });
 
+test('API: visualizador ao vivo — resolver usuário, conversas, mensagens e respostas', async () => {
+  const app = await startApp();
+  try {
+    const source = await app.api('POST', '/api/mail-sources', { name: 'Microsoft 365', type: 'graph', scope: 'all', graph: { tenantId: GRAPH_TENANT, clientId: GRAPH_CLIENT, clientSecret: GRAPH_SECRET } });
+    const sid = source.data.id;
+
+    const user = await app.api('GET', `/api/teams-live/${sid}/user?address=ana@contoso.com`);
+    assert.equal(user.status, 200);
+    assert.equal(user.data.user.id, 'u-ana');
+    assert.equal(user.data.user.address, 'ana@contoso.com');
+
+    const notFound = await app.api('GET', `/api/teams-live/${sid}/user?address=ninguem@contoso.com`);
+    assert.equal(notFound.status, 404);
+
+    const conv = await app.api('GET', `/api/teams-live/${sid}/conversations?userId=u-ana`);
+    assert.equal(conv.status, 200);
+    assert.deepEqual(conv.data.chats.map((c) => c.id), ['chat1']);
+    assert.ok(conv.data.chats[0].label.includes('Ana') || conv.data.chats[0].label.includes('Bia'));
+    assert.deepEqual(conv.data.teams.map((t) => t.name), ['Engenharia']);
+    assert.deepEqual(conv.data.teams[0].channels.map((c) => c.name).sort(), ['Aleatório', 'Geral']);
+
+    const chatMsgs = await app.api('GET', `/api/teams-live/${sid}/messages?kind=chat&chatId=chat1`);
+    assert.equal(chatMsgs.status, 200);
+    assert.deepEqual(chatMsgs.data.items.map((m) => m.id), ['cm1']);
+    assert.match(chatMsgs.data.items[0].text, /confidencial/);
+
+    const t1 = conv.data.teams[0].id;
+    const c1 = conv.data.teams[0].channels.find((c) => c.name === 'Geral').id;
+    const chanMsgs = await app.api('GET', `/api/teams-live/${sid}/messages?kind=channel&teamId=${t1}&channelId=${c1}`);
+    assert.deepEqual(chanMsgs.data.items.map((m) => m.id).sort(), ['m1', 'm2'], 'mensagens raiz; a de sistema é ignorada');
+
+    const replies = await app.api('GET', `/api/teams-live/${sid}/replies?teamId=${t1}&channelId=${c1}&messageId=m1`);
+    assert.deepEqual(replies.data.items.map((m) => m.id), ['r1']);
+    assert.match(replies.data.items[0].text, /529\.982\.247-25/);
+
+    // Somente leitura: nenhuma resposta vaza segredo e nada é gravado (sem análise criada).
+    assert.ok(!JSON.stringify([user.data, conv.data, chatMsgs.data]).includes(GRAPH_SECRET));
+    const scans = await app.api('GET', '/api/scans');
+    assert.equal(scans.data.length, 0, 'o visualizador ao vivo não cria análises');
+  } finally {
+    await app.close();
+  }
+});
+
 test('API: escopo por lista sem equipes/usuários é recusado (não varre nada em silêncio)', async () => {
   const app = await startApp();
   try {
@@ -291,6 +335,36 @@ test('API: escopo por lista sem equipes/usuários é recusado (não varre nada e
     // Só canais, com a equipe informada: aceito.
     const ok = await app.api('POST', '/api/scans', { ...common, teams: { scope: 'list', teamIds: 't1', userEmails: '' }, options: { scanChannels: true, scanChats: false } });
     assert.equal(ok.status, 201);
+  } finally {
+    await app.close();
+  }
+});
+
+test('API: visualizador ao vivo — validações e proteção de paginação (SSRF)', async () => {
+  const app = await startApp();
+  try {
+    const source = await app.api('POST', '/api/mail-sources', { name: 'Microsoft 365', type: 'graph', scope: 'all', graph: { tenantId: GRAPH_TENANT, clientId: GRAPH_CLIENT, clientSecret: GRAPH_SECRET } });
+    const sid = source.data.id;
+
+    // Conexão inexistente: 404.
+    const missing = await app.api('GET', '/api/teams-live/nao-existe/user?address=ana@contoso.com');
+    assert.equal(missing.status, 404);
+
+    // Parâmetros obrigatórios.
+    assert.equal((await app.api('GET', `/api/teams-live/${sid}/user`)).status, 400);
+    assert.equal((await app.api('GET', `/api/teams-live/${sid}/conversations`)).status, 400);
+    assert.equal((await app.api('GET', `/api/teams-live/${sid}/messages?kind=disco`)).status, 400);
+    assert.equal((await app.api('GET', `/api/teams-live/${sid}/messages?kind=channel&teamId=t1`)).status, 400);
+
+    // Proteção SSRF: um token de continuação que não é um nextLink do Graph é recusado (400) e
+    // nunca é usado para buscar outro endereço.
+    const evil = encodeURIComponent('http://169.254.169.254/latest/meta-data/');
+    const badChats = await app.api('GET', `/api/teams-live/${sid}/chats?userId=u-ana&next=${evil}`);
+    assert.equal(badChats.status, 400);
+    assert.match(badChats.data.error, /pagina[çc][ãa]o inv[áa]lida/i);
+    const badMsgs = await app.api('GET', `/api/teams-live/${sid}/messages?kind=chat&chatId=chat1&next=${evil}`);
+    assert.equal(badMsgs.status, 400);
+    assert.match(badMsgs.data.error, /pagina[çc][ãa]o inv[áa]lida/i);
   } finally {
     await app.close();
   }

@@ -41,6 +41,10 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   **nomes e no conteúdo dos arquivos anexados** (baixados do SharePoint/OneDrive). Usa o mesmo
   aplicativo Microsoft 365 do e-mail (com as permissões do Teams consentidas pelo administrador). Com
   a exclusão permitida, remove (softDelete, recuperável) as mensagens de canal encontradas.
+- **Teams ao vivo** (somente leitura): lê as conversas de um usuário — os **chats** dele e os
+  **canais das equipes** de que participa — direto do Microsoft 365, **sob demanda** (botões
+  *Atualizar* e *Carregar mais*), sem procurar termos, sem excluir e sem gravar nada. Útil para
+  conferir rapidamente o que uma pessoa trocou no Teams antes de decidir por uma análise.
 - **OAuth 2.0 da Microsoft** em todas as formas usadas pelo Exchange Online e pelo Outlook.com:
   aplicativo com **segredo do cliente**, aplicativo com **certificado** (gerado pelo próprio CLEAN)
   ou **conta Microsoft conectada** (a pessoa entra com a conta pelo código de dispositivo; a
@@ -77,6 +81,7 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
    - [Servidores IMAP](#servidores-imap)
    - [Listagens de e-mail (contas e mensagens)](#listagens-de-e-mail-contas-e-mensagens)
    - [Microsoft Teams](#microsoft-teams)
+   - [Teams ao vivo (visualizador por usuário)](#teams-ao-vivo-visualizador-por-usuário)
 9. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
    - [Exclusão em lote pelo relatório](#exclusão-em-lote-pelo-relatório)
 10. [Agendamentos](#agendamentos)
@@ -635,6 +640,28 @@ administrador por um período) — item a item pelo relatório ou automaticament
 A exclusão de mensagens de **chat** não é oferecida pelo Microsoft Graph com permissões de aplicativo;
 nesses casos, o relatório indica que a exclusão deve ser feita pelo próprio Teams.
 
+### Teams ao vivo (visualizador por usuário)
+
+O menu **Teams ao vivo** é um visualizador **somente leitura** das conversas de um usuário: você
+escolhe a conexão Microsoft 365 e informa o e-mail da pessoa, e o CLEAN lê — **na hora, direto do
+Microsoft Graph** — os **chats** dela (1:1, em grupo e de reunião) e os **canais das equipes** de que
+ela participa. Ao contrário das *Análises do Teams*, ele **não procura termos**, **não exclui** nada e
+**não grava** nenhum resultado; serve para conferir rapidamente o que alguém trocou no Teams.
+
+A tela tem duas colunas: à esquerda, a lista das conversas (os chats e, por equipe, os canais); à
+direita, as mensagens da conversa escolhida, as mais recentes primeiro, com o autor, a data, o texto,
+os anexos (com link para o arquivo no SharePoint/OneDrive) e, nas mensagens de canal, as **respostas**
+sob demanda (*Ver respostas*). O carregamento é **sob demanda**: os botões *Atualizar* (recarrega a
+conversa), *Carregar mais antigas* e *Carregar mais chats* buscam novas páginas só quando você pede —
+não há atualização automática.
+
+Usa a **mesma conexão e as mesmas permissões** das *Análises do Teams* (apenas de leitura:
+`Chat.Read.All`, `ChannelMessage.Read.All`, `Team.ReadBasic.All`, `Channel.ReadBasic.All` e
+`User.Read.All`). Uma conexão com **conta conectada** só enxerga as conversas de quem entrou; para ler
+qualquer usuário, use um aplicativo com **segredo do cliente** ou **certificado**. Os segredos da
+conexão continuam no servidor (decifrados só no momento de cada requisição) e nunca vão para o
+navegador.
+
 ## Exclusão dos itens encontrados
 
 Além de só analisar, o CLEAN pode **excluir** os arquivos e as mensagens de e-mail em que algum
@@ -1139,7 +1166,7 @@ Estrutura:
 src/
   server.js, app.js, config.js, store.js   servidor, rotas e persistência (JSON/NDJSON)
   secrets.js                               cifragem das credenciais (caixas de e-mail, OneDrive e SharePoint)
-  routes/                                  API REST (/api/repositories, /api/lists, /api/mail-sources, /api/scans, /api/schedules)
+  routes/                                  API REST (/api/repositories, /api/lists, /api/mail-sources, /api/teams-live, /api/scans, /api/schedules)
   schedule/
     recurrence.js                          regras de recorrência: validação, próximas execuções e descrição
     scheduler.js                           agendador: horários, sobreposição, horários perdidos, período e retenção
@@ -1161,7 +1188,7 @@ src/
     graph.js, gmail.js, imap.js            conectores Microsoft 365, Google Workspace e IMAP (varredura, catálogo de contas e exclusão)
     http.js, common.js                     requisições com novas tentativas, pastas e caixas ignoradas
   teams/
-    connector.js                           conector do Microsoft Teams (equipes, canais, chats, anexos no SharePoint e softDelete)
+    connector.js                           conector do Microsoft Teams (equipes, canais, chats, anexos no SharePoint, softDelete e leitura ao vivo por usuário)
     scanner.js                             motor da análise do Teams (na mesma worker thread), reaproveitando o Matcher e os extratores
   types/
     catalog.js                             busca por tipo: categorias, extensões e validação

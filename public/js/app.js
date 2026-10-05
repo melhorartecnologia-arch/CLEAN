@@ -15,6 +15,7 @@ import * as mailScanNew from './views/mail-scan-new.js';
 import * as mailListings from './views/mail-listings.js';
 import * as mailListingNew from './views/mail-listing-new.js';
 import * as teamsScanNew from './views/teams-scan-new.js';
+import * as teamsLive from './views/teams-live.js';
 import * as schedules from './views/schedules.js';
 import * as scheduleEdit from './views/schedule-edit.js';
 import * as retention from './views/retention.js';
@@ -37,6 +38,7 @@ const ROUTES = [
   [/^\/teams\/analises$/, scans, 'teams-analises', { kind: 'teams' }],
   [/^\/teams\/analises\/nova$/, teamsScanNew, 'teams-analises'],
   [/^\/teams\/analises\/([\w-]+)$/, report, 'teams-analises'],
+  [/^\/teams\/ao-vivo$/, teamsLive, 'teams-ao-vivo'],
   [/^\/listas$/, lists, 'listas'],
   [/^\/listas\/nova$/, listEdit, 'listas'],
   [/^\/listas\/([\w-]+)$/, listEdit, 'listas'],

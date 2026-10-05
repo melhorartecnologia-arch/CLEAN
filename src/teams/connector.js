@@ -259,6 +259,92 @@ export class TeamsConnector extends GraphClient {
     }
   }
 
+  // ----- leitura ao vivo (visualizador de um usuário) -----
+
+  /** Continua de um nextLink do Graph (guarda SSRF: mesmo endereço base) ou monta a primeira página. */
+  pageUrl(next, firstPath) {
+    if (!next) return firstPath;
+    if (!String(next).startsWith(`${this.endpoints.graph}/`)) throw new ApiError('Paginação inválida.', { status: 400 });
+    return next;
+  }
+
+  /** Resolve um usuário pelo e-mail, nome de logon ou id. */
+  async findUser(address) {
+    const u = await this.resolveUser({ address }, { notFound: `Usuário ${address} não encontrado no Microsoft 365.` });
+    return { id: u.id, name: u.name || '', mail: u.mail || '', upn: u.upn || '', address: u.mail || u.upn || address };
+  }
+
+  /** Uma mensagem no formato do visualizador (sem baixar anexos; só os nomes). */
+  liveMessage(m, extra = {}) {
+    const from = m.from?.user?.displayName || (m.from?.application?.displayName ? `${m.from.application.displayName} (aplicativo)` : '') || '';
+    const html = (m.body?.contentType || '').toLowerCase() === 'html';
+    return {
+      id: m.id,
+      from,
+      text: html ? htmlToText(m.body?.content || '') : m.body?.content || '',
+      subject: m.subject || '',
+      date: m.createdDateTime || null,
+      edited: m.lastEditedDateTime && m.lastEditedDateTime !== m.createdDateTime ? m.lastEditedDateTime : null,
+      attachments: (m.attachments || []).map((a) => ({ name: a.name || a.id, contentType: a.contentType || '', url: /^https:\/\//i.test(a.contentUrl || '') ? a.contentUrl : '' })),
+      webUrl: /^https:\/\//i.test(m.webUrl || '') ? m.webUrl : null,
+      ...extra,
+    };
+  }
+
+  /** Só mensagens de verdade (não as de sistema nem as apagadas). */
+  static real(m) {
+    return m && m.messageType === 'message' && !m.deletedDateTime;
+  }
+
+  /** Uma página dos chats do usuário (com participantes e última atividade). */
+  async userChatsPage(userId, next = null) {
+    const page = await this.api(this.pageUrl(next, `/users/${enc(userId)}/chats?$expand=members&$top=20`));
+    const items = (page?.value || []).map((c) => {
+      const members = (c.members || []).map((m) => ({ displayName: m.displayName || '', email: m.email || '' }));
+      return { id: c.id, kind: 'chat', chatType: c.chatType || 'group', topic: c.topic || '', members, lastUpdated: c.lastUpdatedDateTime || null, label: chatLabel({ topic: c.topic, chatType: c.chatType, members }) };
+    });
+    return { items, next: this.next(page) };
+  }
+
+  /** Equipes do usuário (joinedTeams) com os canais de cada uma. */
+  async userTeams(userId) {
+    const teams = [];
+    let url = `/users/${enc(userId)}/joinedTeams?$select=id,displayName&$top=100`;
+    while (url) {
+      const page = await this.api(url);
+      for (const t of page?.value || []) teams.push({ id: t.id, name: t.displayName || '', channels: [] });
+      url = this.next(page);
+    }
+    for (const t of teams) {
+      let curl = `/teams/${enc(t.id)}/channels?$select=id,displayName,membershipType&$top=50`;
+      while (curl) {
+        const cp = await this.api(curl);
+        for (const c of cp?.value || []) t.channels.push({ id: c.id, name: c.displayName || '', membershipType: c.membershipType || 'standard' });
+        curl = this.next(cp);
+      }
+    }
+    return teams;
+  }
+
+  /** Uma página de mensagens de um chat (as mais recentes primeiro, como o Graph entrega). */
+  async chatMessagesPage(chatId, next = null) {
+    const page = await this.api(this.pageUrl(next, `/chats/${enc(chatId)}/messages?$top=20`));
+    return { items: (page?.value || []).filter(TeamsConnector.real).map((m) => this.liveMessage(m)), next: this.next(page) };
+  }
+
+  /** Uma página de mensagens de um canal (mensagens raiz; respostas sob demanda). */
+  async channelMessagesPage(teamId, channelId, next = null) {
+    const page = await this.api(this.pageUrl(next, `/teams/${enc(teamId)}/channels/${enc(channelId)}/messages?$top=20`));
+    const items = (page?.value || []).filter(TeamsConnector.real).map((m) => this.liveMessage(m, { replyCount: Number(m.replies?.['@odata.count'] ?? -1), hasReplies: Number(m.replies?.['@odata.count'] ?? 1) !== 0 }));
+    return { items, next: this.next(page) };
+  }
+
+  /** Uma página de respostas de uma mensagem de canal. */
+  async channelRepliesPage(teamId, channelId, messageId, next = null) {
+    const page = await this.api(this.pageUrl(next, `/teams/${enc(teamId)}/channels/${enc(channelId)}/messages/${enc(messageId)}/replies?$top=20`));
+    return { items: (page?.value || []).filter(TeamsConnector.real).map((m) => this.liveMessage(m)), next: this.next(page) };
+  }
+
   // ----- anexos -----
 
   /**

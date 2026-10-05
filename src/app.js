@@ -9,6 +9,7 @@ import { repositoriesRouter } from './routes/repositories.js';
 import { listsRouter } from './routes/lists.js';
 import { scansRouter } from './routes/scans.js';
 import { mailSourcesRouter } from './routes/mail-sources.js';
+import { teamsLiveRouter } from './routes/teams-live.js';
 import { schedulesRouter } from './routes/schedules.js';
 import { Scheduler } from './schedule/scheduler.js';
 import { HttpError } from './routes/validate.js';
@@ -165,6 +166,7 @@ export function createApp({ store, manager, config, scheduler = new Scheduler({ 
   api.use('/repositories', repositoriesRouter({ store, manager, scheduler, endpoints: config.mailEndpoints }));
   api.use('/lists', listsRouter({ store, scheduler }));
   api.use('/mail-sources', mailSourcesRouter({ store, manager, scheduler, endpoints: config.mailEndpoints }));
+  api.use('/teams-live', teamsLiveRouter({ store, endpoints: config.mailEndpoints }));
   const scans = scansRouter({ store, manager, endpoints: config.mailEndpoints });
   api.use('/scans', scans);
   // Encerramento do servidor: interrompe as exclusões em lote (server.js).

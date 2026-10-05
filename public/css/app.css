@@ -1583,6 +1583,173 @@ dialog::backdrop {
   color: var(--muted);
 }
 
+/* ---------- Teams ao vivo (visualizador) ---------- */
+
+.live {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.live-side {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 10px;
+  max-height: calc(100vh - 150px);
+  overflow: auto;
+  position: sticky;
+  top: 16px;
+}
+.conv-group {
+  padding: 10px 8px 4px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+.conv-group:first-child {
+  padding-top: 2px;
+}
+.conv-empty {
+  padding: 2px 8px 6px;
+}
+.conv-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.conv-item:hover {
+  background: var(--surface-2);
+}
+.conv-item.is-selected {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.conv-label {
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+.conv-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+.conv-more {
+  width: 100%;
+  margin-top: 6px;
+}
+.live-main {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+  min-height: 300px;
+  max-height: calc(100vh - 150px);
+  overflow: auto;
+}
+.live-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-bottom: 4px;
+}
+.live-title {
+  font-size: 16px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.live-members {
+  margin-bottom: 8px;
+}
+.live-order {
+  margin: 0 0 10px;
+}
+.live-foot {
+  margin-top: 14px;
+  text-align: center;
+}
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.msg {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.msg-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 10px;
+}
+.msg-from {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.msg-subject {
+  margin-top: 4px;
+  font-weight: 600;
+}
+.msg-body {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.msg-atts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.msg-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 8px;
+}
+.msg-link {
+  font-size: 13px;
+}
+.link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.replies {
+  margin-top: 10px;
+  padding-left: 14px;
+  border-left: 2px solid var(--line-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.msg.reply {
+  background: var(--surface-2);
+}
+
 /* ---------- Telas pequenas ---------- */
 
 @media (max-width: 1100px) {
@@ -1686,6 +1853,16 @@ dialog::backdrop {
   .log li {
     grid-template-columns: minmax(0, 1fr);
     gap: 0;
+  }
+  .live {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .live-side {
+    position: static;
+    max-height: 320px;
+  }
+  .live-main {
+    max-height: none;
   }
 }
 
