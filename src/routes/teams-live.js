@@ -103,6 +103,44 @@ export function teamsLiveRouter({ store, endpoints = {} }) {
     res.json(page);
   });
 
+  // Busca geral de um termo nas mensagens recentes dos chats e canais do usuário (varredura limitada).
+  router.get('/:id/search', async (req, res) => {
+    const source = graphSource(req.params.id);
+    const userId = String(req.query.userId || '').trim();
+    const q = String(req.query.q || '').trim();
+    if (!userId) throw new HttpError(400, 'Informe o usuário.');
+    if (q.length < 2) throw new HttpError(400, 'Digite ao menos 2 caracteres para a busca.');
+    const data = await live(source, (c) => c.searchMessages(userId, q));
+    res.json(data);
+  });
+
+  // Conteúdo de uma imagem embutida (hosted content) de uma mensagem. Faz proxy com o token no
+  // servidor (o navegador nunca recebe o token) e só serve conteúdo de imagem.
+  router.get('/:id/image', async (req, res) => {
+    const source = graphSource(req.params.id);
+    const messageId = String(req.query.messageId || '').trim();
+    const hostedId = String(req.query.hostedId || '').trim();
+    if (!messageId || !hostedId) throw new HttpError(400, 'Imagem inválida.');
+    const spec = { kind: req.query.kind, messageId, hostedId };
+    if (spec.kind === 'chat') {
+      spec.chatId = String(req.query.chatId || '').trim();
+      if (!spec.chatId) throw new HttpError(400, 'Informe o chat.');
+    } else if (spec.kind === 'channel') {
+      spec.teamId = String(req.query.teamId || '').trim();
+      spec.channelId = String(req.query.channelId || '').trim();
+      spec.replyTo = String(req.query.replyTo || '').trim() || null;
+      if (!spec.teamId || !spec.channelId) throw new HttpError(400, 'Informe a equipe e o canal.');
+    } else {
+      throw new HttpError(400, 'Tipo de conversa inválido.');
+    }
+    const img = await live(source, (c) => c.hostedContent(spec));
+    // Só serve imagem (nunca HTML/script); o resto vira download genérico.
+    const type = /^image\/[\w.+-]+$/i.test(img.contentType || '') ? img.contentType : 'application/octet-stream';
+    res.setHeader('Content-Type', type);
+    res.setHeader('Cache-Control', 'private, max-age=120');
+    res.send(img.data);
+  });
+
   return router;
 }
 

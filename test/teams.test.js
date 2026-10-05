@@ -402,3 +402,78 @@ test('API: visualizador ao vivo — uma equipe sem acesso aos canais não derrub
     await mock.close();
   }
 });
+
+test('API: visualizador ao vivo — imagens embutidas (proxy) e busca geral', async () => {
+  const IMG = Buffer.from('bytes-da-imagem-png', 'utf8');
+  const imgTag = (ids) => `<img src="https://graph.microsoft.com/v1.0/teams/t1/channels/c1/messages/m1/hostedContents/${ids}/$value">`;
+  const graph = {
+    tenant: GRAPH_TENANT,
+    clientId: GRAPH_CLIENT,
+    secret: GRAPH_SECRET,
+    users: [{ id: 'u-ana', mail: 'ana@contoso.com', displayName: 'Ana' }],
+    teamsData: {
+      teams: [
+        {
+          id: 't1',
+          displayName: 'Engenharia',
+          channels: [
+            {
+              id: 'c1',
+              displayName: 'Geral',
+              membershipType: 'standard',
+              messages: [
+                { id: 'm1', from: 'Ana', contentType: 'html', body: `<div>Veja o relatório anual ${imgTag('HC1')}</div>`, createdDateTime: '2026-09-20T10:00:00Z', hostedContents: { HC1: { contentType: 'image/png', content: IMG } } },
+              ],
+            },
+          ],
+        },
+      ],
+      chats: { 'u-ana': ['chat1'] },
+      chatsById: {
+        chat1: {
+          id: 'chat1',
+          chatType: 'oneOnOne',
+          members: [{ displayName: 'Ana', email: 'ana@contoso.com' }, { displayName: 'Bia', email: 'bia@contoso.com' }],
+          messages: [{ id: 'cm1', from: 'Bia', contentType: 'html', body: '<p>Bom dia! Tudo certo com o contrato?</p>', createdDateTime: '2026-09-23T10:00:00Z' }],
+        },
+      },
+    },
+  };
+  const mock = await startMockApis({ graph });
+  const app = await startApp(mock.endpoints);
+  try {
+    const source = await app.api('POST', '/api/mail-sources', { name: 'Microsoft 365', type: 'graph', scope: 'all', graph: { tenantId: GRAPH_TENANT, clientId: GRAPH_CLIENT, clientSecret: GRAPH_SECRET } });
+    const sid = source.data.id;
+
+    // Imagens embutidas: a mensagem do canal expõe o id da imagem (sem a URL do Graph).
+    const chan = await app.api('GET', `/api/teams-live/${sid}/messages?kind=channel&teamId=t1&channelId=c1`);
+    const m1 = chan.data.items.find((x) => x.id === 'm1');
+    assert.deepEqual(m1.images.map((i) => i.hostedId), ['HC1']);
+    assert.ok(!JSON.stringify(chan.data).includes('graph.microsoft.com'), 'a URL do Graph não vaza para o navegador');
+
+    // O proxy serve os bytes com o content-type de imagem (e nada de token).
+    const port = app.srv.address().port;
+    const raw = await fetch(`http://127.0.0.1:${port}/api/teams-live/${sid}/image?kind=channel&teamId=t1&channelId=c1&messageId=m1&hostedId=HC1`, { headers: { 'X-CLEAN': '1' } });
+    assert.equal(raw.status, 200);
+    assert.match(raw.headers.get('content-type') || '', /^image\/png/);
+    assert.ok(Buffer.from(await raw.arrayBuffer()).equals(IMG), 'os bytes da imagem chegam íntegros');
+
+    // Busca geral: acha no chat (contrato) e no canal (relatório, sem acento), ignora o que não existe.
+    const byChat = await app.api('GET', `/api/teams-live/${sid}/search?userId=u-ana&q=${encodeURIComponent('contrato')}`);
+    assert.equal(byChat.status, 200);
+    assert.ok(byChat.data.matches.some((x) => x.id === 'cm1' && x.conv.kind === 'chat'));
+    const byChannel = await app.api('GET', `/api/teams-live/${sid}/search?userId=u-ana&q=relatorio`);
+    assert.ok(byChannel.data.matches.some((x) => x.id === 'm1' && x.conv.kind === 'channel'), 'busca sem acento acha "relatório"');
+    const none = await app.api('GET', `/api/teams-live/${sid}/search?userId=u-ana&q=inexistentexyz`);
+    assert.deepEqual(none.data.matches, []);
+    const short = await app.api('GET', `/api/teams-live/${sid}/search?userId=u-ana&q=a`);
+    assert.equal(short.status, 400, 'termo curto é recusado');
+
+    // Somente leitura: nada foi gravado.
+    const scans = await app.api('GET', '/api/scans');
+    assert.equal(scans.data.length, 0);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});

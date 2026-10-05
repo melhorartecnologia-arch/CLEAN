@@ -192,6 +192,12 @@ function teamsApi({ req, res, path, graph, json }) {
   // para pegar regressões (ao contrário dos demais endpoints, que aceitam $top).
   const hasTop = /[?&]\$top=/.test(req.url || '');
   const topNotAllowed = () => json(res, 400, { error: { code: 'BadRequest', message: "Query option 'Top' is not allowed. To allow it, set the 'AllowedQueryOptions' property on EnableQueryAttribute or QueryValidationSettings." } });
+  // Serve os bytes de uma imagem embutida (hosted content: { contentType, content: Buffer }).
+  const sendBytes = (hc) => {
+    if (!hc?.content) return json(res, 404, { error: { code: 'itemNotFound', message: 'Hosted content não encontrado' } }), true;
+    res.writeHead(200, { 'Content-Type': hc.contentType || 'image/png', 'Content-Length': hc.content.length });
+    return res.end(hc.content), true;
+  };
   let m;
   if (path === '/teams') return json(res, 200, { value: data.teams.map((t) => ({ id: t.id, displayName: t.displayName })) }), true;
   m = /^\/teams\/([^/]+)$/.exec(path);
@@ -214,6 +220,16 @@ function teamsApi({ req, res, path, graph, json }) {
     const root = (channelOf(m[1], m[2])?.messages || []).find((x) => x.id === m[3]);
     return json(res, 200, { value: (root?.replies || []).map(teamsMessageJson) }), true;
   }
+  // Imagens embutidas (hosted content): chat, mensagem de canal e resposta de canal.
+  m = /^\/chats\/([^/]+)\/messages\/([^/]+)\/hostedContents\/([^/]+)\/\$value$/.exec(path);
+  if (m) return sendBytes((data.chatsById[m[1]]?.messages || []).find((x) => x.id === m[2])?.hostedContents?.[m[3]]);
+  m = /^\/teams\/([^/]+)\/channels\/([^/]+)\/messages\/([^/]+)\/replies\/([^/]+)\/hostedContents\/([^/]+)\/\$value$/.exec(path);
+  if (m) {
+    const reply = ((channelOf(m[1], m[2])?.messages || []).find((x) => x.id === m[3])?.replies || []).find((x) => x.id === m[4]);
+    return sendBytes(reply?.hostedContents?.[m[5]]);
+  }
+  m = /^\/teams\/([^/]+)\/channels\/([^/]+)\/messages\/([^/]+)\/hostedContents\/([^/]+)\/\$value$/.exec(path);
+  if (m) return sendBytes((channelOf(m[1], m[2])?.messages || []).find((x) => x.id === m[3])?.hostedContents?.[m[4]]);
   m = /^\/teams\/([^/]+)\/channels\/([^/]+)\/messages\/([^/]+)(?:\/replies\/([^/]+))?\/softDelete$/.exec(path);
   if (m && req.method === 'POST') {
     graph.teamsDeleted = [...(graph.teamsDeleted || []), { teamId: m[1], channelId: m[2], messageId: m[4] || m[3], replyTo: m[4] ? m[3] : null }];

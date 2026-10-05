@@ -1749,6 +1749,45 @@ dialog::backdrop {
 .msg.reply {
   background: var(--surface-2);
 }
+.live-search {
+  flex: 1 1 240px;
+}
+.live-search input[type='search'] {
+  flex: 1 1 180px;
+  min-width: 140px;
+}
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.msg-image {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.msg-image img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 260px;
+  max-height: 260px;
+}
+.result-conv {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--accent-ink);
+  overflow-wrap: anywhere;
+}
+.result-conv .icon {
+  flex: none;
+}
 
 /* ---------- Telas pequenas ---------- */
 

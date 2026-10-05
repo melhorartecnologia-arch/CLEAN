@@ -43,8 +43,9 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   a exclusão permitida, remove (softDelete, recuperável) as mensagens de canal encontradas.
 - **Teams ao vivo** (somente leitura): lê as conversas de um usuário — os **chats** dele e os
   **canais das equipes** de que participa — direto do Microsoft 365, **sob demanda** (botões
-  *Atualizar* e *Carregar mais*), sem procurar termos, sem excluir e sem gravar nada. Útil para
-  conferir rapidamente o que uma pessoa trocou no Teams antes de decidir por uma análise.
+  *Atualizar* e *Carregar mais*), com as **imagens** das mensagens e **busca** (filtro na conversa
+  aberta e busca geral nas conversas do usuário), sem procurar termos, sem excluir e sem gravar nada.
+  Útil para conferir rapidamente o que uma pessoa trocou no Teams antes de decidir por uma análise.
 - **OAuth 2.0 da Microsoft** em todas as formas usadas pelo Exchange Online e pelo Outlook.com:
   aplicativo com **segredo do cliente**, aplicativo com **certificado** (gerado pelo próprio CLEAN)
   ou **conta Microsoft conectada** (a pessoa entra com a conta pelo código de dispositivo; a
@@ -650,10 +651,21 @@ ela participa. Ao contrário das *Análises do Teams*, ele **não procura termos
 
 A tela tem duas colunas: à esquerda, a lista das conversas (os chats e, por equipe, os canais); à
 direita, as mensagens da conversa escolhida, as mais recentes primeiro, com o autor, a data, o texto,
-os anexos (com link para o arquivo no SharePoint/OneDrive) e, nas mensagens de canal, as **respostas**
-sob demanda (*Ver respostas*). O carregamento é **sob demanda**: os botões *Atualizar* (recarrega a
-conversa), *Carregar mais antigas* e *Carregar mais chats* buscam novas páginas só quando você pede —
-não há atualização automática.
+as **imagens** coladas na conversa, os anexos (com link para o arquivo no SharePoint/OneDrive) e, nas
+mensagens de canal, as **respostas** sob demanda (*Ver respostas*). O carregamento é **sob demanda**:
+os botões *Atualizar* (recarrega a conversa), *Carregar mais antigas* e *Carregar mais chats* buscam
+novas páginas só quando você pede — não há atualização automática.
+
+**Imagens.** As imagens embutidas nas mensagens ficam no Microsoft Graph protegidas por autenticação;
+o CLEAN as busca no servidor (com o token da conexão) e as mostra na tela — o token **nunca** vai para
+o navegador.
+
+**Busca.** Há duas formas de procurar: o campo *Filtrar nesta conversa* filtra na hora as mensagens já
+carregadas da conversa aberta (realçando o termo); e o campo *Buscar em todas as conversas* procura o
+termo nas mensagens recentes de todos os chats e canais do usuário e lista os resultados (clique em
+*Abrir conversa* para ir até ela). A busca geral é **limitada às mensagens mais recentes** de cada
+conversa, para responder rápido; para uma busca completa de termos (com relatório e exclusão), use as
+*Análises do Teams*.
 
 Usa a **mesma conexão e as mesmas permissões** das *Análises do Teams* (apenas de leitura:
 `Chat.Read.All`, `ChannelMessage.Read.All`, `Team.ReadBasic.All`, `Channel.ReadBasic.All` e

@@ -109,7 +109,11 @@ export async function request(url, options = {}) {
     try {
       res = await fetch(url, { method, headers, body, signal: combined, redirect: 'follow' });
       if (res.ok) {
-        if (type === 'buffer') return await readLimited(res, maxBytes, arm);
+        if (type === 'buffer') {
+          const out = await readLimited(res, maxBytes, arm);
+          out.contentType = res.headers.get('content-type') || '';
+          return out;
+        }
         // Respostas JSON também renovam o tempo limite a cada parte (ex.: mensagens do Gmail).
         const text = (await readLimited(res, Infinity, arm)).data.toString('utf8');
         if (type === 'text') return text;

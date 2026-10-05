@@ -20,6 +20,33 @@ function shareId(url) {
   return `u!${b64}`;
 }
 
+/** Texto normalizado para busca (minúsculas, sem acentos). */
+function fold(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
+/**
+ * Identificadores das imagens embutidas (hosted content) de uma mensagem, a partir do corpo HTML:
+ * as imagens coladas no Teams aparecem como <img src="…/hostedContents/{id}/$value">.
+ */
+function hostedImages(html) {
+  const images = [];
+  const seen = new Set();
+  const re = /hostedContents\/([^/"'\s<>]+)\/\$value/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const id = m[1];
+    if (!seen.has(id)) {
+      seen.add(id);
+      images.push({ hostedId: id });
+    }
+  }
+  return images;
+}
+
 /** Nome de exibição de um chat a partir do tipo, do tópico e dos participantes. */
 function chatLabel(chat) {
   if (chat.topic) return chat.topic;
@@ -275,18 +302,20 @@ export class TeamsConnector extends GraphClient {
     return { id: u.id, name: u.name || '', mail: u.mail || '', upn: u.upn || '', address: u.mail || u.upn || address };
   }
 
-  /** Uma mensagem no formato do visualizador (sem baixar anexos; só os nomes). */
+  /** Uma mensagem no formato do visualizador (sem baixar anexos; só os nomes e as imagens embutidas). */
   liveMessage(m, extra = {}) {
     const from = m.from?.user?.displayName || (m.from?.application?.displayName ? `${m.from.application.displayName} (aplicativo)` : '') || '';
+    const raw = m.body?.content || '';
     const html = (m.body?.contentType || '').toLowerCase() === 'html';
     return {
       id: m.id,
       from,
-      text: html ? htmlToText(m.body?.content || '') : m.body?.content || '',
+      text: html ? htmlToText(raw) : raw,
       subject: m.subject || '',
       date: m.createdDateTime || null,
       edited: m.lastEditedDateTime && m.lastEditedDateTime !== m.createdDateTime ? m.lastEditedDateTime : null,
       attachments: (m.attachments || []).map((a) => ({ name: a.name || a.id, contentType: a.contentType || '', url: /^https:\/\//i.test(a.contentUrl || '') ? a.contentUrl : '' })),
+      images: html ? hostedImages(raw) : [],
       webUrl: /^https:\/\//i.test(m.webUrl || '') ? m.webUrl : null,
       ...extra,
     };
@@ -355,6 +384,84 @@ export class TeamsConnector extends GraphClient {
   async channelRepliesPage(teamId, channelId, messageId, next = null) {
     const page = await this.api(this.pageUrl(next, `/teams/${enc(teamId)}/channels/${enc(channelId)}/messages/${enc(messageId)}/replies?$top=20`));
     return { items: (page?.value || []).filter(TeamsConnector.real).map((m) => this.liveMessage(m)), next: this.next(page) };
+  }
+
+  /** Conteúdo de uma imagem embutida (hosted content) de uma mensagem: { data, contentType, ... }. */
+  async hostedContent({ kind, chatId, teamId, channelId, messageId, replyTo, hostedId }, { signal = this.signal, maxBytes = 12 * 1048576 } = {}) {
+    let base;
+    if (kind === 'chat') {
+      base = `/chats/${enc(chatId)}/messages/${enc(messageId)}`;
+    } else {
+      base = replyTo
+        ? `/teams/${enc(teamId)}/channels/${enc(channelId)}/messages/${enc(replyTo)}/replies/${enc(messageId)}`
+        : `/teams/${enc(teamId)}/channels/${enc(channelId)}/messages/${enc(messageId)}`;
+    }
+    return this.api(`${base}/hostedContents/${enc(hostedId)}/$value`, { type: 'buffer', maxBytes, retries: 2, signal, headers: { Accept: '*/*' } });
+  }
+
+  /**
+   * Busca geral (sob demanda) de um termo nas mensagens recentes dos chats e canais do usuário.
+   * Varredura limitada (poucas páginas por conversa, com teto de resultados e de mensagens lidas)
+   * para responder rápido; para uma busca exaustiva, use a análise do Teams. As respostas de canal
+   * não entram nesta busca. Retorna { matches: [liveMessage + conv], scanned, truncated }.
+   */
+  async searchMessages(userId, q, { signal = this.signal } = {}) {
+    const term = fold(q).trim();
+    const result = { matches: [], scanned: 0, truncated: false };
+    if (!term) return result;
+    const MAX_MATCHES = 60;
+    const MAX_SCAN = 2000;
+    const MAX_PAGES = 5; // por conversa (×20 ≈ 100 mensagens mais recentes)
+    const CONC = 4;
+    const stop = () => result.matches.length >= MAX_MATCHES || result.scanned >= MAX_SCAN;
+
+    // Conversas: os chats do usuário e os canais das equipes de que ele participa.
+    const convs = [];
+    let curl = `/users/${enc(userId)}/chats?$expand=members`;
+    while (curl && convs.length < 500) {
+      const page = await this.api(curl, { signal });
+      for (const c of page?.value || []) {
+        const members = (c.members || []).map((x) => ({ displayName: x.displayName || '', email: x.email || '' }));
+        convs.push({ kind: 'chat', chatId: c.id, chatType: c.chatType || 'group', label: chatLabel({ topic: c.topic, chatType: c.chatType, members }) });
+      }
+      curl = this.next(page);
+    }
+    for (const t of await this.userTeams(userId)) {
+      for (const ch of t.channels || []) convs.push({ kind: 'channel', teamId: t.id, channelId: ch.id, label: `${t.name} › ${ch.name}` });
+    }
+
+    const scanConv = async (conv) => {
+      const found = [];
+      let url =
+        conv.kind === 'chat'
+          ? `/chats/${enc(conv.chatId)}/messages?$top=20`
+          : `/teams/${enc(conv.teamId)}/channels/${enc(conv.channelId)}/messages?$top=20`;
+      for (let page = 0; url && page < MAX_PAGES && !stop(); page++) {
+        const resp = await this.api(url, { signal });
+        for (const m of resp?.value || []) {
+          if (!TeamsConnector.real(m)) continue;
+          result.scanned++;
+          const lm = this.liveMessage(m, { conv });
+          if (fold(`${lm.from} ${lm.subject} ${lm.text}`).includes(term)) found.push(lm);
+        }
+        url = this.next(resp);
+        if (url && page + 1 >= MAX_PAGES) result.truncated = true; // havia mais páginas nesta conversa
+      }
+      return found;
+    };
+
+    const run = pool(convs, CONC, async (conv) => (stop() ? undefined : scanConv(conv)));
+    for await (const found of run) {
+      result.matches.push(...found);
+      if (result.matches.length >= MAX_MATCHES) {
+        result.matches.length = MAX_MATCHES;
+        result.truncated = true;
+        break;
+      }
+    }
+    // Ordena por data (mais recentes primeiro).
+    result.matches.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+    return result;
   }
 
   // ----- anexos -----

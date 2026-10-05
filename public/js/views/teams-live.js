@@ -3,7 +3,7 @@
 // Microsoft Graph na hora, sob demanda. Nada é gravado; os botões "Atualizar" e "Carregar mais"
 // buscam novas páginas quando o usuário pede (sem atualização automática).
 import { get } from '../api.js';
-import { html, render as paint, icon, toast, fmtDateTime } from '../ui.js';
+import { html, render as paint, icon, toast, fmtDateTime, plural, debounce } from '../ui.js';
 import { replaceQuery } from '../nav.js';
 
 const CHAT_TYPES = { oneOnOne: 'Conversa', group: 'Grupo', meeting: 'Reunião' };
@@ -35,6 +35,8 @@ export async function render(root, { query }) {
     loadingMsgs: false,
     loadSeq: 0, // identifica a carga de mensagens mais recente (troca de conversa cancela as anteriores)
     replies: new Map(), // messageId → { open, items, next, loading, loaded }
+    filter: '', // filtro rápido das mensagens carregadas da conversa aberta
+    search: { active: false, q: '', loading: false, results: [], truncated: false, seq: 0 }, // busca geral
   };
   let stopped = false;
   const alive = () => !stopped;
@@ -74,14 +76,6 @@ export async function render(root, { query }) {
           </div>
         </form>`,
     );
-    const form = root.querySelector('[data-open]');
-    form.addEventListener('submit', (event) => {
-      event.preventDefault();
-      const sourceId = form.elements.source.value;
-      const address = String(form.elements.address.value || '').trim();
-      if (!address) return toast('Informe o e-mail do usuário.', 'error');
-      open(sourceId, address);
-    });
   }
 
   // ---------- Abertura: resolve o usuário e carrega as conversas ----------
@@ -102,6 +96,8 @@ export async function render(root, { query }) {
       state.msgs = [];
       state.msgsNext = null;
       state.replies = new Map();
+      state.filter = '';
+      state.search = { active: false, q: '', loading: false, results: [], truncated: false, seq: 0 };
       indexConversations();
       replaceQuery({ conexao: sourceId, usuario: user.address || address });
       drawViewer();
@@ -134,7 +130,11 @@ export async function render(root, { query }) {
             <div class="sub">${u.address} · ${state.source.name}</div>
           </div>
           <div class="actions">
-            <button class="btn" data-act="refresh-convs">${icon('refresh')} Recarregar conversas</button>
+            <form class="inline live-search" data-search novalidate>
+              <input type="search" name="q" data-search-input placeholder="Buscar em todas as conversas" value="${state.search.q}" />
+              <button type="submit" class="btn">${icon('search')} Buscar</button>
+            </form>
+            <button class="btn" data-act="refresh-convs">${icon('refresh')} Recarregar</button>
             <button class="btn" data-act="reset">${icon('user')} Trocar usuário</button>
           </div>
         </div>
@@ -171,6 +171,7 @@ export async function render(root, { query }) {
   }
 
   function drawMain() {
+    if (state.search.active) return drawSearch();
     const mainEl = root.querySelector('[data-main]');
     const scroll = mainEl.scrollTop;
     const conv = state.selectedKey ? state.convMap.get(state.selectedKey) : null;
@@ -178,30 +179,75 @@ export async function render(root, { query }) {
       paint(mainEl, html`<div class="empty">Selecione uma conversa à esquerda para ver as mensagens.</div>`);
       return;
     }
+    // O cabeçalho (com o filtro) é estável; só o corpo (data-body) é repintado ao filtrar, para o
+    // campo de filtro não perder o foco enquanto se digita.
     paint(
       mainEl,
       html`<div class="live-head">
           <div class="live-title">${conv.label}${conv.kind === 'chat' ? html` <span class="chip">${CHAT_TYPES[conv.chatType] || 'Conversa'}</span>` : conv.membershipType && conv.membershipType !== 'standard' ? html` <span class="chip">${channelKind(conv.membershipType)}</span>` : ''}</div>
-          <button class="btn small" data-act="refresh">${icon('refresh')} Atualizar</button>
+          <div class="inline">
+            <input type="search" data-filter placeholder="Filtrar nesta conversa" value="${state.filter}" />
+            <button class="btn small" data-act="refresh">${icon('refresh')} Atualizar</button>
+          </div>
         </div>
         ${conv.kind === 'chat' && (conv.members || []).length ? html`<div class="muted small live-members">${(conv.members || []).map((m) => m.displayName || m.email).filter(Boolean).join(', ')}</div>` : ''}
-        ${state.loadingMsgs && state.msgs.length === 0
-          ? html`<p class="loading">Carregando mensagens…</p>`
-          : state.msgs.length === 0 && !state.msgsNext
-            ? html`<div class="empty">Nenhuma mensagem nesta conversa.</div>`
-            : html`${state.msgs.length
-                  ? html`<div class="messages">
-                      <p class="muted small live-order">As mais recentes primeiro.</p>
-                      ${state.msgs.map((m) => messageCard(m, conv))}
-                    </div>`
-                  : html`<div class="empty">Nenhuma mensagem exibível nesta página (apenas mensagens de sistema). Carregue as mais antigas.</div>`}
-                ${state.msgsNext ? html`<div class="live-foot"><button class="btn" data-act="older" ${state.loadingMsgs ? 'disabled' : ''}>${state.loadingMsgs ? 'Carregando…' : 'Carregar mais antigas'}</button></div>` : ''}`}`,
+        <div class="live-body" data-body></div>`,
     );
+    drawBody();
     mainEl.scrollTop = scroll;
   }
 
+  /** Corpo da conversa (mensagens, já aplicando o filtro rápido). */
+  function drawBody() {
+    const bodyEl = root.querySelector('[data-body]');
+    if (!bodyEl) return;
+    const mainEl = root.querySelector('[data-main]');
+    const scroll = mainEl ? mainEl.scrollTop : 0;
+    const conv = state.convMap.get(state.selectedKey);
+    const term = state.filter.trim();
+    const shown = term ? state.msgs.filter((m) => fold(`${m.from} ${m.subject} ${m.text}`).includes(fold(term))) : state.msgs;
+    paint(
+      bodyEl,
+      html`${state.loadingMsgs && state.msgs.length === 0
+        ? html`<p class="loading">Carregando mensagens…</p>`
+        : state.msgs.length === 0 && !state.msgsNext
+          ? html`<div class="empty">Nenhuma mensagem nesta conversa.</div>`
+          : html`${term
+                ? html`<p class="muted small live-order">${plural(shown.length, 'mensagem encontrada', 'mensagens encontradas')} de ${state.msgs.length} carregada(s).</p>`
+                : state.msgs.length
+                  ? html`<p class="muted small live-order">As mais recentes primeiro.</p>`
+                  : ''}
+              ${shown.length
+                ? html`<div class="messages">${shown.map((m) => messageCard(m, conv, term))}</div>`
+                : term
+                  ? html`<div class="empty">Nenhuma mensagem carregada corresponde a “${term}”. Carregue mais antigas ou use a busca em todas as conversas.</div>`
+                  : html`<div class="empty">Nenhuma mensagem exibível nesta página (apenas mensagens de sistema). Carregue as mais antigas.</div>`}
+              ${state.msgsNext ? html`<div class="live-foot"><button class="btn" data-act="older" ${state.loadingMsgs ? 'disabled' : ''}>${state.loadingMsgs ? 'Carregando…' : 'Carregar mais antigas'}</button></div>` : ''}`}`,
+    );
+    if (mainEl) mainEl.scrollTop = scroll;
+  }
+
+  /** Painel de resultados da busca geral. */
+  function drawSearch() {
+    const mainEl = root.querySelector('[data-main]');
+    const s = state.search;
+    paint(
+      mainEl,
+      html`<div class="live-head">
+          <div class="live-title">Busca: “${s.q}”</div>
+          <button class="btn small" data-act="search-clear">Voltar às conversas</button>
+        </div>
+        ${s.loading
+          ? html`<p class="loading">Procurando nas conversas do usuário…</p>`
+          : html`<p class="muted small live-order">${plural(s.results.length, 'resultado', 'resultados')}${s.truncated ? ' · busca limitada às mensagens recentes (para uma busca completa, use a Análise do Teams)' : ''}.</p>
+              ${s.results.length === 0
+                ? html`<div class="empty">Nada encontrado para “${s.q}”.</div>`
+                : html`<div class="messages">${s.results.map((m) => searchResultCard(m))}</div>`}`}`,
+    );
+  }
+
   /** Cartão de uma mensagem; nos canais, inclui o botão de respostas e as respostas abertas. */
-  function messageCard(m, conv) {
+  function messageCard(m, conv, term = '') {
     const rep = state.replies.get(m.id);
     const canReplies = conv.kind === 'channel' && m.hasReplies;
     return html`<article class="msg">
@@ -209,30 +255,73 @@ export async function render(root, { query }) {
         <span class="msg-from">${m.from || 'Desconhecido'}</span>
         <span class="muted small">${fmtDateTime(m.date)}${m.edited ? html` · <span title="Editada em ${fmtDateTime(m.edited)}">editada</span>` : ''}</span>
       </div>
-      ${m.subject ? html`<div class="msg-subject">${m.subject}</div>` : ''}
-      ${m.text ? html`<div class="msg-body">${m.text}</div>` : html`<div class="msg-body muted"><em>(sem texto)</em></div>`}
+      ${m.subject ? html`<div class="msg-subject">${highlight(m.subject, term)}</div>` : ''}
+      ${m.text ? html`<div class="msg-body">${highlight(m.text, term)}</div>` : html`<div class="msg-body muted"><em>(sem texto)</em></div>`}
+      ${images(conv, m, null)}
       ${attachments(m)}
       <div class="msg-foot">
         ${m.webUrl ? html`<a class="msg-link" href="${m.webUrl}" target="_blank" rel="noopener noreferrer">Abrir no Teams</a>` : ''}
         ${canReplies ? html`<button class="link-btn" data-act="replies" data-id="${m.id}">${rep?.open ? 'Ocultar respostas' : repliesLabel(m)}</button>` : ''}
       </div>
-      ${canReplies && rep?.open ? repliesBlock(m, rep) : ''}
+      ${canReplies && rep?.open ? repliesBlock(m, rep, term) : ''}
     </article>`;
   }
 
-  function repliesBlock(m, rep) {
+  /** Cartão de um resultado da busca geral (com o link para abrir a conversa). */
+  function searchResultCard(m) {
+    const key = m.conv.kind === 'chat' ? chatKey(m.conv.chatId) : channelKey(m.conv.teamId, m.conv.channelId);
+    return html`<article class="msg">
+      <div class="msg-head">
+        <span class="msg-from">${m.from || 'Desconhecido'}</span>
+        <span class="muted small">${fmtDateTime(m.date)}</span>
+      </div>
+      <div class="result-conv">${icon(m.conv.kind === 'chat' ? 'user' : 'list')} ${m.conv.label}</div>
+      ${m.subject ? html`<div class="msg-subject">${highlight(m.subject, state.search.q)}</div>` : ''}
+      ${m.text ? html`<div class="msg-body">${highlight(m.text, state.search.q)}</div>` : html`<div class="msg-body muted"><em>(sem texto)</em></div>`}
+      ${images(m.conv, m, null)}
+      <div class="msg-foot"><button class="link-btn" data-act="open-result" data-key="${key}">Abrir conversa</button></div>
+    </article>`;
+  }
+
+  function repliesBlock(m, rep, term = '') {
     if (rep.loading && (rep.items || []).length === 0) return html`<div class="replies"><p class="loading">Carregando respostas…</p></div>`;
     if ((rep.items || []).length === 0) return html`<div class="replies"><p class="muted small">Sem respostas.</p></div>`;
+    const conv = state.convMap.get(state.selectedKey);
     return html`<div class="replies">
       ${rep.items.map(
         (r) => html`<article class="msg reply">
           <div class="msg-head"><span class="msg-from">${r.from || 'Desconhecido'}</span><span class="muted small">${fmtDateTime(r.date)}${r.edited ? html` · editada` : ''}</span></div>
-          ${r.text ? html`<div class="msg-body">${r.text}</div>` : html`<div class="msg-body muted"><em>(sem texto)</em></div>`}
+          ${r.text ? html`<div class="msg-body">${highlight(r.text, term)}</div>` : html`<div class="msg-body muted"><em>(sem texto)</em></div>`}
+          ${images(conv, r, m.id)}
           ${attachments(r)}
         </article>`,
       )}
       ${rep.next ? html`<button class="btn small" data-act="replies-more" data-id="${m.id}" ${rep.loading ? 'disabled' : ''}>${rep.loading ? 'Carregando…' : 'Carregar mais respostas'}</button>` : ''}
     </div>`;
+  }
+
+  /** Imagens embutidas (hosted content): miniaturas servidas pelo proxy do servidor. */
+  function images(conv, m, replyTo) {
+    const imgs = m.images || [];
+    if (!conv || imgs.length === 0) return '';
+    return html`<div class="msg-images">${imgs.map((im) => {
+      const url = imageUrl(conv, m.id, replyTo, im.hostedId);
+      return html`<a class="msg-image" href="${url}" target="_blank" rel="noopener noreferrer"><img loading="lazy" src="${url}" alt="Imagem da conversa" /></a>`;
+    })}</div>`;
+  }
+
+  function imageUrl(conv, messageId, replyTo, hostedId) {
+    const p = new URLSearchParams({ messageId, hostedId });
+    if (conv.kind === 'chat') {
+      p.set('kind', 'chat');
+      p.set('chatId', conv.chatId);
+    } else {
+      p.set('kind', 'channel');
+      p.set('teamId', conv.teamId);
+      p.set('channelId', conv.channelId);
+      if (replyTo) p.set('replyTo', replyTo);
+    }
+    return `/api/teams-live/${encodeURIComponent(state.source.id)}/image?${p.toString()}`;
   }
 
   function attachments(m) {
@@ -257,6 +346,7 @@ export async function render(root, { query }) {
       state.msgs = [];
       state.msgsNext = null;
       state.replies = new Map();
+      state.filter = '';
     }
     drawMain();
     try {
@@ -320,15 +410,29 @@ export async function render(root, { query }) {
       state.source = null;
       state.user = null;
       state.convs = null;
+      state.filter = '';
+      state.search = { active: false, q: '', loading: false, results: [], truncated: false, seq: 0 };
       replaceQuery({});
       drawSetup();
       return;
     }
-    if (act === 'open') {
-      if (state.selectedKey === el.dataset.key) return;
-      state.selectedKey = el.dataset.key;
+    if (act === 'open' || act === 'open-result') {
+      const key = el.dataset.key;
+      if (act === 'open-result') ensureConv(key);
+      const sameConv = state.selectedKey === key;
+      const wasSearch = state.search.active;
+      state.search.active = false;
+      if (sameConv && !wasSearch) return; // já aberta e não vínhamos da busca
+      state.selectedKey = key;
       drawSide();
-      loadMessages(true);
+      if (sameConv) drawMain(); // volta da busca para a conversa já carregada
+      else loadMessages(true); // conversa diferente: carrega
+      return;
+    }
+    if (act === 'search-clear') {
+      state.search.active = false;
+      state.search.q = '';
+      drawViewer();
       return;
     }
     if (act === 'refresh') return loadMessages(true);
@@ -391,9 +495,73 @@ export async function render(root, { query }) {
     }
   }
 
-  // Delegação de cliques para toda a tela (os botões "Trocar usuário"/"Recarregar conversas" ficam
-  // no cabeçalho, fora de .live). Fica no contêiner da tela e sobrevive às repinturas internas.
+  /** Garante um descritor da conversa no mapa (ao abrir um resultado de busca fora da lista carregada). */
+  function ensureConv(key) {
+    if (state.convMap.has(key)) return;
+    const m = state.search.results.find((r) => (r.conv.kind === 'chat' ? chatKey(r.conv.chatId) : channelKey(r.conv.teamId, r.conv.channelId)) === key);
+    if (!m) return;
+    const c = m.conv;
+    state.convMap.set(key, c.kind === 'chat' ? { kind: 'chat', chatId: c.chatId, label: c.label, chatType: c.chatType || 'group', members: [] } : { kind: 'channel', teamId: c.teamId, channelId: c.channelId, label: c.label });
+  }
+
+  // Busca geral das mensagens recentes nos chats e canais do usuário.
+  async function runSearch(q) {
+    const term = String(q || '').trim();
+    if (term.length < 2) return toast('Digite ao menos 2 caracteres para a busca.', 'error');
+    const seq = ++state.search.seq;
+    state.search = { active: true, q: term, loading: true, results: [], truncated: false, seq };
+    drawMain();
+    try {
+      const data = await get(`/api/teams-live/${encodeURIComponent(state.source.id)}/search?userId=${encodeURIComponent(state.user.id)}&q=${encodeURIComponent(term)}`);
+      if (!alive() || seq !== state.search.seq) return;
+      state.search.results = data.matches || [];
+      state.search.truncated = Boolean(data.truncated);
+    } catch (err) {
+      if (alive() && seq === state.search.seq) {
+        state.search.active = false;
+        toast(err.message, 'error');
+        drawViewer();
+        return;
+      }
+    } finally {
+      if (alive() && seq === state.search.seq) {
+        state.search.loading = false;
+        drawMain();
+      }
+    }
+  }
+
+  function onSubmit(event) {
+    const form = event.target;
+    if (form.matches('[data-open]')) {
+      event.preventDefault();
+      const sourceId = form.elements.source.value;
+      const address = String(form.elements.address.value || '').trim();
+      if (!address) return toast('Informe o e-mail do usuário.', 'error');
+      open(sourceId, address);
+    } else if (form.matches('[data-search]')) {
+      event.preventDefault();
+      runSearch(form.elements.q.value);
+    }
+  }
+
+  // Filtro rápido na conversa aberta: atualiza o estado na hora e repinta só o corpo (com atraso),
+  // para o campo de filtro não perder o foco.
+  const redrawBody = debounce(() => {
+    if (alive() && !state.search.active) drawBody();
+  }, 120);
+  function onInput(event) {
+    if (event.target.matches('[data-filter]')) {
+      state.filter = event.target.value;
+      redrawBody();
+    }
+  }
+
+  // Delegação para toda a tela (os botões e formulários do cabeçalho ficam fora de .live). Os ouvintes
+  // ficam no contêiner da tela e sobrevivem às repinturas internas.
   root.addEventListener('click', onClick);
+  root.addEventListener('submit', onSubmit);
+  root.addEventListener('input', onInput);
 
   // Início: tela de abertura. Se a URL já traz conexão e usuário (reabrir/compartilhar), abre direto
   // uma vez — "Trocar usuário" depois volta para a tela de abertura sem reabrir sozinho.
@@ -402,7 +570,10 @@ export async function render(root, { query }) {
 
   return () => {
     stopped = true;
+    redrawBody.cancel();
     root.removeEventListener('click', onClick);
+    root.removeEventListener('submit', onSubmit);
+    root.removeEventListener('input', onInput);
   };
 }
 
@@ -420,4 +591,24 @@ function channelKind(membershipType) {
 function repliesLabel(m) {
   const n = Number(m.replyCount);
   return n > 0 ? `Ver respostas (${n})` : 'Ver respostas';
+}
+
+/** Minúsculas e sem acentos, para comparar na busca/filtro. */
+function fold(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
+/**
+ * Realça as ocorrências do termo no texto (comparação sem diferenciar maiúsculas). O texto é escapado
+ * pelo template `html`; só as marcas <mark> são HTML.
+ */
+function highlight(text, term) {
+  const t = String(term || '').trim();
+  if (!t) return text;
+  const re = new RegExp(`(${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+  const parts = String(text).split(re);
+  return html`${parts.map((part, i) => (i % 2 === 1 ? html`<mark>${part}</mark>` : part))}`;
 }
