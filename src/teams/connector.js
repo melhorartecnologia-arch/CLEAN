@@ -35,13 +35,14 @@ function fold(value) {
 function hostedImages(html) {
   const images = [];
   const seen = new Set();
-  const re = /hostedContents\/([^/"'\s<>]+)\/\$value/gi;
+  // Só o atributo src de <img> (evita falsos positivos em itemid ou no texto da mensagem).
+  const re = /<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi;
   let m;
   while ((m = re.exec(html))) {
-    const id = m[1];
-    if (!seen.has(id)) {
-      seen.add(id);
-      images.push({ hostedId: id });
+    const idm = /hostedContents\/([^/"'\s]+)\/\$value/i.exec(m[1]);
+    if (idm && !seen.has(idm[1])) {
+      seen.add(idm[1]);
+      images.push({ hostedId: idm[1] });
     }
   }
   return images;
@@ -412,22 +413,41 @@ export class TeamsConnector extends GraphClient {
     const MAX_MATCHES = 60;
     const MAX_SCAN = 2000;
     const MAX_PAGES = 5; // por conversa (×20 ≈ 100 mensagens mais recentes)
+    const MAX_CONVS = 600; // teto de conversas enumeradas
     const CONC = 4;
     const stop = () => result.matches.length >= MAX_MATCHES || result.scanned >= MAX_SCAN;
 
-    // Conversas: os chats do usuário e os canais das equipes de que ele participa.
+    // Conversas: os chats do usuário e os canais das equipes de que ele participa. Uma falha ao listar
+    // os chats (ou as equipes) não derruba a busca: ela segue com o que deu para listar e é marcada
+    // como limitada (truncated).
     const convs = [];
-    let curl = `/users/${enc(userId)}/chats?$expand=members`;
-    while (curl && convs.length < 500) {
-      const page = await this.api(curl, { signal });
-      for (const c of page?.value || []) {
-        const members = (c.members || []).map((x) => ({ displayName: x.displayName || '', email: x.email || '' }));
-        convs.push({ kind: 'chat', chatId: c.id, chatType: c.chatType || 'group', label: chatLabel({ topic: c.topic, chatType: c.chatType, members }) });
+    try {
+      let curl = `/users/${enc(userId)}/chats?$expand=members`;
+      while (curl && convs.length < MAX_CONVS) {
+        const page = await this.api(curl, { signal });
+        for (const c of page?.value || []) {
+          const members = (c.members || []).map((x) => ({ displayName: x.displayName || '', email: x.email || '' }));
+          convs.push({ kind: 'chat', chatId: c.id, chatType: c.chatType || 'group', label: chatLabel({ topic: c.topic, chatType: c.chatType, members }) });
+        }
+        curl = this.next(page);
       }
-      curl = this.next(page);
+      if (curl) result.truncated = true; // havia mais chats do que o teto
+    } catch {
+      result.truncated = true;
     }
-    for (const t of await this.userTeams(userId)) {
-      for (const ch of t.channels || []) convs.push({ kind: 'channel', teamId: t.id, channelId: ch.id, label: `${t.name} › ${ch.name}` });
+    try {
+      for (const t of await this.userTeams(userId)) {
+        if (t.error) result.truncated = true; // equipe com os canais não listados
+        for (const ch of t.channels || []) {
+          if (convs.length >= MAX_CONVS) {
+            result.truncated = true;
+            break;
+          }
+          convs.push({ kind: 'channel', teamId: t.id, channelId: ch.id, label: `${t.name} › ${ch.name}` });
+        }
+      }
+    } catch {
+      result.truncated = true;
     }
 
     const scanConv = async (conv) => {
@@ -451,7 +471,9 @@ export class TeamsConnector extends GraphClient {
     };
 
     const run = pool(convs, CONC, async (conv) => (stop() ? undefined : scanConv(conv)));
+    let scannedConvs = 0;
     for await (const found of run) {
+      scannedConvs++;
       result.matches.push(...found);
       if (result.matches.length >= MAX_MATCHES) {
         result.matches.length = MAX_MATCHES;
@@ -459,6 +481,9 @@ export class TeamsConnector extends GraphClient {
         break;
       }
     }
+    // Se alguma conversa não chegou a ser varrida (teto de mensagens atingido ou corte pelos
+    // resultados), a busca não foi completa.
+    if (scannedConvs < convs.length) result.truncated = true;
     // Ordena por data (mais recentes primeiro).
     result.matches.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
     return result;

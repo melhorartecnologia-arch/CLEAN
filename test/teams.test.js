@@ -427,6 +427,7 @@ test('API: visualizador ao vivo — imagens embutidas (proxy) e busca geral', as
             },
           ],
         },
+        { id: 't2', displayName: 'Sem acesso', channelsError: 403, channels: [] },
       ],
       chats: { 'u-ana': ['chat1'] },
       chatsById: {
@@ -464,6 +465,7 @@ test('API: visualizador ao vivo — imagens embutidas (proxy) e busca geral', as
     assert.ok(byChat.data.matches.some((x) => x.id === 'cm1' && x.conv.kind === 'chat'));
     const byChannel = await app.api('GET', `/api/teams-live/${sid}/search?userId=u-ana&q=relatorio`);
     assert.ok(byChannel.data.matches.some((x) => x.id === 'm1' && x.conv.kind === 'channel'), 'busca sem acento acha "relatório"');
+    assert.equal(byChannel.data.truncated, true, 'a equipe sem canais listados torna a busca limitada (truncated)');
     const none = await app.api('GET', `/api/teams-live/${sid}/search?userId=u-ana&q=inexistentexyz`);
     assert.deepEqual(none.data.matches, []);
     const short = await app.api('GET', `/api/teams-live/${sid}/search?userId=u-ana&q=a`);

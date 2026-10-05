@@ -131,7 +131,7 @@ export async function render(root, { query }) {
           </div>
           <div class="actions">
             <form class="inline live-search" data-search novalidate>
-              <input type="search" name="q" data-search-input placeholder="Buscar em todas as conversas" value="${state.search.q}" />
+              <input type="search" name="q" data-search-input aria-label="Buscar em todas as conversas" placeholder="Buscar em todas as conversas" value="${state.search.q}" />
               <button type="submit" class="btn">${icon('search')} Buscar</button>
             </form>
             <button class="btn" data-act="refresh-convs">${icon('refresh')} Recarregar</button>
@@ -186,7 +186,7 @@ export async function render(root, { query }) {
       html`<div class="live-head">
           <div class="live-title">${conv.label}${conv.kind === 'chat' ? html` <span class="chip">${CHAT_TYPES[conv.chatType] || 'Conversa'}</span>` : conv.membershipType && conv.membershipType !== 'standard' ? html` <span class="chip">${channelKind(conv.membershipType)}</span>` : ''}</div>
           <div class="inline">
-            <input type="search" data-filter placeholder="Filtrar nesta conversa" value="${state.filter}" />
+            <input type="search" data-filter aria-label="Filtrar nesta conversa" placeholder="Filtrar nesta conversa" value="${state.filter}" />
             <button class="btn small" data-act="refresh">${icon('refresh')} Atualizar</button>
           </div>
         </div>
@@ -410,6 +410,11 @@ export async function render(root, { query }) {
       state.source = null;
       state.user = null;
       state.convs = null;
+      state.convMap = new Map();
+      state.selectedKey = null;
+      state.msgs = [];
+      state.msgsNext = null;
+      state.loadSeq++; // cancela cargas de mensagens em voo
       state.filter = '';
       state.search = { active: false, q: '', loading: false, results: [], truncated: false, seq: 0 };
       replaceQuery({});
@@ -460,7 +465,7 @@ export async function render(root, { query }) {
     button.disabled = true;
     try {
       const page = await get(`/api/teams-live/${encodeURIComponent(state.source.id)}/chats?userId=${encodeURIComponent(state.user.id)}&next=${encodeURIComponent(state.convs.chatsNext)}`);
-      if (!alive()) return;
+      if (!alive() || !state.source) return;
       state.convs.chats = state.convs.chats.concat(page.items);
       state.convs.chatsNext = page.next || null;
       indexConversations();
@@ -477,7 +482,7 @@ export async function render(root, { query }) {
     button.disabled = true;
     try {
       const convs = await get(`/api/teams-live/${encodeURIComponent(state.source.id)}/conversations?userId=${encodeURIComponent(state.user.id)}`);
-      if (!alive()) return;
+      if (!alive() || !state.source) return;
       state.convs = convs;
       indexConversations();
       // Mantém a seleção se a conversa ainda existir; senão, limpa o painel.

@@ -134,9 +134,10 @@ export function teamsLiveRouter({ store, endpoints = {} }) {
       throw new HttpError(400, 'Tipo de conversa inválido.');
     }
     const img = await live(source, (c) => c.hostedContent(spec));
-    // Só serve imagem (nunca HTML/script); o resto vira download genérico.
-    const type = /^image\/[\w.+-]+$/i.test(img.contentType || '') ? img.contentType : 'application/octet-stream';
-    res.setHeader('Content-Type', type);
+    // Só exibe imagem de verdade (imagem rasterizada); SVG e qualquer outro tipo viram download
+    // genérico, para não renderizar HTML/script embutido.
+    const safe = /^image\/[\w.+-]+$/i.test(img.contentType || '') && !/svg/i.test(img.contentType);
+    res.setHeader('Content-Type', safe ? img.contentType : 'application/octet-stream');
     res.setHeader('Cache-Control', 'private, max-age=120');
     res.send(img.data);
   });
