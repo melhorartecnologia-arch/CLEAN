@@ -79,7 +79,8 @@ export class TeamsConnector extends GraphClient {
   /** Canais de uma equipe (padrão, privados e compartilhados), sem os excluídos pelas opções. */
   async *channels(team) {
     const excluded = folderMatcher(this.teams.excludeChannels);
-    let url = `/teams/${enc(team.id)}/channels?$select=id,displayName,membershipType&$top=${PAGE}`;
+    // Observação: a lista de canais não aceita $top no Graph (HTTP 400); a paginação vem pelo nextLink.
+    let url = `/teams/${enc(team.id)}/channels?$select=id,displayName,membershipType`;
     while (url) {
       const page = await this.api(url);
       for (const c of page?.value || []) {
@@ -313,7 +314,8 @@ export class TeamsConnector extends GraphClient {
    */
   async userTeams(userId) {
     const teams = [];
-    let url = `/users/${enc(userId)}/joinedTeams?$select=id,displayName&$top=100`;
+    // joinedTeams não aceita $top no Graph (HTTP 400: "Query option 'Top' is not allowed").
+    let url = `/users/${enc(userId)}/joinedTeams?$select=id,displayName`;
     while (url) {
       const page = await this.api(url);
       for (const t of page?.value || []) teams.push({ id: t.id, name: t.displayName || '', channels: [] });
@@ -321,7 +323,7 @@ export class TeamsConnector extends GraphClient {
     }
     const loadChannels = async (t) => {
       try {
-        let curl = `/teams/${enc(t.id)}/channels?$select=id,displayName,membershipType&$top=50`;
+        let curl = `/teams/${enc(t.id)}/channels?$select=id,displayName,membershipType`; // sem $top (ver channels())
         while (curl) {
           const cp = await this.api(curl);
           for (const c of cp?.value || []) t.channels.push({ id: c.id, name: c.displayName || '', membershipType: c.membershipType || 'standard' });

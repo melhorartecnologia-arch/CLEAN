@@ -188,6 +188,10 @@ function teamsApi({ req, res, path, graph, json }) {
   const data = graph.teamsData;
   if (!data) return false;
   const channelOf = (teamId, channelId) => data.teams.find((t) => t.id === teamId)?.channels.find((c) => c.id === channelId);
+  // joinedTeams e a lista de canais recusam $top no Graph real (HTTP 400): o simulador faz o mesmo
+  // para pegar regressões (ao contrário dos demais endpoints, que aceitam $top).
+  const hasTop = /[?&]\$top=/.test(req.url || '');
+  const topNotAllowed = () => json(res, 400, { error: { code: 'BadRequest', message: "Query option 'Top' is not allowed. To allow it, set the 'AllowedQueryOptions' property on EnableQueryAttribute or QueryValidationSettings." } });
   let m;
   if (path === '/teams') return json(res, 200, { value: data.teams.map((t) => ({ id: t.id, displayName: t.displayName })) }), true;
   m = /^\/teams\/([^/]+)$/.exec(path);
@@ -197,6 +201,7 @@ function teamsApi({ req, res, path, graph, json }) {
   }
   m = /^\/teams\/([^/]+)\/channels$/.exec(path);
   if (m) {
+    if (hasTop) return topNotAllowed(), true;
     const t = data.teams.find((x) => x.id === m[1]);
     // channelsError (ex.: 403/404): equipe sem acesso aos canais, para testar a resiliência.
     if (t?.channelsError) return json(res, t.channelsError, { error: { code: 'Forbidden', message: 'Sem acesso aos canais desta equipe.' } }), true;
@@ -218,6 +223,7 @@ function teamsApi({ req, res, path, graph, json }) {
   }
   m = /^\/users\/([^/]+)\/joinedTeams$/.exec(path);
   if (m) {
+    if (hasTop) return topNotAllowed(), true;
     const joined = data.joinedTeams?.[m[1]] || data.teams.map((t) => t.id);
     return json(res, 200, { value: data.teams.filter((t) => joined.includes(t.id)).map((t) => ({ id: t.id, displayName: t.displayName })) }), true;
   }
