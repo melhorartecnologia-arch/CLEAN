@@ -33,6 +33,7 @@ export async function render(root, { query }) {
     msgs: [], // mensagens carregadas da conversa selecionada (mais recentes primeiro)
     msgsNext: null,
     loadingMsgs: false,
+    loadSeq: 0, // identifica a carga de mensagens mais recente (troca de conversa cancela as anteriores)
     replies: new Map(), // messageId → { open, items, next, loading, loaded }
   };
   let stopped = false;
@@ -49,7 +50,7 @@ export async function render(root, { query }) {
       html`<div class="page-head">
           <div>
             <h1>Microsoft Teams ao vivo</h1>
-            <div class="sub">Leitura somente leitura das conversas de um usuário — os chats e os canais das equipes de que ele participa — direto do Microsoft 365, sob demanda. Nada é gravado.</div>
+            <div class="sub">Somente leitura das conversas de um usuário — os chats e os canais das equipes de que ele participa — direto do Microsoft 365, sob demanda. Nada é gravado.</div>
           </div>
         </div>
         <form class="card" data-open novalidate>
@@ -159,7 +160,11 @@ export async function render(root, { query }) {
         ${chatsNext ? html`<button class="btn small conv-more" data-act="more-chats">Carregar mais chats</button>` : ''}
         ${teams.map(
           (t) => html`<div class="conv-group">${t.name}</div>
-            ${(t.channels || []).length === 0 ? html`<p class="muted small conv-empty">Sem canais.</p>` : (t.channels || []).map((ch) => item(channelKey(t.id, ch.id), ch.name, ch.membershipType !== 'standard' ? channelKind(ch.membershipType) : ''))}`,
+            ${t.error
+              ? html`<p class="muted small conv-empty">Não foi possível listar os canais.</p>`
+              : (t.channels || []).length === 0
+                ? html`<p class="muted small conv-empty">Sem canais.</p>`
+                : (t.channels || []).map((ch) => item(channelKey(t.id, ch.id), ch.name, ch.membershipType !== 'standard' ? channelKind(ch.membershipType) : ''))}`,
         )}
         ${teams.length === 0 && chats.length === 0 ? html`<p class="empty">Nenhuma conversa encontrada para este usuário.</p>` : ''}`,
     );
@@ -182,12 +187,14 @@ export async function render(root, { query }) {
         ${conv.kind === 'chat' && (conv.members || []).length ? html`<div class="muted small live-members">${(conv.members || []).map((m) => m.displayName || m.email).filter(Boolean).join(', ')}</div>` : ''}
         ${state.loadingMsgs && state.msgs.length === 0
           ? html`<p class="loading">Carregando mensagens…</p>`
-          : state.msgs.length === 0
+          : state.msgs.length === 0 && !state.msgsNext
             ? html`<div class="empty">Nenhuma mensagem nesta conversa.</div>`
-            : html`<div class="messages">
-                  <p class="muted small live-order">As mais recentes primeiro.</p>
-                  ${state.msgs.map((m) => messageCard(m, conv))}
-                </div>
+            : html`${state.msgs.length
+                  ? html`<div class="messages">
+                      <p class="muted small live-order">As mais recentes primeiro.</p>
+                      ${state.msgs.map((m) => messageCard(m, conv))}
+                    </div>`
+                  : html`<div class="empty">Nenhuma mensagem exibível nesta página (apenas mensagens de sistema). Carregue as mais antigas.</div>`}
                 ${state.msgsNext ? html`<div class="live-foot"><button class="btn" data-act="older" ${state.loadingMsgs ? 'disabled' : ''}>${state.loadingMsgs ? 'Carregando…' : 'Carregar mais antigas'}</button></div>` : ''}`}`,
     );
     mainEl.scrollTop = scroll;
@@ -241,7 +248,10 @@ export async function render(root, { query }) {
 
   async function loadMessages(reset) {
     const conv = state.convMap.get(state.selectedKey);
-    if (!conv || state.loadingMsgs) return;
+    if (!conv) return;
+    // Cada carga recebe um número; trocar de conversa (ou recarregar) emite um número maior e cancela
+    // as anteriores — assim uma resposta atrasada nunca trava o painel nem pinta a conversa errada.
+    const seq = ++state.loadSeq;
     state.loadingMsgs = true;
     if (reset) {
       state.msgs = [];
@@ -251,13 +261,13 @@ export async function render(root, { query }) {
     drawMain();
     try {
       const page = await fetchMessages(conv, reset ? null : state.msgsNext);
-      if (!alive() || state.convMap.get(state.selectedKey) !== conv) return;
+      if (!alive() || seq !== state.loadSeq) return; // superada por uma carga mais recente
       state.msgs = reset ? page.items : state.msgs.concat(page.items);
       state.msgsNext = page.next || null;
     } catch (err) {
-      if (alive()) toast(err.message, 'error');
+      if (alive() && seq === state.loadSeq) toast(err.message, 'error');
     } finally {
-      if (alive() && state.convMap.get(state.selectedKey) === conv) {
+      if (alive() && seq === state.loadSeq) {
         state.loadingMsgs = false;
         drawMain();
       }

@@ -189,10 +189,10 @@ test('Teams: permissão negada (403) vira erro claro da conexão', async () => {
 // ---------------------------------------------------------------------------------------------
 // API
 
-async function startApp() {
+async function startApp(endpoints = mocks.endpoints) {
   const store = await new Store(path.join(root, `data-${Math.random().toString(36).slice(2)}`)).init();
-  const manager = new ScanManager(store, { mailEndpoints: mocks.endpoints });
-  const app = createApp({ store, manager, config: { authUser: '', authPassword: '', mailEndpoints: mocks.endpoints } });
+  const manager = new ScanManager(store, { mailEndpoints: endpoints });
+  const app = createApp({ store, manager, config: { authUser: '', authPassword: '', mailEndpoints: endpoints } });
   const srv = await new Promise((resolve) => {
     const x = app.listen(0, '127.0.0.1', () => resolve(x));
   });
@@ -367,5 +367,38 @@ test('API: visualizador ao vivo — validações e proteção de paginação (SS
     assert.match(badMsgs.data.error, /pagina[çc][ãa]o inv[áa]lida/i);
   } finally {
     await app.close();
+  }
+});
+
+test('API: visualizador ao vivo — uma equipe sem acesso aos canais não derruba o restante', async () => {
+  const graph = {
+    tenant: GRAPH_TENANT,
+    clientId: GRAPH_CLIENT,
+    secret: GRAPH_SECRET,
+    users: [{ id: 'u-ana', mail: 'ana@contoso.com', displayName: 'Ana' }],
+    teamsData: {
+      teams: [
+        { id: 't-ok', displayName: 'Boa', channels: [{ id: 'c-ok', displayName: 'Geral', membershipType: 'standard', messages: [] }] },
+        { id: 't-bad', displayName: 'Sem acesso', channelsError: 403, channels: [] },
+      ],
+      chats: { 'u-ana': ['chatX'] },
+      chatsById: { chatX: { id: 'chatX', chatType: 'oneOnOne', members: [{ displayName: 'Ana', email: 'ana@contoso.com' }], messages: [] } },
+    },
+  };
+  const mock = await startMockApis({ graph });
+  const app = await startApp(mock.endpoints);
+  try {
+    const source = await app.api('POST', '/api/mail-sources', { name: 'Microsoft 365', type: 'graph', scope: 'all', graph: { tenantId: GRAPH_TENANT, clientId: GRAPH_CLIENT, clientSecret: GRAPH_SECRET } });
+    const conv = await app.api('GET', `/api/teams-live/${source.data.id}/conversations?userId=u-ana`);
+    assert.equal(conv.status, 200, 'a conversa abre mesmo com uma equipe sem acesso');
+    assert.deepEqual(conv.data.chats.map((c) => c.id), ['chatX'], 'os chats continuam');
+    const ok = conv.data.teams.find((t) => t.id === 't-ok');
+    const bad = conv.data.teams.find((t) => t.id === 't-bad');
+    assert.deepEqual(ok.channels.map((c) => c.name), ['Geral'], 'a equipe boa mantém os canais');
+    assert.equal(bad.error, true, 'a equipe sem acesso é marcada com erro');
+    assert.deepEqual(bad.channels, [], 'e sem canais');
+  } finally {
+    await app.close();
+    await mock.close();
   }
 });

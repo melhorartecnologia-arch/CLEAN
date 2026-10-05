@@ -198,6 +198,8 @@ function teamsApi({ req, res, path, graph, json }) {
   m = /^\/teams\/([^/]+)\/channels$/.exec(path);
   if (m) {
     const t = data.teams.find((x) => x.id === m[1]);
+    // channelsError (ex.: 403/404): equipe sem acesso aos canais, para testar a resiliência.
+    if (t?.channelsError) return json(res, t.channelsError, { error: { code: 'Forbidden', message: 'Sem acesso aos canais desta equipe.' } }), true;
     return json(res, 200, { value: (t?.channels || []).map((c) => ({ id: c.id, displayName: c.displayName, membershipType: c.membershipType || 'standard' })) }), true;
   }
   m = /^\/teams\/([^/]+)\/channels\/([^/]+)\/messages$/.exec(path);

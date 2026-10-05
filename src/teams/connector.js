@@ -306,7 +306,11 @@ export class TeamsConnector extends GraphClient {
     return { items, next: this.next(page) };
   }
 
-  /** Equipes do usuário (joinedTeams) com os canais de cada uma. */
+  /**
+   * Equipes do usuário (joinedTeams) com os canais de cada uma. Os canais são buscados em paralelo
+   * (limitado) e uma equipe cujos canais não possam ser listados (removida, sem permissão) é apenas
+   * marcada com `error` — as demais equipes e os chats continuam aparecendo.
+   */
   async userTeams(userId) {
     const teams = [];
     let url = `/users/${enc(userId)}/joinedTeams?$select=id,displayName&$top=100`;
@@ -315,14 +319,20 @@ export class TeamsConnector extends GraphClient {
       for (const t of page?.value || []) teams.push({ id: t.id, name: t.displayName || '', channels: [] });
       url = this.next(page);
     }
-    for (const t of teams) {
-      let curl = `/teams/${enc(t.id)}/channels?$select=id,displayName,membershipType&$top=50`;
-      while (curl) {
-        const cp = await this.api(curl);
-        for (const c of cp?.value || []) t.channels.push({ id: c.id, name: c.displayName || '', membershipType: c.membershipType || 'standard' });
-        curl = this.next(cp);
+    const loadChannels = async (t) => {
+      try {
+        let curl = `/teams/${enc(t.id)}/channels?$select=id,displayName,membershipType&$top=50`;
+        while (curl) {
+          const cp = await this.api(curl);
+          for (const c of cp?.value || []) t.channels.push({ id: c.id, name: c.displayName || '', membershipType: c.membershipType || 'standard' });
+          curl = this.next(cp);
+        }
+      } catch {
+        t.error = true; // canais não listados (equipe removida ou sem permissão)
       }
-    }
+    };
+    const run = pool(teams, MAX_CONCURRENCY, loadChannels);
+    for await (const _ of run); // eslint-disable-line no-unused-vars
     return teams;
   }
 
