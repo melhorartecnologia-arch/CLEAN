@@ -172,7 +172,7 @@ function teamsMessageJson(m) {
     body: { contentType: m.contentType || 'html', content: m.body || '' },
     from: m.from ? { user: { id: m.fromId || `u-${m.id}`, displayName: m.from, userIdentityType: 'aadUser' } } : null,
     webUrl: m.webUrl || `https://teams.microsoft.com/l/message/${m.id}`,
-    attachments: (m.attachments || []).map((a) => ({ id: a.id || a.name, contentType: a.contentType || 'reference', contentUrl: a.contentUrl || '', name: a.name })),
+    attachments: (m.attachments || []).map((a) => ({ id: a.id || a.name, contentType: a.contentType || 'reference', contentUrl: a.contentUrl || '', name: a.name ?? null, content: a.content ?? null })),
     ...(m.replies ? { replies: { '@odata.count': m.replies.length } } : {}),
   };
 }
@@ -198,6 +198,8 @@ function teamsApi({ req, res, path, graph, json }) {
     res.writeHead(200, { 'Content-Type': hc.contentType || 'image/png', 'Content-Length': hc.content.length });
     return res.end(hc.content), true;
   };
+  // Como o Graph, as mensagens e respostas vêm das mais recentes para as mais antigas.
+  const newestFirst = (list) => [...(list || [])].sort((a, b) => new Date(b.createdDateTime || 0) - new Date(a.createdDateTime || 0));
   let m;
   if (path === '/teams') return json(res, 200, { value: data.teams.map((t) => ({ id: t.id, displayName: t.displayName })) }), true;
   m = /^\/teams\/([^/]+)$/.exec(path);
@@ -214,11 +216,11 @@ function teamsApi({ req, res, path, graph, json }) {
     return json(res, 200, { value: (t?.channels || []).map((c) => ({ id: c.id, displayName: c.displayName, membershipType: c.membershipType || 'standard' })) }), true;
   }
   m = /^\/teams\/([^/]+)\/channels\/([^/]+)\/messages$/.exec(path);
-  if (m) return json(res, 200, { value: (channelOf(m[1], m[2])?.messages || []).map(teamsMessageJson) }), true;
+  if (m) return json(res, 200, { value: newestFirst(channelOf(m[1], m[2])?.messages).map(teamsMessageJson) }), true;
   m = /^\/teams\/([^/]+)\/channels\/([^/]+)\/messages\/([^/]+)\/replies$/.exec(path);
   if (m) {
     const root = (channelOf(m[1], m[2])?.messages || []).find((x) => x.id === m[3]);
-    return json(res, 200, { value: (root?.replies || []).map(teamsMessageJson) }), true;
+    return json(res, 200, { value: newestFirst(root?.replies).map(teamsMessageJson) }), true;
   }
   // Imagens embutidas (hosted content): chat, mensagem de canal e resposta de canal.
   m = /^\/chats\/([^/]+)\/messages\/([^/]+)\/hostedContents\/([^/]+)\/\$value$/.exec(path);
@@ -253,7 +255,7 @@ function teamsApi({ req, res, path, graph, json }) {
     return json(res, 200, { value }), true;
   }
   m = /^\/chats\/([^/]+)\/messages$/.exec(path);
-  if (m) return json(res, 200, { value: (data.chatsById[m[1]]?.messages || []).map(teamsMessageJson) }), true;
+  if (m) return json(res, 200, { value: newestFirst(data.chatsById[m[1]]?.messages).map(teamsMessageJson) }), true;
   m = /^\/shares\/([^/]+)\/driveItem$/.exec(path);
   if (m) {
     let url = '';

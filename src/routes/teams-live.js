@@ -73,23 +73,22 @@ export function teamsLiveRouter({ store, endpoints = {} }) {
   // Mensagens de uma conversa (chat ou canal), uma página, as mais recentes primeiro.
   router.get('/:id/messages', async (req, res) => {
     const source = graphSource(req.params.id);
-    const kind = req.query.kind;
+    const spec = convSpec(req);
     const next = nextToken(req);
-    const page = await live(source, (c) => {
-      if (kind === 'chat') {
-        const chatId = String(req.query.chatId || '').trim();
-        if (!chatId) throw new HttpError(400, 'Informe o chat.');
-        return c.chatMessagesPage(chatId, next);
-      }
-      if (kind === 'channel') {
-        const teamId = String(req.query.teamId || '').trim();
-        const channelId = String(req.query.channelId || '').trim();
-        if (!teamId || !channelId) throw new HttpError(400, 'Informe a equipe e o canal.');
-        return c.channelMessagesPage(teamId, channelId, next);
-      }
-      throw new HttpError(400, 'Tipo de conversa inválido.');
-    });
+    const page = await live(source, (c) =>
+      spec.kind === 'chat' ? c.chatMessagesPage(spec.chatId, next) : c.channelMessagesPage(spec.teamId, spec.channelId, next),
+    );
     res.json(page);
+  });
+
+  // Histórico de uma conversa: várias páginas de uma vez (um único token), as mais recentes primeiro.
+  // Devolve { items, next } — next preenchido quando ainda há mensagens mais antigas além do lote.
+  router.get('/:id/history', async (req, res) => {
+    const source = graphSource(req.params.id);
+    const spec = convSpec(req);
+    const next = nextToken(req);
+    const data = await live(source, (c) => c.messagesHistory(spec, { next }));
+    res.json(data);
   });
 
   // Respostas de uma mensagem de canal, uma página.
@@ -143,6 +142,23 @@ export function teamsLiveRouter({ store, endpoints = {} }) {
   });
 
   return router;
+}
+
+/** Descreve a conversa (chat ou canal) a partir dos parâmetros da requisição; valida os obrigatórios. */
+function convSpec(req) {
+  const kind = req.query.kind;
+  if (kind === 'chat') {
+    const chatId = String(req.query.chatId || '').trim();
+    if (!chatId) throw new HttpError(400, 'Informe o chat.');
+    return { kind, chatId };
+  }
+  if (kind === 'channel') {
+    const teamId = String(req.query.teamId || '').trim();
+    const channelId = String(req.query.channelId || '').trim();
+    if (!teamId || !channelId) throw new HttpError(400, 'Informe a equipe e o canal.');
+    return { kind, teamId, channelId };
+  }
+  throw new HttpError(400, 'Tipo de conversa inválido.');
 }
 
 /** Token de continuação (um nextLink do Graph), validado pelo conector antes de usar. */

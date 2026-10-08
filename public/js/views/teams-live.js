@@ -197,7 +197,7 @@ export async function render(root, { query }) {
     mainEl.scrollTop = scroll;
   }
 
-  /** Corpo da conversa (mensagens, já aplicando o filtro rápido). */
+  /** Corpo da conversa: as mensagens em ordem cronológica (a mais antiga no topo), já com o filtro. */
   function drawBody() {
     const bodyEl = root.querySelector('[data-body]');
     if (!bodyEl) return;
@@ -206,23 +206,24 @@ export async function render(root, { query }) {
     const conv = state.convMap.get(state.selectedKey);
     const term = state.filter.trim();
     const shown = term ? state.msgs.filter((m) => fold(`${m.from} ${m.subject} ${m.text}`).includes(fold(term))) : state.msgs;
+    // Ainda há mensagens mais antigas além do que foi carregado (conversa muito longa): botão no topo.
+    const older =
+      state.msgsNext && !term
+        ? html`<div class="live-older"><button class="btn small" data-act="older" ${state.loadingMsgs ? 'disabled' : ''}>${state.loadingMsgs ? 'Carregando…' : 'Carregar mensagens mais antigas'}</button></div>`
+        : '';
     paint(
       bodyEl,
       html`${state.loadingMsgs && state.msgs.length === 0
-        ? html`<p class="loading">Carregando mensagens…</p>`
-        : state.msgs.length === 0 && !state.msgsNext
+        ? html`<p class="loading">Carregando a conversa…</p>`
+        : state.msgs.length === 0
           ? html`<div class="empty">Nenhuma mensagem nesta conversa.</div>`
           : html`${term
                 ? html`<p class="muted small live-order">${plural(shown.length, 'mensagem encontrada', 'mensagens encontradas')} de ${state.msgs.length} carregada(s).</p>`
-                : state.msgs.length
-                  ? html`<p class="muted small live-order">As mais recentes primeiro.</p>`
-                  : ''}
+                : html`<p class="muted small live-order">${plural(state.msgs.length, 'mensagem', 'mensagens')} · da mais antiga (topo) para a mais recente.</p>`}
+              ${older}
               ${shown.length
                 ? html`<div class="messages">${shown.map((m) => messageCard(m, conv, term))}</div>`
-                : term
-                  ? html`<div class="empty">Nenhuma mensagem carregada corresponde a “${term}”. Carregue mais antigas ou use a busca em todas as conversas.</div>`
-                  : html`<div class="empty">Nenhuma mensagem exibível nesta página (apenas mensagens de sistema). Carregue as mais antigas.</div>`}
-              ${state.msgsNext ? html`<div class="live-foot"><button class="btn" data-act="older" ${state.loadingMsgs ? 'disabled' : ''}>${state.loadingMsgs ? 'Carregando…' : 'Carregar mais antigas'}</button></div>` : ''}`}`,
+                : html`<div class="empty">Nenhuma mensagem carregada corresponde a “${term}”. Use a busca em todas as conversas para procurar fora desta conversa.</div>`}`}`,
     );
     if (mainEl) mainEl.scrollTop = scroll;
   }
@@ -255,6 +256,7 @@ export async function render(root, { query }) {
         <span class="msg-from">${m.from || 'Desconhecido'}</span>
         <span class="muted small">${fmtDateTime(m.date)}${m.edited ? html` · <span title="Editada em ${fmtDateTime(m.edited)}">editada</span>` : ''}</span>
       </div>
+      ${quoteBlock(m)}
       ${m.subject ? html`<div class="msg-subject">${highlight(m.subject, term)}</div>` : ''}
       ${m.text ? html`<div class="msg-body">${highlight(m.text, term)}</div>` : html`<div class="msg-body muted"><em>(sem texto)</em></div>`}
       ${images(conv, m, null)}
@@ -276,6 +278,7 @@ export async function render(root, { query }) {
         <span class="muted small">${fmtDateTime(m.date)}</span>
       </div>
       <div class="result-conv">${icon(m.conv.kind === 'chat' ? 'user' : 'list')} ${m.conv.label}</div>
+      ${quoteBlock(m)}
       ${m.subject ? html`<div class="msg-subject">${highlight(m.subject, state.search.q)}</div>` : ''}
       ${m.text ? html`<div class="msg-body">${highlight(m.text, state.search.q)}</div>` : html`<div class="msg-body muted"><em>(sem texto)</em></div>`}
       ${images(m.conv, m, null)}
@@ -288,15 +291,26 @@ export async function render(root, { query }) {
     if ((rep.items || []).length === 0) return html`<div class="replies"><p class="muted small">Sem respostas.</p></div>`;
     const conv = state.convMap.get(state.selectedKey);
     return html`<div class="replies">
+      ${rep.next ? html`<button class="btn small" data-act="replies-more" data-id="${m.id}" ${rep.loading ? 'disabled' : ''}>${rep.loading ? 'Carregando…' : 'Carregar respostas mais antigas'}</button>` : ''}
       ${rep.items.map(
         (r) => html`<article class="msg reply">
           <div class="msg-head"><span class="msg-from">${r.from || 'Desconhecido'}</span><span class="muted small">${fmtDateTime(r.date)}${r.edited ? html` · editada` : ''}</span></div>
+          ${quoteBlock(r)}
           ${r.text ? html`<div class="msg-body">${highlight(r.text, term)}</div>` : html`<div class="msg-body muted"><em>(sem texto)</em></div>`}
           ${images(conv, r, m.id)}
           ${attachments(r)}
         </article>`,
       )}
-      ${rep.next ? html`<button class="btn small" data-act="replies-more" data-id="${m.id}" ${rep.loading ? 'disabled' : ''}>${rep.loading ? 'Carregando…' : 'Carregar mais respostas'}</button>` : ''}
+    </div>`;
+  }
+
+  /** Bloco de citação: deixa claro que a mensagem é resposta a outra (remetente e prévia). */
+  function quoteBlock(m) {
+    if (!m.quote) return '';
+    const q = m.quote;
+    return html`<div class="msg-quote">
+      <div class="msg-quote-head">${icon('reply')} Em resposta a ${q.sender ? html`<b>${q.sender}</b>` : 'uma mensagem'}</div>
+      ${q.preview ? html`<div class="msg-quote-text">${q.preview}</div>` : ''}
     </div>`;
   }
 
@@ -335,6 +349,15 @@ export async function render(root, { query }) {
 
   // ---------- Carregamento das mensagens ----------
 
+  // Teto de lotes do histórico (cada lote traz várias páginas do servidor). ~9000 mensagens no total;
+  // além disso, o botão "Carregar mensagens mais antigas" continua a leitura.
+  const MAX_BATCHES = 6;
+
+  /**
+   * reset=true: abre a conversa e carrega todo o histórico (em lotes, com progresso), em ordem
+   * cronológica, rolando para a mensagem mais recente. reset=false: carrega um lote de mensagens
+   * mais antigas e as acrescenta no topo, mantendo a posição de leitura.
+   */
   async function loadMessages(reset) {
     const conv = state.convMap.get(state.selectedKey);
     if (!conv) return;
@@ -342,30 +365,49 @@ export async function render(root, { query }) {
     // as anteriores — assim uma resposta atrasada nunca trava o painel nem pinta a conversa errada.
     const seq = ++state.loadSeq;
     state.loadingMsgs = true;
+    const main0 = root.querySelector('[data-main]');
+    const prevH = !reset && main0 ? main0.scrollHeight : 0;
+    const prevTop = !reset && main0 ? main0.scrollTop : 0;
     if (reset) {
       state.msgs = [];
       state.msgsNext = null;
       state.replies = new Map();
       state.filter = '';
+      drawMain();
+    } else {
+      drawBody();
     }
-    drawMain();
     try {
-      const page = await fetchMessages(conv, reset ? null : state.msgsNext);
-      if (!alive() || seq !== state.loadSeq) return; // superada por uma carga mais recente
-      state.msgs = reset ? page.items : state.msgs.concat(page.items);
-      state.msgsNext = page.next || null;
+      let next = reset ? null : state.msgsNext;
+      const loaded = []; // acumulado em ordem do Graph (mais recentes primeiro)
+      const batches = reset ? MAX_BATCHES : 1;
+      for (let b = 0; b < batches; b++) {
+        const page = await fetchHistory(conv, next);
+        if (!alive() || seq !== state.loadSeq) return; // superada por outra conversa/recarga
+        loaded.push(...page.items);
+        next = page.next || null;
+        if (!next || b + 1 >= batches) break;
+        const el = root.querySelector('[data-body]');
+        if (reset && el) paint(el, html`<p class="loading">Carregando o histórico… ${plural(loaded.length, 'mensagem', 'mensagens')}</p>`);
+      }
+      if (!alive() || seq !== state.loadSeq) return;
+      const chrono = loaded.reverse(); // da mais antiga para a mais recente
+      state.msgs = reset ? chrono : chrono.concat(state.msgs);
+      state.msgsNext = next;
     } catch (err) {
       if (alive() && seq === state.loadSeq) toast(err.message, 'error');
     } finally {
       if (alive() && seq === state.loadSeq) {
         state.loadingMsgs = false;
-        drawMain();
+        drawBody();
+        const el = root.querySelector('[data-main]');
+        if (el) el.scrollTop = reset ? el.scrollHeight : prevTop + (el.scrollHeight - prevH);
       }
     }
   }
 
-  function fetchMessages(conv, next) {
-    const base = `/api/teams-live/${encodeURIComponent(state.source.id)}/messages`;
+  function fetchHistory(conv, next) {
+    const base = `/api/teams-live/${encodeURIComponent(state.source.id)}/history`;
     const q =
       conv.kind === 'chat'
         ? `kind=chat&chatId=${encodeURIComponent(conv.chatId)}`
@@ -389,7 +431,9 @@ export async function render(root, { query }) {
       const q = `teamId=${encodeURIComponent(conv.teamId)}&channelId=${encodeURIComponent(conv.channelId)}&messageId=${encodeURIComponent(messageId)}`;
       const page = await get(`${base}?${q}${more && rep.next ? `&next=${encodeURIComponent(rep.next)}` : ''}`);
       if (!alive() || state.convMap.get(state.selectedKey) !== conv) return;
-      rep.items = more ? rep.items.concat(page.items) : page.items;
+      // Em ordem cronológica (a mais antiga primeiro); "mais antigas" entram no topo.
+      const chrono = [...page.items].reverse();
+      rep.items = more ? chrono.concat(rep.items) : chrono;
       rep.next = page.next || null;
       rep.loaded = true;
     } catch (err) {

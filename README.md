@@ -42,10 +42,11 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   aplicativo Microsoft 365 do e-mail (com as permissões do Teams consentidas pelo administrador). Com
   a exclusão permitida, remove (softDelete, recuperável) as mensagens de canal encontradas.
 - **Teams ao vivo** (somente leitura): lê as conversas de um usuário — os **chats** dele e os
-  **canais das equipes** de que participa — direto do Microsoft 365, **sob demanda** (botões
-  *Atualizar* e *Carregar mais*), com as **imagens** das mensagens e **busca** (filtro na conversa
-  aberta e busca geral nas conversas do usuário), sem procurar termos, sem excluir e sem gravar nada.
-  Útil para conferir rapidamente o que uma pessoa trocou no Teams antes de decidir por uma análise.
+  **canais das equipes** de que participa — direto do Microsoft 365, carregando **todo o histórico**
+  da conversa em ordem cronológica, com as **imagens** das mensagens, as **respostas a mensagens**
+  (fica claro a quem cada mensagem responde) e **busca** (filtro na conversa aberta e busca geral nas
+  conversas do usuário), sem procurar termos, sem excluir e sem gravar nada. Útil para conferir
+  rapidamente o que uma pessoa trocou no Teams antes de decidir por uma análise.
 - **OAuth 2.0 da Microsoft** em todas as formas usadas pelo Exchange Online e pelo Outlook.com:
   aplicativo com **segredo do cliente**, aplicativo com **certificado** (gerado pelo próprio CLEAN)
   ou **conta Microsoft conectada** (a pessoa entra com a conta pelo código de dispositivo; a
@@ -650,11 +651,16 @@ ela participa. Ao contrário das *Análises do Teams*, ele **não procura termos
 **não grava** nenhum resultado; serve para conferir rapidamente o que alguém trocou no Teams.
 
 A tela tem duas colunas: à esquerda, a lista das conversas (os chats e, por equipe, os canais); à
-direita, as mensagens da conversa escolhida, as mais recentes primeiro, com o autor, a data, o texto,
-as **imagens** coladas na conversa, os anexos (com link para o arquivo no SharePoint/OneDrive) e, nas
-mensagens de canal, as **respostas** sob demanda (*Ver respostas*). O carregamento é **sob demanda**:
-os botões *Atualizar* (recarrega a conversa), *Carregar mais antigas* e *Carregar mais chats* buscam
-novas páginas só quando você pede — não há atualização automática.
+direita, as mensagens da conversa escolhida com o autor, a data, o texto, as **imagens** coladas na
+conversa, os anexos (com link para o arquivo no SharePoint/OneDrive) e, nas mensagens de canal, as
+**respostas** sob demanda (*Ver respostas*). Ao abrir uma conversa, o CLEAN **carrega todo o histórico**
+(em ordem cronológica — da mensagem mais antiga, no topo, até a mais recente, no fim, já rolado para o
+fim), para facilitar a leitura. Conversas muito longas carregam um grande trecho recente e trazem o
+botão *Carregar mensagens mais antigas* para continuar. Não há atualização automática: *Atualizar*
+recarrega a conversa e *Carregar mais chats* traz mais conversas na lista.
+
+**Respostas a mensagens.** Quando uma mensagem é resposta a outra específica, o CLEAN mostra um bloco
+*Em resposta a [pessoa]* com uma prévia da mensagem citada, para ficar claro a que ela responde.
 
 **Imagens.** As imagens embutidas nas mensagens ficam no Microsoft Graph protegidas por autenticação;
 o CLEAN as busca no servidor (com o token da conexão) e as mostra na tela — o token **nunca** vai para

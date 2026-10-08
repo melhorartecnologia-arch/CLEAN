@@ -48,6 +48,22 @@ function hostedImages(html) {
   return images;
 }
 
+/**
+ * Mensagem citada (quando uma mensagem é resposta a outra específica): o Graph traz um anexo de
+ * contentType "messageReference" cujo content é um JSON com o remetente e uma prévia da mensagem
+ * citada. Devolve { sender, preview } ou null.
+ */
+function parseQuote(content) {
+  try {
+    const j = JSON.parse(content);
+    const sender = j.messageSender?.user?.displayName || j.messageSender?.application?.displayName || '';
+    const preview = htmlToText(String(j.messagePreview || '')).trim();
+    return sender || preview ? { sender, preview } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Nome de exibição de um chat a partir do tipo, do tópico e dos participantes. */
 function chatLabel(chat) {
   if (chat.topic) return chat.topic;
@@ -308,15 +324,26 @@ export class TeamsConnector extends GraphClient {
     const from = m.from?.user?.displayName || (m.from?.application?.displayName ? `${m.from.application.displayName} (aplicativo)` : '') || '';
     const raw = m.body?.content || '';
     const html = (m.body?.contentType || '').toLowerCase() === 'html';
+    // Separa a citação (resposta a outra mensagem) dos demais anexos.
+    const attachments = [];
+    let quote = null;
+    for (const a of m.attachments || []) {
+      if ((a.contentType || '').toLowerCase() === 'messagereference') quote = quote || parseQuote(a.content);
+      else attachments.push({ name: a.name || a.id, contentType: a.contentType || '', url: /^https:\/\//i.test(a.contentUrl || '') ? a.contentUrl : '' });
+    }
+    // Quando a mensagem cita outra, o corpo às vezes repete o trecho citado num <blockquote>: tiramos
+    // para não duplicar (a citação é mostrada à parte).
+    const body = quote && html ? raw.replace(/<blockquote\b[^>]*>[\s\S]*?<\/blockquote>/gi, ' ') : raw;
     return {
       id: m.id,
       from,
-      text: html ? htmlToText(raw) : raw,
+      text: html ? htmlToText(body) : body,
       subject: m.subject || '',
       date: m.createdDateTime || null,
       edited: m.lastEditedDateTime && m.lastEditedDateTime !== m.createdDateTime ? m.lastEditedDateTime : null,
-      attachments: (m.attachments || []).map((a) => ({ name: a.name || a.id, contentType: a.contentType || '', url: /^https:\/\//i.test(a.contentUrl || '') ? a.contentUrl : '' })),
-      images: html ? hostedImages(raw) : [],
+      attachments,
+      images: html ? hostedImages(body) : [],
+      quote,
       webUrl: /^https:\/\//i.test(m.webUrl || '') ? m.webUrl : null,
       ...extra,
     };
@@ -368,22 +395,54 @@ export class TeamsConnector extends GraphClient {
     return teams;
   }
 
-  /** Uma página de mensagens de um chat (as mais recentes primeiro, como o Graph entrega). */
+  /** Monta o registro de uma mensagem de conversa (raiz de canal inclui a contagem de respostas). */
+  liveOf(m, isChannel) {
+    return isChannel
+      ? this.liveMessage(m, { replyCount: Number(m.replies?.['@odata.count'] ?? -1), hasReplies: Number(m.replies?.['@odata.count'] ?? 1) !== 0 })
+      : this.liveMessage(m);
+  }
+
+  /** URL da primeira página de mensagens de uma conversa (chat ou canal). */
+  messagesUrl({ kind, chatId, teamId, channelId }) {
+    return kind === 'chat'
+      ? `/chats/${enc(chatId)}/messages?$top=50`
+      : `/teams/${enc(teamId)}/channels/${enc(channelId)}/messages?$top=50`;
+  }
+
+  /** Uma página de mensagens de uma conversa (as mais recentes primeiro, como o Graph entrega). */
   async chatMessagesPage(chatId, next = null) {
-    const page = await this.api(this.pageUrl(next, `/chats/${enc(chatId)}/messages?$top=20`));
+    const page = await this.api(this.pageUrl(next, this.messagesUrl({ kind: 'chat', chatId })));
     return { items: (page?.value || []).filter(TeamsConnector.real).map((m) => this.liveMessage(m)), next: this.next(page) };
   }
 
   /** Uma página de mensagens de um canal (mensagens raiz; respostas sob demanda). */
   async channelMessagesPage(teamId, channelId, next = null) {
-    const page = await this.api(this.pageUrl(next, `/teams/${enc(teamId)}/channels/${enc(channelId)}/messages?$top=20`));
-    const items = (page?.value || []).filter(TeamsConnector.real).map((m) => this.liveMessage(m, { replyCount: Number(m.replies?.['@odata.count'] ?? -1), hasReplies: Number(m.replies?.['@odata.count'] ?? 1) !== 0 }));
+    const page = await this.api(this.pageUrl(next, this.messagesUrl({ kind: 'channel', teamId, channelId })));
+    const items = (page?.value || []).filter(TeamsConnector.real).map((m) => this.liveOf(m, true));
     return { items, next: this.next(page) };
+  }
+
+  /**
+   * Várias páginas de mensagens de uma conversa de uma vez (um único conector/token): segue a
+   * paginação até maxPages. Devolve { items (as mais recentes primeiro), next } — next preenchido
+   * quando ainda há mensagens mais antigas além do teto.
+   */
+  async messagesHistory(conv, { next = null, maxPages = 30, signal = this.signal } = {}) {
+    const isChannel = conv.kind === 'channel';
+    const items = [];
+    let url = this.pageUrl(next, this.messagesUrl(conv));
+    let pages = 0;
+    for (; url && pages < maxPages; pages++) {
+      const page = await this.api(url, { signal });
+      for (const m of page?.value || []) if (TeamsConnector.real(m)) items.push(this.liveOf(m, isChannel));
+      url = this.next(page);
+    }
+    return { items, next: url || null };
   }
 
   /** Uma página de respostas de uma mensagem de canal. */
   async channelRepliesPage(teamId, channelId, messageId, next = null) {
-    const page = await this.api(this.pageUrl(next, `/teams/${enc(teamId)}/channels/${enc(channelId)}/messages/${enc(messageId)}/replies?$top=20`));
+    const page = await this.api(this.pageUrl(next, `/teams/${enc(teamId)}/channels/${enc(channelId)}/messages/${enc(messageId)}/replies?$top=50`));
     return { items: (page?.value || []).filter(TeamsConnector.real).map((m) => this.liveMessage(m)), next: this.next(page) };
   }
 

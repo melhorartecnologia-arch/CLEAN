@@ -479,3 +479,56 @@ test('API: visualizador ao vivo — imagens embutidas (proxy) e busca geral', as
     await mock.close();
   }
 });
+
+test('API: visualizador ao vivo — histórico (/history) e citação (resposta a uma mensagem)', async () => {
+  const quoteRef = JSON.stringify({ messageId: 'cm1', messagePreview: 'podemos revisar o contrato?', messageSender: { user: { displayName: 'Bia' } } });
+  const graph = {
+    tenant: GRAPH_TENANT,
+    clientId: GRAPH_CLIENT,
+    secret: GRAPH_SECRET,
+    users: [{ id: 'u-ana', mail: 'ana@contoso.com', displayName: 'Ana' }],
+    teamsData: {
+      teams: [],
+      chats: { 'u-ana': ['chat1'] },
+      chatsById: {
+        chat1: {
+          id: 'chat1',
+          chatType: 'oneOnOne',
+          members: [{ displayName: 'Ana', email: 'ana@contoso.com' }, { displayName: 'Bia', email: 'bia@contoso.com' }],
+          messages: [
+            { id: 'cm1', from: 'Bia', contentType: 'html', body: '<p>podemos revisar o contrato?</p>', createdDateTime: '2026-09-23T09:00:00Z' },
+            { id: 'cm2', from: 'Ana', contentType: 'html', body: '<blockquote>podemos revisar o contrato?</blockquote><p>sim, hoje à tarde</p>', createdDateTime: '2026-09-23T10:00:00Z', attachments: [{ id: 'ref1', contentType: 'messageReference', content: quoteRef }] },
+          ],
+        },
+      },
+    },
+  };
+  const mock = await startMockApis({ graph });
+  const app = await startApp(mock.endpoints);
+  try {
+    const source = await app.api('POST', '/api/mail-sources', { name: 'Microsoft 365', type: 'graph', scope: 'all', graph: { tenantId: GRAPH_TENANT, clientId: GRAPH_CLIENT, clientSecret: GRAPH_SECRET } });
+    const sid = source.data.id;
+
+    // /history devolve as mensagens da conversa numa só resposta, sem continuação.
+    const hist = await app.api('GET', `/api/teams-live/${sid}/history?kind=chat&chatId=chat1`);
+    assert.equal(hist.status, 200);
+    assert.deepEqual(hist.data.items.map((m) => m.id).sort(), ['cm1', 'cm2']);
+    assert.equal(hist.data.next, null);
+
+    // Citação: a resposta a uma mensagem é reconhecida (remetente + prévia), separada dos anexos, e
+    // o trecho citado não se repete no corpo.
+    const cm2 = hist.data.items.find((m) => m.id === 'cm2');
+    assert.ok(cm2.quote, 'a mensagem tem uma citação');
+    assert.equal(cm2.quote.sender, 'Bia');
+    assert.match(cm2.quote.preview, /revisar o contrato/);
+    assert.deepEqual(cm2.attachments, [], 'a referência não vira anexo comum');
+    assert.match(cm2.text, /sim, hoje/);
+    assert.ok(!/revisar o contrato/.test(cm2.text), 'o trecho citado foi retirado do corpo');
+
+    // history exige a conversa.
+    assert.equal((await app.api('GET', `/api/teams-live/${sid}/history?kind=chat`)).status, 400);
+  } finally {
+    await app.close();
+    await mock.close();
+  }
+});
