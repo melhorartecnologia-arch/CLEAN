@@ -30,7 +30,7 @@ export async function render(root, { query }) {
     convs: null, // { chats:[], chatsNext, teams:[] }
     convMap: new Map(), // chave → descritor da conversa
     selectedKey: null,
-    msgs: [], // mensagens carregadas da conversa selecionada (mais recentes primeiro)
+    msgs: [], // mensagens carregadas da conversa selecionada (ordem cronológica: a mais antiga primeiro)
     msgsNext: null,
     loadingMsgs: false,
     loadSeq: 0, // identifica a carga de mensagens mais recente (troca de conversa cancela as anteriores)
@@ -215,15 +215,17 @@ export async function render(root, { query }) {
       bodyEl,
       html`${state.loadingMsgs && state.msgs.length === 0
         ? html`<p class="loading">Carregando a conversa…</p>`
-        : state.msgs.length === 0
-          ? html`<div class="empty">Nenhuma mensagem nesta conversa.</div>`
-          : html`${term
+        : html`${term
                 ? html`<p class="muted small live-order">${plural(shown.length, 'mensagem encontrada', 'mensagens encontradas')} de ${state.msgs.length} carregada(s).</p>`
-                : html`<p class="muted small live-order">${plural(state.msgs.length, 'mensagem', 'mensagens')} · da mais antiga (topo) para a mais recente.</p>`}
+                : state.msgs.length
+                  ? html`<p class="muted small live-order">${plural(state.msgs.length, 'mensagem', 'mensagens')}${state.msgsNext ? ' carregadas (há mais antigas)' : ''} · da mais antiga (topo) para a mais recente.</p>`
+                  : ''}
               ${older}
               ${shown.length
                 ? html`<div class="messages">${shown.map((m) => messageCard(m, conv, term))}</div>`
-                : html`<div class="empty">Nenhuma mensagem carregada corresponde a “${term}”. Use a busca em todas as conversas para procurar fora desta conversa.</div>`}`}`,
+                : term
+                  ? html`<div class="empty">Nenhuma mensagem carregada corresponde a “${term}”. Use a busca em todas as conversas para procurar fora desta conversa.</div>`
+                  : html`<div class="empty">${state.msgsNext ? 'Nenhuma mensagem recente exibível — use “Carregar mensagens mais antigas”.' : 'Nenhuma mensagem nesta conversa.'}</div>`}`}`,
     );
     if (mainEl) mainEl.scrollTop = scroll;
   }

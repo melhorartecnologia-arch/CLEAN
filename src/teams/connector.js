@@ -332,8 +332,9 @@ export class TeamsConnector extends GraphClient {
       else attachments.push({ name: a.name || a.id, contentType: a.contentType || '', url: /^https:\/\//i.test(a.contentUrl || '') ? a.contentUrl : '' });
     }
     // Quando a mensagem cita outra, o corpo às vezes repete o trecho citado num <blockquote>: tiramos
-    // para não duplicar (a citação é mostrada à parte).
-    const body = quote && html ? raw.replace(/<blockquote\b[^>]*>[\s\S]*?<\/blockquote>/gi, ' ') : raw;
+    // para não duplicar (a citação é mostrada à parte). [^<>] (e não [^>]) evita trabalho quadrático
+    // num corpo com muitos "<blockquote" malformados.
+    const body = quote && html ? raw.replace(/<blockquote\b[^<>]*>[\s\S]*?<\/blockquote>/gi, ' ') : raw;
     return {
       id: m.id,
       from,

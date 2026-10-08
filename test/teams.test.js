@@ -365,6 +365,9 @@ test('API: visualizador ao vivo — validações e proteção de paginação (SS
     const badMsgs = await app.api('GET', `/api/teams-live/${sid}/messages?kind=chat&chatId=chat1&next=${evil}`);
     assert.equal(badMsgs.status, 400);
     assert.match(badMsgs.data.error, /pagina[çc][ãa]o inv[áa]lida/i);
+    const badHist = await app.api('GET', `/api/teams-live/${sid}/history?kind=chat&chatId=chat1&next=${evil}`);
+    assert.equal(badHist.status, 400);
+    assert.match(badHist.data.error, /pagina[çc][ãa]o inv[áa]lida/i);
   } finally {
     await app.close();
   }

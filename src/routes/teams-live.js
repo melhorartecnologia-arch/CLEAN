@@ -17,8 +17,12 @@ export function teamsLiveRouter({ store, endpoints = {} }) {
     return s;
   };
 
-  /** Cria o conector (segredos decifrados), roda a leitura (com tempo limite) e fecha. */
-  async function live(source, fn) {
+  /**
+   * Cria o conector (segredos decifrados), roda a leitura (com tempo limite) e fecha. Passando `req`,
+   * a leitura é interrompida se o cliente desconectar — útil nas leituras longas (histórico, busca),
+   * para não seguir varrendo o Graph depois que o usuário troca de conversa.
+   */
+  async function live(source, fn, req) {
     let secrets;
     try {
       secrets = store.openMailSecrets(source);
@@ -27,14 +31,20 @@ export function teamsLiveRouter({ store, endpoints = {} }) {
     }
     const grantId = source.graph?.account?.grantId;
     const onRefreshToken = grantId ? (token) => store.saveRefreshToken(source.id, grantId, token) : undefined;
-    const connector = new TeamsConnector({ ...source, secrets, teams: {} }, { signal: AbortSignal.timeout(60000), endpoints, onRefreshToken });
+    const aborter = new AbortController();
+    const onClose = () => aborter.abort();
+    if (req) req.on('close', onClose);
+    const signal = req ? AbortSignal.any([AbortSignal.timeout(60000), aborter.signal]) : AbortSignal.timeout(60000);
+    const connector = new TeamsConnector({ ...source, secrets, teams: {} }, { signal, endpoints, onRefreshToken });
     try {
       return await fn(connector);
     } catch (err) {
       if (err instanceof HttpError) throw err;
+      if (req && aborter.signal.aborted) throw new HttpError(408, 'Leitura cancelada (o cliente desconectou).'); // sem log de erro
       const status = [400, 403, 404].includes(err?.status) ? err.status : 502;
       throw new HttpError(status, friendlyError(err));
     } finally {
+      if (req) req.off('close', onClose);
       await connector.close?.();
     }
   }
@@ -53,11 +63,15 @@ export function teamsLiveRouter({ store, endpoints = {} }) {
     const source = graphSource(req.params.id);
     const userId = String(req.query.userId || '').trim();
     if (!userId) throw new HttpError(400, 'Informe o usuário.');
-    const data = await live(source, async (c) => {
-      const chats = await c.userChatsPage(userId, null);
-      const teams = await c.userTeams(userId);
-      return { chats: chats.items, chatsNext: chats.next, teams };
-    });
+    const data = await live(
+      source,
+      async (c) => {
+        const chats = await c.userChatsPage(userId, null);
+        const teams = await c.userTeams(userId);
+        return { chats: chats.items, chatsNext: chats.next, teams };
+      },
+      req,
+    );
     res.json(data);
   });
 
@@ -87,7 +101,7 @@ export function teamsLiveRouter({ store, endpoints = {} }) {
     const source = graphSource(req.params.id);
     const spec = convSpec(req);
     const next = nextToken(req);
-    const data = await live(source, (c) => c.messagesHistory(spec, { next }));
+    const data = await live(source, (c) => c.messagesHistory(spec, { next }), req);
     res.json(data);
   });
 
@@ -109,7 +123,7 @@ export function teamsLiveRouter({ store, endpoints = {} }) {
     const q = String(req.query.q || '').trim();
     if (!userId) throw new HttpError(400, 'Informe o usuário.');
     if (q.length < 2) throw new HttpError(400, 'Digite ao menos 2 caracteres para a busca.');
-    const data = await live(source, (c) => c.searchMessages(userId, q));
+    const data = await live(source, (c) => c.searchMessages(userId, q), req);
     res.json(data);
   });
 
