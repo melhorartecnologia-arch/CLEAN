@@ -1399,6 +1399,164 @@ const MESSAGES = {
 };
 
 // ---------------------------------------------------------------------------------------------
+// Destinatários externos ao domínio (somente leitura): uma linha por mensagem com destinatário externo
+
+const EXTERNAL_FIELD = { to: 'Para', cc: 'Cc', bcc: 'Cco' };
+const ORIGIN_LABEL = { out: 'Enviadas para fora (remetente interno)', in: 'Recebidas de fora (remetente externo)' };
+const extFields = (fields) => (fields || []).map((f) => EXTERNAL_FIELD[f] || f).join('/');
+
+const EXTERNAL = {
+  base: '#/email/listagens',
+  nav: 'email-listagens',
+  filterKeys: ['q', 'mailbox', 'source', 'domain', 'recipient', 'origin', 'sort', 'page'],
+  criteria: ['q', 'mailbox', 'source', 'domain', 'recipient', 'origin'],
+  descSorts: new Set(['date', 'recipients', 'size']),
+  defaultSort: 'date',
+  noun: ['mensagem', 'mensagens'],
+  o: 'a',
+  scanNoun: 'varredura',
+  resultsTitle: 'Mensagens',
+  columns: 5,
+  views: { domains: 'chart', recipients: 'chart', mailboxes: 'chart' },
+
+  subtitle: (scan) => {
+    const sources = (scan.summary?.sources || []).map((x) => `${x.name} (${TYPE_LABELS[x.type] || x.type})`).join(', ');
+    const own = scan.listing?.ownDomains || [];
+    const scope = scan.listing?.folderScope === 'sent' ? 'apenas Enviados' : 'todas as pastas';
+    return `${sources} · ${scope} · internos: ${own.length ? own.join(', ') : 'o domínio de cada caixa'}`;
+  },
+
+  filterFields: (filters) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Destinatário, domínio, assunto, pessoa ou caixa" /></label>
+    <label class="field"><span>Caixa</span><select name="mailbox"><option value="">Todas</option></select></label>
+    <label class="field"><span>Domínio externo</span><select name="domain"><option value="">Todos</option></select></label>
+    <label class="field"><span>Conexão</span><select name="source"><option value="">Todas</option></select></label>
+    <label class="field"><span>Origem</span>
+      <select name="origin"><option value="">Enviadas e recebidas</option>${Object.entries(ORIGIN_LABEL).map(([v, l]) => option(v, l, filters.origin))}</select>
+    </label>
+    <label class="field"><span>Ordenar por</span>
+      <select name="sort">${[
+        ['date', 'Mais recentes'],
+        ['mailbox', 'Caixa'],
+        ['sender', 'Remetente'],
+        ['subject', 'Assunto'],
+        ['recipients', 'Mais destinatários externos'],
+        ['size', 'Maiores'],
+      ].map(([v, l]) => option(v, l, filters.sort))}</select>
+    </label>`,
+
+  fillOptions: (form, options, filters, fill) => {
+    const o = options || { mailboxes: [], domains: [], sources: [] };
+    fill(form.elements.mailbox, o.mailboxes || [], filters.mailbox);
+    fill(form.elements.domain, o.domains || [], filters.domain);
+    const sources = new Map((o.sources || []).map((s) => [s.value, s.label]));
+    fill(form.elements.source, [...sources.keys()], filters.source, (v) => sources.get(v) || v);
+  },
+
+  progress: (st) => html`<span><b>${fmtNum(st.externalMessages)}</b> com destinatário externo</span>
+    <span><b>${fmtNum(st.messagesSeen)}</b> mensagens verificadas</span>
+    <span><b>${fmtNum(st.errors)}</b> erros</span>
+    <span>${st.mailboxesTotal ? html`caixa <b>${Math.min((st.mailboxesDone || 0) + 1, st.mailboxesTotal)}</b> de <b>${fmtNum(st.mailboxesTotal)}</b>` : 'listando as caixas…'}</span>`,
+
+  tiles: (st) => html`<div class="tile"><div class="label">Com destinatário externo</div><div class="value">${fmtCompact(st.externalMessages)}</div><div class="detail">de ${fmtNum(st.messagesSeen)} verificadas</div></div>
+    <div class="tile"><div class="label">De remetente externo</div><div class="value">${fmtCompact(st.externalSenders)}</div><div class="detail">recebidas de fora</div></div>
+    <div class="tile"><div class="label">Caixas varridas</div><div class="value">${fmtCompact(Math.max(0, (st.mailboxesDone || 0) - (st.mailboxesSkipped || 0)))}</div><div class="detail">${fmtNum(st.folders)} pastas</div></div>
+    <div class="tile"><div class="label">Erros</div><div class="value">${fmtCompact(st.errors)}</div><div class="detail">${st.errors ? 'veja a aba Erros' : 'nenhum'}</div></div>`,
+
+  charts: (summary, barChart) => {
+    const msgs = (n) => plural(n, 'mensagem', 'mensagens');
+    const domains = (summary.byDomain || []).map((d) => ({ label: d.domain || '(sem domínio)', value: d.messages, filterValue: d.domain, tipValue: `${msgs(d.messages)} · ${plural(d.recipients, 'destinatário', 'destinatários')}`, tipLabel: d.domain, raw: d }));
+    const recipients = (summary.byRecipient || []).map((r) => ({ label: r.address, value: r.messages, filterValue: r.address, tipValue: msgs(r.messages), tipLabel: r.name ? `${r.name} <${r.address}>` : r.address, raw: r }));
+    const boxes = (summary.byMailbox || []).map((m) => ({ label: m.mailbox, value: m.messages, filterValue: m.mailbox, tipValue: `${msgs(m.messages)} · ${plural(m.recipients, 'destinatário externo', 'destinatários externos')}`, tipLabel: m.name ? `${m.name} <${m.mailbox}>` : m.mailbox, raw: m }));
+    return html`${barChart({
+      key: 'domains',
+      title: 'Domínios externos',
+      subtitle: 'Mensagens por domínio de fora da empresa. Clique para filtrar.',
+      rows: domains,
+      filterKey: 'domain',
+      emptyText: 'Nenhum destinatário externo.',
+      tableHead: html`<tr><th>Domínio</th><th class="num">Destinatários</th><th class="num">Mensagens</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.domain}</td><td class="num">${fmtNum(r.raw.recipients)}</td><td class="num">${fmtNum(r.raw.messages)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'recipients',
+      title: 'Destinatários externos',
+      subtitle: 'Quem de fora mais foi citado. Clique para filtrar.',
+      rows: recipients,
+      filterKey: 'recipient',
+      emptyText: 'Nenhum destinatário externo.',
+      tableHead: html`<tr><th>Destinatário</th><th>Domínio</th><th class="num">Mensagens</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.name ? html`${r.raw.name}<div class="muted small">${r.raw.address}</div>` : r.raw.address}</td><td>${r.raw.domain}</td><td class="num">${fmtNum(r.raw.messages)}</td></tr>`,
+    })}
+    ${barChart({
+      key: 'mailboxes',
+      title: 'Caixas internas',
+      subtitle: 'Mensagens com destinatário externo por caixa. Clique para filtrar.',
+      rows: boxes,
+      filterKey: 'mailbox',
+      emptyText: 'Nenhuma mensagem.',
+      tableHead: html`<tr><th>Caixa</th><th>Nome</th><th class="num">Mensagens</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.mailbox}</td><td>${r.raw.name}</td><td class="num">${fmtNum(r.raw.messages)}</td></tr>`,
+    })}`;
+  },
+
+  tableHead: html`<tr><th><span class="sr-only">Detalhes</span></th><th>Mensagem</th><th>Remetente</th><th>Destinatários externos</th><th>Recebida</th></tr>`,
+
+  row: (r) => {
+    const ext = r.external || [];
+    const extraDomains = [...new Set(ext.map((e) => e.domain).filter(Boolean))];
+    return html`<td><div class="name">${r.subject || '(sem assunto)'}</div><div class="path">${r.mailbox} › ${r.folder}</div></td>
+      <td>${r.from || html`<span class="muted">sem remetente</span>`}${r.fromExternal ? html` <span class="chip danger">externo</span>` : ''}</td>
+      <td>${ext.slice(0, 2).map((e) => e.address).join(', ')}${ext.length > 2 ? html` <span class="muted">e mais ${ext.length - 2}</span>` : ''}${extraDomains.length ? html`<div class="muted small">${extraDomains.slice(0, 3).join(', ')}${extraDomains.length > 3 ? '…' : ''}</div>` : ''}</td>
+      <td class="nowrap">${fmtDateTime(r.date)}</td>`;
+  },
+
+  rowLabel: (r) => r.subject || 'mensagem sem assunto',
+
+  detail: (r) => {
+    const safeLink = /^https:\/\//i.test(r.webLink || '') ? r.webLink : null;
+    const messageId = String(r.internetMessageId || '').replace(/^<|>$/g, '');
+    const ext = r.external || [];
+    return html`<div class="detail-grid two">
+      <div>
+        <h4>Mensagem</h4>
+        <dl class="kv">
+          <dt>Assunto</dt><dd><b>${r.subject || '(sem assunto)'}</b></dd>
+          <dt>Caixa</dt><dd>${r.mailboxName ? `${r.mailboxName} <${r.mailbox}>` : r.mailbox}</dd>
+          <dt>Pasta</dt><dd>${r.folder}</dd>
+          <dt>Remetente</dt><dd>${r.from || '—'}${r.fromExternal ? html` <span class="chip danger">externo</span>` : html` <span class="muted small">(interno)</span>`}</dd>
+          <dt>Recebida em</dt><dd>${fmtDateTime(r.date)}</dd>
+          ${r.sent && r.sent !== r.date ? html`<dt>Enviada em</dt><dd>${fmtDateTime(r.sent)}</dd>` : ''}
+          <dt>Tamanho</dt><dd>${fmtBytes(r.size)}</dd>
+          ${messageId
+            ? html`<dt>Message-ID</dt><dd><span class="mono small">${messageId}</span> <button type="button" class="btn small" data-action="copy" data-copy="${messageId}" data-copied="Message-ID copiado.">${icon('copy')} Copiar</button></dd>`
+            : ''}
+          <dt>Conexão</dt><dd>${r.sourceName} (${TYPE_LABELS[r.sourceType] || r.sourceType})</dd>
+          ${safeLink ? html`<dt>Abrir</dt><dd><a href="${safeLink}" target="_blank" rel="noopener noreferrer">Abrir no Outlook na Web</a> <span class="muted small">(exige acesso à caixa)</span></dd>` : ''}
+        </dl>
+      </div>
+      <div>
+        <h4>Destinatários externos (${ext.length})</h4>
+        <ul class="plain">
+          ${ext.map((e) => html`<li><b>${e.name ? `${e.name} <${e.address}>` : e.address}</b> <span class="muted small">${e.domain}${e.fields?.length ? ` · ${extFields(e.fields)}` : ''}</span></li>`)}
+        </ul>
+        <p class="muted small">A varredura lê só os cabeçalhos: o Cco (cópia oculta) só aparece quando o provedor o informa (em geral, na cópia de Enviados do próprio remetente).</p>
+      </div>
+    </div>`;
+  },
+
+  empty: {
+    filtered: 'Nenhuma mensagem corresponde aos filtros.',
+    running: 'Nenhuma mensagem com destinatário externo até agora.',
+    none: 'Nenhuma mensagem com destinatário externo ao domínio nas caixas escolhidas.',
+  },
+  errors: {
+    column: 'Local',
+    help: 'Caixas, pastas ou mensagens que não puderam ser lidas (credenciais, permissões, limites do provedor...). Elas não foram varridas.',
+    empty: 'Nenhum erro.',
+  },
+};
+
+// ---------------------------------------------------------------------------------------------
 // Microsoft Teams (mensagens de canais e chats)
 
 const TEAMS_SCOPE = { channel: 'Canal', chat: 'Chat' };
@@ -1580,6 +1738,7 @@ const TEAMS = {
 function profileOf(scan) {
   if (scan.listing?.kind === 'directory') return ACCOUNTS;
   if (scan.listing?.kind === 'messages') return MESSAGES;
+  if (scan.listing?.kind === 'external') return EXTERNAL;
   if (scan.kind === 'teams') return TEAMS;
   if (scan.retention) return scan.kind === 'mail' ? RETENTION_MAIL : RETENTION_FILES;
   if (scan.fileTypes) return TYPES_FILES;

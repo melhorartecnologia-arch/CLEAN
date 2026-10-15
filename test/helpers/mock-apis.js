@@ -508,7 +508,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
           childFolderCount: user.folders.filter((c) => c.parent === f.id).length,
           totalItemCount: (user.messages[f.id] || []).length,
         });
-        m = /^mailFolders\/(deleteditems|junkemail|syncissues|inbox)$/.exec(rest);
+        m = /^mailFolders\/(deleteditems|junkemail|syncissues|inbox|sentitems)$/.exec(rest);
         if (m) {
           const f = user.folders.find((x) => x.wellKnown === m[1]);
           return f ? json(res, 200, folderJson(f)) : json(res, 404, { error: { code: 'ErrorItemNotFound', message: 'Pasta não encontrada' } });
@@ -531,7 +531,10 @@ export function startMockApis({ graph = null, google = null } = {}) {
           const full = select.includes('toRecipients'); // listagem de mensagens: destinatários, envio e anexos
           const skip = Number(url.searchParams.get('$skip') || 0);
           const page = all.slice(skip, skip + 2);
-          const next = skip + 2 < all.length ? { '@odata.nextLink': `${base}/graph/v1.0/users/${user.id}/mailFolders/${m[1]}/messages?$skip=${skip + 2}${filter ? `&$filter=${encodeURIComponent(filter)}` : ''}` } : {};
+          // O @odata.nextLink preserva as opções da consulta ($select, $expand, $filter), como no Graph real.
+          const nextParams = new URLSearchParams(url.searchParams);
+          nextParams.set('$skip', String(skip + 2));
+          const next = skip + 2 < all.length ? { '@odata.nextLink': `${base}/graph/v1.0/users/${user.id}/mailFolders/${m[1]}/messages?${nextParams.toString()}` } : {};
           return json(res, 200, {
             value: page.map((x) => ({
               id: x.id,
@@ -548,6 +551,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
                           sentDateTime: mimeHeader(x.raw, 'Date') ? new Date(mimeHeader(x.raw, 'Date')).toISOString() : null,
                           toRecipients: graphRecipients(mimeHeader(x.raw, 'To')),
                           ccRecipients: graphRecipients(mimeHeader(x.raw, 'Cc')),
+                          bccRecipients: graphRecipients(mimeHeader(x.raw, 'Bcc')),
                           hasAttachments: /multipart\/mixed/i.test(mimeHeader(x.raw, 'Content-Type')),
                         }
                       : {}),

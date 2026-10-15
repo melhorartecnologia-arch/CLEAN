@@ -8,6 +8,7 @@ const TYPE_LABELS = { graph: 'Microsoft 365', gmail: 'Google Workspace', imap: '
 const KIND = {
   directory: { chip: 'contas do domínio', column: 'Contas', value: (s) => s.stats?.accounts },
   messages: { chip: 'mensagens', column: 'Mensagens', value: (s) => s.stats?.messagesSeen },
+  external: { chip: 'destinatários externos', column: 'Com externo', value: (s) => s.stats?.externalMessages },
 };
 
 function duration(scan) {
@@ -28,16 +29,17 @@ export async function render(root) {
       html`<div class="page-head">
           <div>
             <h1>Listagens de e-mail</h1>
-            <div class="sub">Inventários somente leitura: o catálogo de contas registradas no domínio e a lista de mensagens de cada caixa, com todos os dados de cada uma (sem procurar termos e sem excluir nada).</div>
+            <div class="sub">Inventários somente leitura: o catálogo de contas do domínio, a lista de mensagens de cada caixa e os destinatários externos ao domínio (sem procurar termos e sem excluir nada).</div>
           </div>
           <div class="actions">
             <a class="btn" href="${base}/nova?tipo=directory">${icon('mail')} Contas do domínio</a>
-            <a class="btn primary" href="${base}/nova?tipo=messages">${icon('mail')} Mensagens por caixa</a>
+            <a class="btn" href="${base}/nova?tipo=messages">${icon('mail')} Mensagens por caixa</a>
+            <a class="btn primary" href="${base}/nova?tipo=external">${icon('mail')} Destinatários externos</a>
           </div>
         </div>
         <section class="card">
           ${listings.length === 0
-            ? html`<div class="empty"><p>Nenhuma listagem feita ainda.</p><div class="inline"><a class="btn" href="${base}/nova?tipo=directory">Listar contas do domínio</a><a class="btn primary" href="${base}/nova?tipo=messages">Listar mensagens por caixa</a></div></div>`
+            ? html`<div class="empty"><p>Nenhuma listagem feita ainda.</p><div class="inline"><a class="btn" href="${base}/nova?tipo=directory">Listar contas do domínio</a><a class="btn" href="${base}/nova?tipo=messages">Listar mensagens por caixa</a><a class="btn primary" href="${base}/nova?tipo=external">Destinatários externos</a></div></div>`
             : html`<div class="table-wrap">
                 <table class="data">
                   <thead>

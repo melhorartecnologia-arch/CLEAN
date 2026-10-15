@@ -1,7 +1,8 @@
 // Fila de análises: cada análise roda em uma worker thread; o resultado é gravado conforme chega.
 import { Worker } from 'node:worker_threads';
 import { newStats, DEFAULT_OPTIONS } from './scanner.js';
-import { newMailStats, newDirectoryStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
+import { newMailStats, newDirectoryStats, newExternalStats, MAIL_DEFAULT_OPTIONS } from '../mail/scanner.js';
+import { normalizeDomains } from '../mail/common.js';
 import { newTeamsStats, TEAMS_DEFAULT_OPTIONS } from '../teams/scanner.js';
 import { cleanPaths, keptPaths, isCloudRepo, deletionScope, mailDeletionScope } from './delete.js';
 import { keptCloud } from '../cloud/drives.js';
@@ -110,18 +111,26 @@ export function sanitizeTeamsScope(input, opts) {
   return teams;
 }
 
-/** Normaliza o tipo de uma listagem de e-mail: catálogo de contas ('directory') ou mensagens ('messages'). */
+/**
+ * Normaliza o tipo de uma listagem de e-mail: catálogo de contas ('directory'), mensagens
+ * ('messages') ou destinatários externos ao domínio ('external'). A varredura de externos leva também
+ * os domínios internos (tudo fora deles é externo) e o escopo de pastas ('all' ou 'sent').
+ */
 export function sanitizeListing(input) {
-  const kind = input?.kind === 'directory' ? 'directory' : input?.kind === 'messages' ? 'messages' : null;
-  if (!kind) throw new ScanError('Tipo de listagem inválido (escolha "contas do domínio" ou "mensagens").');
+  const kind =
+    input?.kind === 'directory' ? 'directory' : input?.kind === 'messages' ? 'messages' : input?.kind === 'external' ? 'external' : null;
+  if (!kind) throw new ScanError('Tipo de listagem inválido (escolha "contas do domínio", "mensagens" ou "destinatários externos").');
+  if (kind === 'external') {
+    return { kind, ownDomains: normalizeDomains(input.ownDomains).slice(0, 100), folderScope: input.folderScope === 'sent' ? 'sent' : 'all' };
+  }
   return { kind };
 }
 
-/** Opções de uma listagem (sem termos e sem exclusão). Só a listagem de mensagens usa filtros. */
+/** Opções de uma listagem (sem termos e sem exclusão). Só as listagens de mensagens e de externos usam filtros. */
 function listingOptions(input, kind) {
   const i = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-  const o = { ...MAIL_DEFAULT_OPTIONS, deleteMatches: false, receivedAfter: null };
-  if (kind === 'messages') {
+  const o = { ...MAIL_DEFAULT_OPTIONS, deleteMatches: false, receivedAfter: null, receivedBefore: null };
+  if (kind === 'messages' || kind === 'external') {
     o.includeTrash = i.includeTrash !== false;
     o.includeJunk = Boolean(i.includeJunk);
     const concurrency = Number(i.concurrency);
@@ -130,6 +139,12 @@ function listingOptions(input, kind) {
       const d = new Date(i.receivedAfter);
       if (Number.isNaN(d.getTime())) throw new ScanError('Data "recebidas a partir de" inválida.');
       o.receivedAfter = d.toISOString();
+    }
+    // Varredura de destinatários externos: data final do período (recebidas até).
+    if (kind === 'external' && i.receivedBefore) {
+      const d = new Date(i.receivedBefore);
+      if (Number.isNaN(d.getTime())) throw new ScanError('Data "recebidas até" inválida.');
+      o.receivedBefore = d.toISOString();
     }
   }
   return o;
@@ -370,7 +385,7 @@ export class ScanManager {
     const sources = ids(sourceIds).map((id) => this.store.getMailSource(id));
     if (sources.length === 0 || sources.some((s) => !s)) throw new ScanError('Selecione conexões de e-mail válidas.');
     const opts = listingOptions(options, listing.kind);
-    const prefix = listing.kind === 'directory' ? 'Contas do domínio' : 'Listagem de mensagens';
+    const prefix = listing.kind === 'directory' ? 'Contas do domínio' : listing.kind === 'external' ? 'Destinatários externos' : 'Listagem de mensagens';
     const scan = this.store.createScan({
       kind: 'mail',
       listing,
@@ -384,8 +399,9 @@ export class ScanManager {
         sources: sources.map((s) => ({ id: s.id, name: s.name, type: s.type, scope: s.scope, mailboxCount: s.scope === 'all' ? null : (s.mailboxes || []).length })),
         lists: [],
         termCount: 0,
+        ...(listing.kind === 'external' ? { external: { ownDomains: listing.ownDomains, folderScope: listing.folderScope } } : {}),
       },
-      stats: listing.kind === 'directory' ? newDirectoryStats(sources.length) : newMailStats(sources.length),
+      stats: listing.kind === 'directory' ? newDirectoryStats(sources.length) : listing.kind === 'external' ? newExternalStats(sources.length) : newMailStats(sources.length),
       current: null,
       startedAt: null,
       finishedAt: null,

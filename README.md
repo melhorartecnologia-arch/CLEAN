@@ -33,9 +33,10 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   do tempo.
 - **Listagens de e-mail** (somente leitura, sem procurar termos e sem excluir): o **catálogo de todas
   as contas registradas no domínio** (nome, endereço principal, apelidos, situação, tipo, licença,
-  data de criação, departamento) e a **listagem de todas as mensagens de cada caixa** com os dados de
-  cada uma (remetente, destinatários, data, assunto, pasta, tamanho) — com relatório, filtros,
-  gráficos e exportação.
+  data de criação, departamento), a **listagem de todas as mensagens de cada caixa** com os dados de
+  cada uma (remetente, destinatários, data, assunto, pasta, tamanho) e a varredura dos **destinatários
+  externos ao domínio** (quem de fora recebeu e-mails, por destinatário e por domínio) — com relatório,
+  filtros, gráficos e exportação.
 - **Microsoft Teams**: procura os termos das listas de referência nas **mensagens dos canais das
   equipes** (e nas respostas) e nos **chats** (1:1, em grupo e de reunião), no assunto, no corpo e nos
   **nomes e no conteúdo dos arquivos anexados** (baixados do SharePoint/OneDrive). Usa o mesmo
@@ -576,7 +577,7 @@ Outlook na Web e o tamanho de cada mensagem sem baixá-la).
 
 ### Listagens de e-mail (contas e mensagens)
 
-Além das análises por termos, o menu **Listagens de e-mail** faz dois inventários **somente leitura**
+Além das análises por termos, o menu **Listagens de e-mail** faz três inventários **somente leitura**
 (não procuram nada, não baixam o conteúdo das mensagens e não excluem nada), usando as mesmas conexões
 já cadastradas em *Caixas de e-mail*:
 
@@ -593,11 +594,22 @@ já cadastradas em *Caixas de e-mail*:
   pasta, tamanho, se tem anexos e o Message-ID. Lê só os cabeçalhos — o corpo e os anexos não são
   baixados —, então é bem mais rápida e leve que uma análise por termos. Aceita filtrar por período
   (recebidas a partir de uma data) e incluir ou não a Lixeira e o Lixo Eletrônico.
+- **Destinatários externos ao domínio** — varre os cabeçalhos das mensagens das caixas escolhidas e
+  apura os **destinatários (Para, Cc e Cco) com domínio fora da empresa**: para auditar com quem os
+  colaboradores trocam e-mail fora do domínio. Você informa os **domínios internos** (um ou vários; em
+  branco, vale o domínio de cada caixa analisada) e tudo fora deles é tratado como externo (subdomínios
+  contam como internos). Dá para varrer **todas as pastas** ou **apenas Enviados** (foco em
+  compliance/vazamento) e filtrar por **período** (de/até). O relatório traz a apuração **por
+  destinatário externo** (endereço, domínio, nº de mensagens, caixas e campos) e **por domínio
+  externo**, mais a lista de mensagens com destinatário externo e quantas vieram de remetente externo.
+  Lê só os cabeçalhos; o **Cco** só aparece quando o provedor o informa (em geral, na cópia de Enviados
+  do próprio remetente).
 
 Cada listagem gera um relatório na tela com filtros e gráficos (por situação/tipo/conexão, no caso das
-contas; por caixa, pasta e remetente, no caso das mensagens) e exportação para **Excel**, **CSV**,
-**HTML** e **JSON**. As listagens rodam em segundo plano (como as análises), podem ser canceladas e
-ficam separadas das *Análises de e-mail*, na própria seção.
+contas; por caixa, pasta e remetente, no caso das mensagens; por domínio e destinatário externo, no
+caso dos destinatários externos) e exportação para **Excel**, **CSV**, **HTML** e **JSON**. As
+listagens rodam em segundo plano (como as análises), podem ser canceladas e ficam separadas das
+*Análises de e-mail*, na própria seção.
 
 ### Microsoft Teams
 

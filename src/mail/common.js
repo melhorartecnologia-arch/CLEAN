@@ -47,6 +47,53 @@ export function normalizeAddress(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+/** Domínio de um endereço de e-mail ("ana@sub.empresa.com" → "sub.empresa.com"), ou '' se não houver. */
+export function emailDomain(value) {
+  const s = normalizeAddress(value);
+  const at = s.lastIndexOf('@');
+  return at >= 0 ? s.slice(at + 1).replace(/^@+/, '') : '';
+}
+
+/**
+ * Normaliza uma lista de domínios internos: minúsculas, sem o "@" inicial e sem espaços. Aceita texto
+ * (separado por vírgula, ponto e vírgula ou quebra de linha) ou lista, e também endereços completos
+ * (fica só o domínio).
+ */
+export function normalizeDomains(value) {
+  const parts = Array.isArray(value) ? value : String(value || '').split(/[\s,;]+/);
+  const out = [];
+  const seen = new Set();
+  for (const part of parts) {
+    let d = String(part || '').trim().toLowerCase();
+    if (!d) continue;
+    if (d.includes('@')) d = emailDomain(d);
+    d = d.replace(/^@+/, '').replace(/^\.+|\.+$/g, '');
+    if (d && !seen.has(d)) {
+      seen.add(d);
+      out.push(d);
+    }
+  }
+  return out;
+}
+
+/**
+ * Testa se um endereço pertence a um dos domínios internos. Vale o domínio exato e os subdomínios
+ * ("empresa.com" cobre "mail.empresa.com"). Sem domínios na lista, nada é interno.
+ */
+export function internalDomainMatcher(domains = []) {
+  const set = new Set(normalizeDomains(domains));
+  if (set.size === 0) return () => false;
+  return (address) => {
+    const d = emailDomain(address);
+    if (!d) return false;
+    if (set.has(d)) return true;
+    for (let i = d.indexOf('.'); i >= 0; i = d.indexOf('.', i + 1)) {
+      if (set.has(d.slice(i + 1))) return true;
+    }
+    return false;
+  };
+}
+
 /** Data ISO válida ou null. */
 export function validDate(value) {
   if (!value) return null;

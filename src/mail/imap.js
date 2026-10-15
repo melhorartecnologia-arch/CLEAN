@@ -285,12 +285,23 @@ export class ImapConnector {
   }
 
   /** Pastas selecionáveis, sem as excluídas. No Gmail, "Todos os e-mails" já contém os marcadores. */
-  async folders(client, { includeTrash = true, includeJunk = false } = {}) {
+  async folders(client, { includeTrash = true, includeJunk = false, folderScope = 'all' } = {}) {
     const list = (await client.list()).filter((f) => !f.flags.has('\\Noselect') && !f.flags.has('\\NonExistent'));
     const all = list.find((f) => f.specialUse === '\\All');
-    let selected = all ? list.filter((f) => f === all || f.specialUse === '\\Junk' || f.specialUse === '\\Trash') : list;
     const excluded = folderMatcher(this.source.excludeFolders);
     const display = (f) => (f.delimiter ? f.path.split(f.delimiter).join('/') : f.path);
+    // Escopo "Enviados": só a pasta de Enviados (pela marca especial \Sent ou, na falta dela, pelo nome).
+    if (folderScope === 'sent') {
+      const sentName = /^(sent|sent items|sent mail|enviados|itens enviados|e-?mails enviados|mensagens enviadas)$/i;
+      const leaf = (f) => (f.delimiter ? f.path.split(f.delimiter).pop() : f.path) || '';
+      let sent = list.filter((f) => f.specialUse === '\\Sent');
+      if (sent.length === 0) sent = list.filter((f) => sentName.test(leaf(f)) || sentName.test(display(f)));
+      return sent
+        .filter((f) => !excluded(display(f)))
+        .map((f) => ({ path: f.path, display: display(f), inbox: false, all: false, inTrash: false }))
+        .sort((a, b) => a.display.localeCompare(b.display));
+    }
+    let selected = all ? list.filter((f) => f === all || f.specialUse === '\\Junk' || f.specialUse === '\\Trash') : list;
     // inTrash: a Lixeira e as subpastas dela (sem a Lixeira, as subpastas também ficam de fora, como no
     // Microsoft 365).
     const trash = list.find((f) => f.specialUse === '\\Trash');
@@ -311,7 +322,7 @@ export class ImapConnector {
    * { folder, id, error } (pasta que não pôde ser lida). Se a sessão cair (ex.: o Exchange Online a
    * encerra quando o token OAuth vence), a leitura continua numa nova sessão, de onde parou.
    */
-  async *messages(mailbox, { since = null, before = null, headersOnly = false, fullHeaders = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, onFolder } = {}) {
+  async *messages(mailbox, { since = null, before = null, headersOnly = false, fullHeaders = false, includeTrash = true, includeJunk = false, folderScope = 'all', maxBytes = 50 * 1048576, onFolder } = {}) {
     let session = await this.connect(mailbox);
     let read = 0; // mensagens entregues pela sessão atual
     let failures = 0; // falhas seguidas sem ler nenhuma mensagem (quedas e reconexões recusadas)
@@ -356,7 +367,7 @@ export class ImapConnector {
     };
     try {
       const gmail = session.client.capabilities?.has?.('X-GM-EXT-1');
-      for (const folder of await this.folders(session.client, { includeTrash, includeJunk })) {
+      for (const folder of await this.folders(session.client, { includeTrash, includeJunk, folderScope })) {
         if (this.signal?.aborted) return;
         onFolder?.(folder.display);
         // Mensagens já entregues desta pasta (uma nova sessão continua sem repeti-las).
@@ -451,6 +462,7 @@ export class ImapConnector {
               ? {
                   to: (env.to || []).map(envAddress),
                   cc: (env.cc || []).map(envAddress),
+                  bcc: (env.bcc || []).map(envAddress),
                   sent: env.date instanceof Date && !Number.isNaN(env.date.getTime()) ? env.date.toISOString() : null,
                   hasAttachments: info.bodyStructure ? attachmentInStructure(info.bodyStructure) : null,
                 }

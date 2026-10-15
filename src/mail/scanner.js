@@ -7,7 +7,7 @@ import { extractMessage, DEFAULT_LIMITS } from '../scan/extractors/index.js';
 import { formatAddress } from '../scan/extractors/mime.js';
 import { friendlyError, withTimeout } from '../scan/errors.js';
 import { createConnector } from './connectors.js';
-import { validDate } from './common.js';
+import { validDate, emailDomain, normalizeDomains, internalDomainMatcher } from './common.js';
 import { deletionEvent } from '../scan/delete.js';
 import { ageDays, MIN_VALID_DATE, limitWarning } from '../retention/policy.js';
 
@@ -67,6 +67,24 @@ export function newDirectoryStats(sourcesTotal = 0) {
   return { sourcesTotal, sourcesDone: 0, accounts: 0, errors: 0, gaps: 0 };
 }
 
+/** Números de uma varredura de destinatários externos ao domínio (só os cabeçalhos das mensagens). */
+export function newExternalStats(sourcesTotal = 0) {
+  return {
+    sourcesTotal,
+    sourcesDone: 0,
+    mailboxesTotal: 0,
+    mailboxesDone: 0,
+    mailboxesSkipped: 0,
+    folders: 0,
+    messagesSeen: 0,
+    externalMessages: 0, // mensagens com ao menos um destinatário externo
+    externalRecipientsSeen: 0, // soma dos destinatários externos (não distintos; os distintos saem no relatório)
+    externalSenders: 0, // mensagens recebidas de remetente externo
+    errors: 0,
+    gaps: 0,
+  };
+}
+
 const mb = (bytes) => `${Math.round((bytes / 1048576) * 10) / 10} MB`;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
@@ -97,7 +115,12 @@ export class MailScanner {
     this.emit = emit;
     this.connectorFactory = connectorFactory;
     this.endpoints = config.endpoints || {};
-    this.stats = this.listing?.kind === 'directory' ? newDirectoryStats(this.sources.length) : newMailStats(this.sources.length);
+    this.stats =
+      this.listing?.kind === 'directory'
+        ? newDirectoryStats(this.sources.length)
+        : this.listing?.kind === 'external'
+          ? newExternalStats(this.sources.length)
+          : newMailStats(this.sources.length);
     this.cancelled = false;
     this.seq = 0;
     this.inFlight = new Set(); // mensagens sendo lidas (para mensagens de erro)
@@ -120,6 +143,16 @@ export class MailScanner {
     // Raio-X das caixas (censo), só nas análises por termos — na retenção e nas listagens não se aplica.
     this.profile = this.retention || this.listing ? null : newProfile();
     this.lastProfile = 0;
+    // Destinatários externos (listagem 'external'): domínios internos e escopo de pastas. A apuração
+    // (por destinatário e por domínio) é feita a partir das linhas gravadas, no relatório.
+    this.internalDomains = () => false;
+    this.externalBefore = null;
+    this.externalFolderScope = 'all';
+    if (this.listing?.kind === 'external') {
+      this.internalDomains = internalDomainMatcher(normalizeDomains(this.listing.ownDomains));
+      this.externalFolderScope = this.listing.folderScope === 'sent' ? 'sent' : 'all';
+      this.externalBefore = validDate(this.options.receivedBefore);
+    }
   }
 
   /**
@@ -298,7 +331,10 @@ export class MailScanner {
    */
   async runListing(started) {
     const directory = this.listing.kind === 'directory';
-    this.log('info', `${directory ? 'Listagem das contas do domínio' : 'Listagem de mensagens'} iniciada em ${plural(this.sources.length, 'conexão', 'conexões')}.`);
+    const external = this.listing.kind === 'external';
+    const title = directory ? 'Listagem das contas do domínio' : external ? 'Varredura de destinatários externos' : 'Listagem de mensagens';
+    const scopeNote = external && this.externalFolderScope === 'sent' ? ' (apenas Enviados)' : '';
+    this.log('info', `${title}${scopeNote} iniciada em ${plural(this.sources.length, 'conexão', 'conexões')}.`);
     for (const source of this.sources) {
       if (this.cancelled) break;
       if (directory) await this.listDirectory(source);
@@ -311,8 +347,12 @@ export class MailScanner {
     this.current = null;
     const s = this.stats;
     const seconds = Math.round((Date.now() - started) / 1000);
-    const done = directory ? `${plural(s.accounts, 'conta listada', 'contas listadas')}` : `${plural(s.messagesSeen, 'mensagem listada', 'mensagens listadas')} em ${plural(s.mailboxesDone, 'caixa', 'caixas')}`;
-    this.log('info', `${this.cancelled ? 'Listagem cancelada' : 'Listagem concluída'} em ${seconds}s: ${done}.`);
+    const done = directory
+      ? `${plural(s.accounts, 'conta listada', 'contas listadas')}`
+      : external
+        ? `${plural(s.externalMessages, 'mensagem com destinatário externo', 'mensagens com destinatário externo')} em ${plural(s.messagesSeen, 'mensagem', 'mensagens')} verificadas`
+        : `${plural(s.messagesSeen, 'mensagem listada', 'mensagens listadas')} em ${plural(s.mailboxesDone, 'caixa', 'caixas')}`;
+    this.log('info', `${this.cancelled ? `${title} cancelada` : `${title} concluída`} em ${seconds}s: ${done}.`);
     this.emit({ type: 'done', stats: { ...s }, cancelled: this.cancelled });
     return s;
   }
@@ -412,6 +452,74 @@ export class MailScanner {
     if (this.pendingResults.length >= 100) this.flushResults();
   }
 
+  /**
+   * Uma mensagem na varredura de destinatários externos: separa os destinatários (Para/Cc/Cco) com
+   * domínio fora da empresa. Só gera uma linha quando há ao menos um externo. O domínio da própria
+   * caixa também é tratado como interno (além da lista informada).
+   */
+  processExternalMessage(source, mailbox, item) {
+    this.stats.messagesSeen++;
+    const mailboxDomain = emailDomain(mailbox.address);
+    const isInternal = (address) => this.internalDomains(address) || (mailboxDomain && emailDomain(address) === mailboxDomain);
+    const from = item.from || null;
+    const fromAddress = (from?.address || '').toLowerCase();
+    const fromExternal = Boolean(fromAddress) && !isInternal(fromAddress);
+
+    // Junta Para/Cc/Cco e tira endereços repetidos, guardando em quais campos a pessoa apareceu.
+    const byAddress = new Map();
+    const collect = (list, field) => {
+      for (const entry of list || []) {
+        const address = (entry?.address || '').toLowerCase();
+        if (!address || !emailDomain(address)) continue;
+        const current = byAddress.get(address);
+        if (current) {
+          current.fields.add(field);
+          if (!current.name && entry.name) current.name = entry.name;
+        } else {
+          byAddress.set(address, { address, name: entry.name || '', fields: new Set([field]) });
+        }
+      }
+    };
+    collect(item.to, 'to');
+    collect(item.cc, 'cc');
+    collect(item.bcc, 'bcc');
+
+    const external = [...byAddress.values()].filter((r) => !isInternal(r.address));
+
+    // Remetente externo (mensagem recebida de fora): contado mesmo quando não há destinatário externo.
+    if (fromExternal) this.stats.externalSenders++;
+    if (external.length === 0) return;
+
+    this.stats.externalMessages++;
+    this.stats.externalRecipientsSeen += external.length;
+
+    this.pendingResults.push({
+      id: ++this.seq,
+      kind: 'mail-external',
+      sourceId: source.id,
+      sourceName: source.name,
+      sourceType: source.type,
+      mailbox: mailbox.address,
+      mailboxName: mailbox.name || '',
+      folder: item.folder,
+      messageId: item.id,
+      internetMessageId: item.internetMessageId || null,
+      subject: item.subject || '',
+      from: from ? formatAddress(from) : '',
+      fromAddress,
+      fromExternal,
+      date: item.receivedAt || null,
+      sent: item.sent || null,
+      size: Number(item.size) || 0,
+      hasAttachments: item.hasAttachments ?? null,
+      inTrash: Boolean(item.inTrash),
+      webLink: item.webLink || null,
+      externalCount: external.length,
+      external: external.map((r) => ({ address: r.address, name: r.name, domain: emailDomain(r.address), fields: [...r.fields] })),
+    });
+    if (this.pendingResults.length >= 100) this.flushResults();
+  }
+
   async scanSource(source) {
     this.current = { source: source.name, mailbox: null, folder: null, path: source.name };
     this.progress(true);
@@ -459,16 +567,20 @@ export class MailScanner {
     const before = this.stats.messagesSeen;
     this.pendingDeletes = [];
     const listingMessages = this.listing?.kind === 'messages';
+    const listingExternal = this.listing?.kind === 'external';
+    const headersOnly = Boolean(this.retention) || listingMessages || listingExternal;
     try {
       const items = connector.messages(mailbox, {
         since: this.since,
-        // Retenção: só as recebidas antes da data de corte, sem baixar as mensagens.
-        before: this.retention ? new Date(this.retention.cutoffMs) : null,
-        // Retenção e listagem de mensagens leem só os cabeçalhos (a listagem pede os destinatários também).
-        headersOnly: Boolean(this.retention) || listingMessages,
-        fullHeaders: listingMessages,
+        // Retenção: só as recebidas antes da data de corte; destinatários externos: até a data final do período.
+        before: this.retention ? new Date(this.retention.cutoffMs) : listingExternal ? this.externalBefore : null,
+        // Retenção e listagens leem só os cabeçalhos (as listagens pedem os destinatários também).
+        headersOnly,
+        fullHeaders: listingMessages || listingExternal,
         includeTrash: this.options.includeTrash,
         includeJunk: this.options.includeJunk,
+        // Destinatários externos: pode restringir às pastas de Enviados.
+        folderScope: listingExternal ? this.externalFolderScope : 'all',
         maxBytes: this.maxBytes,
         concurrency: Math.min(Math.max(1, Number(this.options.concurrency) || 4), 8),
         onFolder: () => {
@@ -480,8 +592,10 @@ export class MailScanner {
         if (item.id && this.profile) this.census(mailbox, item); // raio-x: conta todo e-mail real (mesmo os que falharam no download)
         if (item.error) {
           const where = [mailbox.address, item.folder, item.id].filter(Boolean).join(' › ');
-          this.error(where, item.id ? `Falha ao ${listingMessages ? 'ler os dados da mensagem' : 'baixar a mensagem'}: ${friendlyError(item.error)}` : friendlyError(item.error));
+          this.error(where, item.id ? `Falha ao ${headersOnly && !this.retention ? 'ler os dados da mensagem' : 'baixar a mensagem'}: ${friendlyError(item.error)}` : friendlyError(item.error));
           if (!item.id) this.stats.gaps++; // uma pasta inteira não pôde ser lida
+        } else if (listingExternal) {
+          this.processExternalMessage(source, mailbox, item);
         } else if (listingMessages) {
           this.processListedMessage(source, mailbox, item);
         } else if (this.retention) {

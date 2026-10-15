@@ -16,12 +16,16 @@ const KIND_INFO = {
     'Lista todas as contas registradas no domínio das conexões, com os dados do cadastro (nome, endereço principal, apelidos, situação, tipo, licença, data de criação, departamento). No Microsoft 365 exige a permissão User.Read.All; no Google Workspace, um administrador (Admin SDK); no IMAP, traz apenas as caixas cadastradas na conexão.',
   messages:
     'Lista os dados de cada mensagem (remetente, destinatários, data, assunto, pasta, tamanho) de todas as pastas das caixas escolhidas. Lê só os cabeçalhos: o corpo e os anexos não são baixados.',
+  external:
+    'Varre os cabeçalhos das mensagens das caixas escolhidas e apura os destinatários (Para/Cc/Cco) com domínio fora da empresa. Mostra os destinatários externos, os domínios externos e as mensagens, para auditar com quem se troca e-mail fora do domínio. Lê só os cabeçalhos: o corpo e os anexos não são baixados.',
 };
+
+const KINDS = new Set(['directory', 'messages', 'external']);
 
 export async function render(root, { query }) {
   const sources = await get('/api/mail-sources');
   const back = '#/email/listagens';
-  let kind = query.get('tipo') === 'directory' ? 'directory' : 'messages';
+  let kind = KINDS.has(query.get('tipo')) ? query.get('tipo') : 'messages';
 
   if (sources.length === 0) {
     paint(
@@ -37,6 +41,8 @@ export async function render(root, { query }) {
 
   const check = (name, label, checked, hint = '') =>
     html`<label class="check"><input type="checkbox" name="${name}" ${checked ? 'checked' : ''} /><span><b>${label}</b>${hint ? html`<br /><small class="muted">${hint}</small>` : ''}</span></label>`;
+  const check2 = (type, name, value, label, checked) =>
+    html`<label class="check"><input type="${type}" name="${name}" value="${value}" ${checked ? 'checked' : ''} /><span>${label}</span></label>`;
 
   paint(
     root,
@@ -57,6 +63,10 @@ export async function render(root, { query }) {
             <label class="check">
               <input type="radio" name="kind" value="messages" ${kind === 'messages' ? 'checked' : ''} />
               <span><b>Mensagens por caixa</b><br /><small class="muted">Todos os e-mails de cada caixa, com remetente, destinatários, data, assunto, pasta e tamanho.</small></span>
+            </label>
+            <label class="check">
+              <input type="radio" name="kind" value="external" ${kind === 'external' ? 'checked' : ''} />
+              <span><b>Destinatários externos ao domínio</b><br /><small class="muted">Quem de fora da empresa recebeu e-mails (Para/Cc/Cco), por destinatário e por domínio.</small></span>
             </label>
             <div class="alert info" data-kind-info>${icon('info')}<div></div></div>
           </fieldset>
@@ -97,6 +107,42 @@ export async function render(root, { query }) {
               </label>
             </div>
           </fieldset>
+
+          <fieldset class="full" data-external-only>
+            <legend>Destinatários externos</legend>
+            <div class="form-grid">
+              <label class="field full">
+                <span>Domínios internos (da empresa)</span>
+                <textarea name="ownDomains" rows="2" placeholder="Ex.: cervejariacidadeimperial.com.br, grupocidadeimperial.com.br"></textarea>
+                <small>Um por linha ou separados por vírgula. Tudo fora desses domínios é "externo" (subdomínios contam como internos). Em branco: usa o domínio de cada caixa analisada.</small>
+              </label>
+              <fieldset class="field">
+                <legend>Pastas a varrer</legend>
+                ${check2('radio', 'folderScope', 'all', 'Todas as pastas', true)}
+                ${check2('radio', 'folderScope', 'sent', 'Apenas Enviados (quem a empresa escreveu para fora)', false)}
+              </fieldset>
+              <div class="form-grid">
+                <label class="field">
+                  <span>Recebidas a partir de</span>
+                  <input type="date" name="receivedAfterExt" />
+                </label>
+                <label class="field">
+                  <span>Recebidas até</span>
+                  <input type="date" name="receivedBefore" />
+                  <small>Em branco: todo o período.</small>
+                </label>
+              </div>
+              <div class="field">
+                ${check('includeTrashExt', 'Incluir a Lixeira (Itens Excluídos)', true)}
+                ${check('includeJunkExt', 'Incluir o Lixo Eletrônico (spam)', false)}
+                <small class="muted">Ignorado quando o escopo é "Apenas Enviados".</small>
+              </div>
+              <label class="field">
+                <span>Mensagens lidas em paralelo</span>
+                <input type="number" name="concurrencyExt" min="1" max="8" value="4" />
+              </label>
+            </div>
+          </fieldset>
         </div>
         <div class="inline page-actions">
           <button type="submit" class="btn primary" data-submit>${icon('play')} Iniciar listagem</button>
@@ -111,6 +157,7 @@ export async function render(root, { query }) {
     kind = form.elements.kind.value;
     paint(form.querySelector('[data-kind-info] div'), html`${KIND_INFO[kind]}`);
     form.querySelector('[data-messages-only]').hidden = kind !== 'messages';
+    form.querySelector('[data-external-only]').hidden = kind !== 'external';
   };
   const onChange = (event) => {
     if (event.target.name === 'kind') sync();
@@ -122,22 +169,33 @@ export async function render(root, { query }) {
     event.preventDefault();
     const f = new FormData(form);
     const on = (name) => f.get(name) === 'on';
-    const chosen = f.get('kind') === 'directory' ? 'directory' : 'messages';
+    const chosen = KINDS.has(f.get('kind')) ? f.get('kind') : 'messages';
     const sourceIds = f.getAll('sourceIds');
     if (sourceIds.length === 0) return toast('Selecione ao menos uma conexão de e-mail.', 'error');
+    let listing = { kind: chosen };
+    let options = {};
+    if (chosen === 'messages') {
+      options = {
+        includeTrash: on('includeTrash'),
+        includeJunk: on('includeJunk'),
+        receivedAfter: f.get('receivedAfter') ? `${f.get('receivedAfter')}T00:00:00` : null,
+        concurrency: Number(f.get('concurrency')),
+      };
+    } else if (chosen === 'external') {
+      listing = { kind: 'external', ownDomains: String(f.get('ownDomains') || ''), folderScope: f.get('folderScope') === 'sent' ? 'sent' : 'all' };
+      options = {
+        includeTrash: on('includeTrashExt'),
+        includeJunk: on('includeJunkExt'),
+        receivedAfter: f.get('receivedAfterExt') ? `${f.get('receivedAfterExt')}T00:00:00` : null,
+        receivedBefore: f.get('receivedBefore') ? `${f.get('receivedBefore')}T23:59:59` : null,
+        concurrency: Number(f.get('concurrencyExt')),
+      };
+    }
     const body = {
-      listing: { kind: chosen },
+      listing,
       name: String(f.get('name') || '').trim(),
       sourceIds,
-      options:
-        chosen === 'messages'
-          ? {
-              includeTrash: on('includeTrash'),
-              includeJunk: on('includeJunk'),
-              receivedAfter: f.get('receivedAfter') ? `${f.get('receivedAfter')}T00:00:00` : null,
-              concurrency: Number(f.get('concurrency')),
-            }
-          : {},
+      options,
     };
     submit.disabled = true;
     try {

@@ -18,6 +18,9 @@ import {
   filterMessages,
   summarizeMessages,
   MESSAGE_FILTER_KEYS,
+  filterExternal,
+  summarizeExternal,
+  EXTERNAL_FILTER_KEYS,
   filterTeams,
   summarizeTeams,
   TEAMS_FILTER_KEYS,
@@ -38,6 +41,7 @@ import { PROJECT_ROOT } from '../config.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
 import { exportMailXlsx, exportMailCsv, exportMailHtml } from '../report/mail-exports.js';
 import { exportAccountsXlsx, exportAccountsCsv, exportAccountsHtml, exportMessagesXlsx, exportMessagesCsv, exportMessagesHtml } from '../report/listing-exports.js';
+import { exportExternalXlsx, exportExternalCsv, exportExternalHtml } from '../report/external-exports.js';
 import { exportTeamsXlsx, exportTeamsCsv, exportTeamsHtml } from '../report/teams-exports.js';
 import { TeamsConnector } from '../teams/connector.js';
 import { RETENTION_EXPORTS } from '../report/retention-exports.js';
@@ -114,6 +118,23 @@ const MODELS = {
     csv: exportMessagesCsv,
     html: exportMessagesHtml,
   },
+  external: {
+    keys: EXTERNAL_FILTER_KEYS,
+    filter: filterExternal,
+    // Painel: só os maiores grupos (a visão completa sai nas exportações).
+    summarize: (records) => summarizeExternal(records, { top: 500 }),
+    options: (records) => {
+      const all = summarizeExternal(records);
+      return {
+        mailboxes: all.byMailbox.map((m) => m.mailbox).sort(byName),
+        domains: all.byDomain.map((d) => d.domain).filter(Boolean).slice(0, 2000),
+        sources: all.bySource.map((s) => ({ value: s.sourceId, label: s.source })),
+      };
+    },
+    xlsx: exportExternalXlsx,
+    csv: exportExternalCsv,
+    html: exportExternalHtml,
+  },
   teams: {
     keys: TEAMS_FILTER_KEYS,
     filter: filterTeams,
@@ -135,6 +156,7 @@ const MODELS = {
 const modelOf = (scan) => {
   if (scan.listing?.kind === 'directory') return MODELS.accounts;
   if (scan.listing?.kind === 'messages') return MODELS.messages;
+  if (scan.listing?.kind === 'external') return MODELS.external;
   if (scan.kind === 'teams') return MODELS.teams;
   return scan.kind === 'mail' ? MODELS.mail : MODELS.files;
 };

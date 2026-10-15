@@ -170,13 +170,15 @@ export class GraphConnector extends GraphClient {
    * Pastas da caixa (com subpastas), sem as excluídas pelas opções e pelos padrões da conexão.
    * base: início dos endereços da caixa (resolveUser().path).
    */
-  async folders(base, { includeTrash = true, includeJunk = false, address = '' } = {}) {
+  async folders(base, { includeTrash = true, includeJunk = false, folderScope = 'all', address = '' } = {}) {
     const skip = new Set();
     let trash = null;
+    let sent = null;
     try {
       trash = await this.wellKnownFolder(base, 'deleteditems');
       const junk = await this.wellKnownFolder(base, 'junkemail');
       const sync = await this.wellKnownFolder(base, 'syncissues');
+      if (folderScope === 'sent') sent = await this.wellKnownFolder(base, 'sentitems');
       if (!includeTrash && trash) skip.add(trash);
       if (!includeJunk && junk) skip.add(junk);
       if (sync) skip.add(sync); // registros de sincronização do Outlook
@@ -192,20 +194,23 @@ export class GraphConnector extends GraphClient {
     const fields = '$select=id,displayName,childFolderCount,totalItemCount&$top=250';
     const out = [];
     // inTrash: a pasta Itens Excluídos e as subpastas dela.
-    const walk = async (url, parent, parentInTrash) => {
+    const walk = async (url, parent, parentInTrash, parentInSent) => {
       for (let next = url; next; ) {
         const page = await this.api(next);
         for (const f of page?.value || []) {
           const path = parent ? `${parent}/${f.displayName}` : f.displayName;
+          const inSent = parentInSent || (sent !== null && f.id === sent);
+          // Escopo "Enviados": só a pasta Itens Enviados e as subpastas dela (as demais nem são percorridas).
+          if (folderScope === 'sent' && !inSent) continue;
           if (skip.has(f.id) || excluded(path)) continue;
           const inTrash = parentInTrash || (trash !== null && f.id === trash);
           out.push({ id: f.id, path, total: Number(f.totalItemCount) || 0, inTrash });
-          if (f.childFolderCount > 0) await walk(`${base}/mailFolders/${enc(f.id)}/childFolders?${fields}`, path, inTrash);
+          if (f.childFolderCount > 0) await walk(`${base}/mailFolders/${enc(f.id)}/childFolders?${fields}`, path, inTrash, inSent);
         }
         next = this.next(page);
       }
     };
-    await walk(`${base}/mailFolders?${fields}`, '', false);
+    await walk(`${base}/mailFolders?${fields}`, '', false, false);
     return out;
   }
 
@@ -215,17 +220,17 @@ export class GraphConnector extends GraphClient {
    * before: só as recebidas antes desta data; headersOnly: sem baixar a mensagem (retenção) —
    * entrega também { subject, from, internetMessageId, headersOnly: true }.
    */
-  async *messages(mailbox, { since = null, before = null, headersOnly = false, fullHeaders = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
+  async *messages(mailbox, { since = null, before = null, headersOnly = false, fullHeaders = false, includeTrash = true, includeJunk = false, folderScope = 'all', maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
     const user = await this.resolveUser(mailbox);
     mailbox.name ||= user.name;
-    const folders = await this.folders(user.path, { includeTrash, includeJunk, address: mailbox.address });
+    const folders = await this.folders(user.path, { includeTrash, includeJunk, folderScope, address: mailbox.address });
     const userPath = user.path;
     const conditions = [since && `receivedDateTime ge ${since.toISOString()}`, before && `receivedDateTime lt ${before.toISOString()}`].filter(Boolean);
     const filter = conditions.length ? `&$filter=${enc(conditions.join(' and '))}` : '';
-    // A listagem de mensagens (fullHeaders) traz também destinatários, data de envio e se há anexos.
+    // A listagem de mensagens (fullHeaders) traz também destinatários (inclusive Cco), data de envio e se há anexos.
     const fields = headersOnly
       ? fullHeaders
-        ? 'id,receivedDateTime,sentDateTime,webLink,subject,from,toRecipients,ccRecipients,internetMessageId,hasAttachments'
+        ? 'id,receivedDateTime,sentDateTime,webLink,subject,from,toRecipients,ccRecipients,bccRecipients,internetMessageId,hasAttachments'
         : 'id,receivedDateTime,webLink,subject,from,internetMessageId'
       : 'id,receivedDateTime,webLink';
     const size = `&$expand=${enc("singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')")}`;
@@ -258,6 +263,7 @@ export class GraphConnector extends GraphClient {
                             sent: m.sentDateTime || null,
                             to: (m.toRecipients || []).map(mapRecipient),
                             cc: (m.ccRecipients || []).map(mapRecipient),
+                            bcc: (m.bccRecipients || []).map(mapRecipient),
                             hasAttachments: Boolean(m.hasAttachments),
                           }
                         : {}),

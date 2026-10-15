@@ -274,16 +274,19 @@ export class GmailConnector {
    * ignorada são descartadas. Mensagens maiores que maxBytes não são baixadas inteiras: vêm só o
    * corpo e a lista de anexos (formato "full"), sem o conteúdo dos anexos.
    */
-  async *messages(mailbox, { since = null, before = null, headersOnly = false, fullHeaders = false, includeTrash = true, includeJunk = false, maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
+  async *messages(mailbox, { since = null, before = null, headersOnly = false, fullHeaders = false, includeTrash = true, includeJunk = false, folderScope = 'all', maxBytes = 50 * 1048576, concurrency = 4, onFolder } = {}) {
     const { address } = mailbox;
     const base = `${this.endpoints.gmail}/users/${enc(address)}`;
     const labels = await this.labels(address);
-    onFolder?.('Todos os e-mails');
+    const sentOnly = folderScope === 'sent';
+    onFolder?.(sentOnly ? 'Enviados' : 'Todos os e-mails');
     const excluded = folderMatcher(this.source.excludeFolders);
     const terms = [];
     if (since) terms.push(`after:${Math.floor(since.getTime() / 1000)}`);
     if (before) terms.push(`before:${Math.floor(before.getTime() / 1000)}`);
-    const spamTrash = includeTrash || includeJunk;
+    // Escopo "Enviados": só o marcador SENT (exclui, por si, Lixeira e Spam).
+    if (sentOnly) terms.push('in:sent');
+    const spamTrash = !sentOnly && (includeTrash || includeJunk);
     if (spamTrash && !includeJunk) terms.push('-in:spam');
     if (spamTrash && !includeTrash) terms.push('-in:trash');
     const limit = Math.max(2, Math.floor(maxBytes));
@@ -306,7 +309,7 @@ export class GmailConnector {
       // (fullHeaders) pede também os destinatários e a data de envio.
       const header = (msg, name) => msg?.payload?.headers?.find((h) => h.name.toLowerCase() === name)?.value || '';
       const addrs = (value) => parseAddresses(value).map((a) => ({ name: a.name || '', address: a.address || '' }));
-      const metaHeaders = ['Subject', 'From', 'Message-ID', ...(fullHeaders ? ['To', 'Cc', 'Date'] : [])].map((h) => `metadataHeaders=${h}`).join('&');
+      const metaHeaders = ['Subject', 'From', 'Message-ID', ...(fullHeaders ? ['To', 'Cc', 'Bcc', 'Date'] : [])].map((h) => `metadataHeaders=${h}`).join('&');
       yield* pool(list('', false), Math.max(1, Math.min(concurrency, MAX_CONCURRENCY)), async ({ id }) => {
         try {
           const msg = await this.api(address, GMAIL_SCOPE, `${base}/messages/${enc(id)}?format=metadata&${metaHeaders}`, { retries: 4 });
@@ -328,7 +331,7 @@ export class GmailConnector {
             inTrash: (msg?.labelIds || []).includes('TRASH'),
             headersOnly: true,
             ...(fullHeaders
-              ? { to: addrs(header(msg, 'to')), cc: addrs(header(msg, 'cc')), sent: headerDate(header(msg, 'date')), hasAttachments: gmailHasAttachments(msg?.payload) }
+              ? { to: addrs(header(msg, 'to')), cc: addrs(header(msg, 'cc')), bcc: addrs(header(msg, 'bcc')), sent: headerDate(header(msg, 'date')), hasAttachments: gmailHasAttachments(msg?.payload) }
               : {}),
           };
         } catch (err) {

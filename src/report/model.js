@@ -554,6 +554,130 @@ export function summarizeMessages(records) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Destinatários externos ao domínio (somente leitura): uma linha por mensagem com destinatário externo
+
+const FIELD_LABELS = { to: 'Para', cc: 'Cc', bcc: 'Cco' };
+
+function externalHaystack(record) {
+  if (!record._search) {
+    record._search = foldText(
+      [record.subject, record.from, record.mailbox, record.folder, ...(record.external || []).flatMap((e) => [e.address, e.name, e.domain])].filter(Boolean).join(' | '),
+    );
+  }
+  return record._search;
+}
+
+const EXTERNAL_SORTERS = {
+  date: byDate,
+  mailbox: (a, b) => a.mailbox.localeCompare(b.mailbox, 'pt-BR') || byDate(a, b),
+  sender: (a, b) => String(a.from || '').localeCompare(String(b.from || ''), 'pt-BR') || byDate(a, b),
+  subject: (a, b) => String(a.subject || '').localeCompare(String(b.subject || ''), 'pt-BR'),
+  recipients: (a, b) => (a.externalCount || 0) - (b.externalCount || 0),
+  size: (a, b) => (a.size || 0) - (b.size || 0),
+};
+
+export const EXTERNAL_FILTER_KEYS = ['q', 'mailbox', 'source', 'domain', 'recipient', 'origin', 'sort', 'dir', 'page'];
+
+/** Filtra e ordena as mensagens com destinatário externo. Padrão: mais recentes primeiro. */
+export function filterExternal(records, filters = {}) {
+  const q = filters.q ? foldText(filters.q) : '';
+  const domain = filters.domain ? filters.domain.toLowerCase() : '';
+  const recipient = filters.recipient ? filters.recipient.toLowerCase() : '';
+  let out = records.filter((r) => {
+    if (filters.mailbox && r.mailbox !== filters.mailbox) return false;
+    if (filters.source && r.sourceId !== filters.source) return false;
+    if (domain && !(r.external || []).some((e) => e.domain === domain)) return false;
+    if (recipient && !(r.external || []).some((e) => e.address === recipient)) return false;
+    // Origem da mensagem: remetente externo ("in", recebida de fora) ou interno ("out", enviada para fora).
+    if (filters.origin === 'in' && r.fromExternal !== true) return false;
+    if (filters.origin === 'out' && r.fromExternal !== false) return false;
+    if (q && !externalHaystack(r).includes(q)) return false;
+    return true;
+  });
+  const known = Object.hasOwn(EXTERNAL_SORTERS, filters.sort || '');
+  out = out.slice().sort(known ? EXTERNAL_SORTERS[filters.sort] : byDate);
+  if (known ? filters.dir === 'desc' : filters.dir !== 'asc') out.reverse();
+  return out;
+}
+
+/**
+ * Agregações dos destinatários externos, a partir das mensagens: por destinatário, por domínio, por
+ * caixa e por conexão, mais os campos (Para/Cc/Cco) e as mensagens de remetente externo. top: limita
+ * os maiores grupos guardados (0 = todos, usado nas exportações).
+ */
+export function summarizeExternal(records, { top = 0 } = {}) {
+  const recipients = new Map();
+  const domains = new Map();
+  const mailboxes = new Map();
+  const sources = new Map();
+  const fields = { to: 0, cc: 0, bcc: 0 };
+  let pairs = 0;
+  let externalSenders = 0;
+  const when = (map, key, date) => {
+    const g = map.get(key);
+    if (!date) return;
+    if (!g.first || date < g.first) g.first = date;
+    if (!g.last || date > g.last) g.last = date;
+  };
+  for (const r of records) {
+    if (r.fromExternal) externalSenders++;
+    const date = r.date || r.sent || null;
+    const domainsHere = new Set();
+    for (const e of r.external || []) {
+      pairs++;
+      for (const f of e.fields || []) if (fields[f] !== undefined) fields[f]++;
+      let rec = recipients.get(e.address);
+      if (!rec) recipients.set(e.address, (rec = { address: e.address, name: e.name || '', domain: e.domain || '', messages: 0, mailboxes: new Set(), fields: new Set(), first: null, last: null }));
+      rec.messages++;
+      if (!rec.name && e.name) rec.name = e.name;
+      rec.mailboxes.add(r.mailbox);
+      for (const f of e.fields || []) rec.fields.add(f);
+      when(recipients, e.address, date);
+      domainsHere.add(e.domain || '');
+      let dom = domains.get(e.domain || '');
+      if (!dom) domains.set(e.domain || '', (dom = { domain: e.domain || '', recipients: new Set(), messages: 0, first: null, last: null }));
+      dom.recipients.add(e.address);
+    }
+    for (const d of domainsHere) {
+      const dom = domains.get(d);
+      dom.messages++;
+      when(domains, d, date);
+    }
+    const mb = mailboxes.get(r.mailbox) || mailboxes.set(r.mailbox, { mailbox: r.mailbox, name: r.mailboxName || '', messages: 0, recipients: new Set() }).get(r.mailbox);
+    mb.messages++;
+    for (const e of r.external || []) mb.recipients.add(e.address);
+    if (!mb.name && r.mailboxName) mb.name = r.mailboxName;
+    const src = sources.get(r.sourceId) || sources.set(r.sourceId, { sourceId: r.sourceId, source: r.sourceName, messages: 0 }).get(r.sourceId);
+    src.messages++;
+  }
+  const cut = (list) => (top > 0 ? list.slice(0, top) : list);
+  const byRecipient = [...recipients.values()]
+    .map((r) => ({ address: r.address, name: r.name, domain: r.domain, messages: r.messages, mailboxes: r.mailboxes.size, fields: [...r.fields], first: r.first, last: r.last }))
+    .sort((a, b) => b.messages - a.messages || a.address.localeCompare(b.address));
+  const byDomain = [...domains.values()]
+    .map((d) => ({ domain: d.domain, recipients: d.recipients.size, messages: d.messages, first: d.first, last: d.last }))
+    .sort((a, b) => b.messages - a.messages || a.domain.localeCompare(b.domain));
+  const byMailbox = [...mailboxes.values()]
+    .map((m) => ({ mailbox: m.mailbox, name: m.name, messages: m.messages, recipients: m.recipients.size }))
+    .sort((a, b) => b.messages - a.messages);
+  const bySource = [...sources.values()].sort((a, b) => b.messages - a.messages);
+  return {
+    messages: records.length,
+    recipientsTotal: recipients.size,
+    domainsTotal: domains.size,
+    pairs,
+    externalSenders,
+    byField: Object.entries(fields).map(([key, messages]) => ({ key, label: FIELD_LABELS[key], messages })).filter((f) => f.messages > 0),
+    byRecipient: cut(byRecipient),
+    byRecipientTotal: byRecipient.length,
+    byDomain: cut(byDomain),
+    byDomainTotal: byDomain.length,
+    byMailbox: cut(byMailbox),
+    bySource,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Microsoft Teams (mensagens de canais e chats)
 
 export const TEAMS_SCOPE_LABELS = { channel: 'Canais de equipes', chat: 'Chats' };
