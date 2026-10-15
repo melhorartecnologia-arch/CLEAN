@@ -1713,6 +1713,15 @@ dialog::backdrop {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+ul.plain {
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+}
+ul.plain li {
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+}
 .msg-atts {
   display: flex;
   flex-wrap: wrap;

@@ -603,7 +603,9 @@ já cadastradas em *Caixas de e-mail*:
   destinatário externo** (endereço, domínio, nº de mensagens, caixas e campos) e **por domínio
   externo**, mais a lista de mensagens com destinatário externo e quantas vieram de remetente externo.
   Lê só os cabeçalhos; o **Cco** só aparece quando o provedor o informa (em geral, na cópia de Enviados
-  do próprio remetente).
+  do próprio remetente). No detalhe de cada mensagem, **"Abrir mensagem"** baixa a mensagem completa na
+  hora (pela conexão) e mostra os cabeçalhos, o corpo e os anexos — com **download de cada anexo** e da
+  **mensagem original (.eml)** para abrir no programa de e-mail.
 
 Cada listagem gera um relatório na tela com filtros e gráficos (por situação/tipo/conexão, no caso das
 contas; por caixa, pasta e remetente, no caso das mensagens; por domínio e destinatário externo, no

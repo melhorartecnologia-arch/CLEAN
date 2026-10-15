@@ -501,6 +501,32 @@ export class ImapConnector {
     }
   }
 
+  /** Baixa uma mensagem isolada (MIME original) pelo id "pasta:uidvalidity:uid", para abrir o conteúdo. */
+  async message(mailbox, id, { maxBytes = 50 * 1048576, signal = this.signal } = {}) {
+    const m = /^(.*):([^:]*):(\d+)$/.exec(String(id));
+    if (!m) throw new ApiError('Identificador de mensagem inválido.');
+    const [, folderPath, validity, uidStr] = m;
+    const uid = Number(uidStr);
+    const { client, dispose } = await this.connect(mailbox, { signal });
+    let lock = null;
+    try {
+      lock = await client.getMailboxLock(folderPath, { readOnly: true });
+      if (validity && String(client.mailbox?.uidValidity ?? '') !== validity) {
+        throw new ApiError('A pasta foi recriada no servidor depois da análise (UIDVALIDITY diferente): a mensagem não pôde ser localizada com segurança.');
+      }
+      const msg = await client.fetchOne(String(uid), { uid: true, source: { start: 0, maxLength: maxBytes } }, { uid: true });
+      if (!msg || !msg.source) throw new ApiError('Mensagem não encontrada (já excluída ou movida).');
+      const raw = msg.source;
+      return { raw, truncated: (raw.length || 0) >= maxBytes, size: raw.length };
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw this.error(err);
+    } finally {
+      lock?.release();
+      await dispose();
+    }
+  }
+
   async test() {
     const boxes = await this.mailboxes();
     if (boxes.length === 0) return { ok: false, message: 'Informe ao menos uma caixa de e-mail.', details: [] };

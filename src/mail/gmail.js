@@ -378,6 +378,16 @@ export class GmailConnector {
     });
   }
 
+  /** Baixa uma mensagem isolada (MIME original) pelo id, para abrir o conteúdo e os anexos. */
+  async message(mailbox, id, { maxBytes = 50 * 1048576 } = {}) {
+    const base = `${this.endpoints.gmail}/users/${enc(mailbox.address)}`;
+    const msg = await this.api(mailbox.address, GMAIL_SCOPE, `${base}/messages/${enc(id)}?format=raw`, { retries: 4 });
+    let raw = Buffer.from(msg?.raw || '', 'base64url');
+    const truncated = raw.length > maxBytes;
+    if (truncated) raw = raw.subarray(0, maxBytes);
+    return { raw, truncated, size: Number(msg?.sizeEstimate) || raw.length };
+  }
+
   async test() {
     const details = [];
     let boxes;

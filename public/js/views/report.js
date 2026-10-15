@@ -1516,7 +1516,11 @@ const EXTERNAL = {
     const safeLink = /^https:\/\//i.test(r.webLink || '') ? r.webLink : null;
     const messageId = String(r.internetMessageId || '').replace(/^<|>$/g, '');
     const ext = r.external || [];
-    return html`<div class="detail-grid two">
+    return html`<div class="msg-detail">
+      <div class="inline" style="margin-bottom: 12px">
+        <button type="button" class="btn small primary" data-action="open-message" data-rid="${r.id}">${icon('mail')} Abrir mensagem (conteúdo e anexos)</button>
+      </div>
+      <div class="detail-grid two">
       <div>
         <h4>Mensagem</h4>
         <dl class="kv">
@@ -1539,8 +1543,9 @@ const EXTERNAL = {
         <ul class="plain">
           ${ext.map((e) => html`<li><b>${e.name ? `${e.name} <${e.address}>` : e.address}</b> <span class="muted small">${e.domain}${e.fields?.length ? ` · ${extFields(e.fields)}` : ''}</span></li>`)}
         </ul>
-        <p class="muted small">A varredura lê só os cabeçalhos: o Cco (cópia oculta) só aparece quando o provedor o informa (em geral, na cópia de Enviados do próprio remetente).</p>
+        <p class="muted small">A varredura lê só os cabeçalhos: o Cco (cópia oculta) só aparece quando o provedor o informa (em geral, na cópia de Enviados do próprio remetente). Use "Abrir mensagem" para ver o conteúdo e os anexos.</p>
       </div>
+    </div>
     </div>`;
   },
 
@@ -2655,6 +2660,51 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         toast(el.dataset.copied || 'Copiado.', 'success');
       } catch {
         toast('Não foi possível copiar. Selecione o texto e copie manualmente.', 'error');
+      }
+    } else if (action === 'open-message') {
+      const rid = Number(el.dataset.rid);
+      el.disabled = true;
+      el.setAttribute('aria-busy', 'true');
+      try {
+        const msg = await get(`/api/scans/${id}/results/${rid}/message`);
+        if (stopped) return;
+        const people = (list) => (list && list.length ? list.join('; ') : '');
+        const linha = (rotulo, valor) => (valor ? html`<dt>${rotulo}</dt><dd>${valor}</dd>` : '');
+        const anexos = (msg.attachments || []).filter((a) => !a.inline);
+        const embutidos = (msg.attachments || []).filter((a) => a.inline).length;
+        const body = html`<dl class="kv">
+            ${linha('De', people(msg.from))}
+            ${linha('Para', people(msg.to))}
+            ${linha('Cc', people(msg.cc))}
+            ${linha('Cco', people(msg.bcc))}
+            ${linha('Data', msg.date ? fmtDateTime(msg.date) : '')}
+            ${linha('Caixa', msg.mailboxName ? `${msg.mailboxName} <${msg.mailbox}>` : msg.mailbox)}
+            ${linha('Pasta', msg.folder)}
+            ${linha('Conexão', msg.sourceName ? `${msg.sourceName}${msg.sourceType ? ` (${TYPE_LABELS[msg.sourceType] || msg.sourceType})` : ''}` : '')}
+          </dl>
+          ${msg.encrypted ? html`<div class="alert">${icon('alert')}<div>Mensagem criptografada (S/MIME ou PGP): o conteúdo em texto pode não aparecer. Baixe o .eml e abra no programa de e-mail.</div></div>` : ''}
+          <h4>Conteúdo</h4>
+          ${msg.body
+            ? html`<pre class="msg-body">${msg.body}</pre>`
+            : html`<p class="muted">Sem corpo em texto. Use "Baixar mensagem (.eml)" para ver a versão original (com formatação e anexos).</p>`}
+          ${msg.partial ? html`<p class="muted small">A mensagem é grande: apenas parte do conteúdo foi lida. Baixe o .eml para a versão completa.</p>` : ''}
+          <h4>Anexos${anexos.length ? ` (${anexos.length})` : ''}</h4>
+          ${anexos.length
+            ? html`<ul class="plain">${anexos.map(
+                (a) => html`<li><a href="/api/scans/${id}/results/${rid}/attachment/${a.index}" download>${icon('download')} ${a.name}</a> <span class="muted small">${a.contentType || ''}${a.size ? ` · ${fmtBytes(a.size)}` : ''}</span></li>`,
+              )}</ul>`
+            : html`<p class="muted">Sem anexos.</p>`}
+          ${embutidos ? html`<p class="muted small">+ ${plural(embutidos, 'imagem embutida', 'imagens embutidas')} no corpo da mensagem.</p>` : ''}
+          <div class="inline" style="margin-top: 14px">
+            <a class="btn small" href="/api/scans/${id}/results/${rid}/message.eml" download>${icon('download')} Baixar mensagem (.eml)</a>
+            ${msg.webLink ? html`<a class="btn small" href="${msg.webLink}" target="_blank" rel="noopener noreferrer">Abrir no Outlook na Web</a>` : ''}
+          </div>`;
+        await openDialog({ title: msg.subject || '(sem assunto)', body, wide: true, describe: false, submitLabel: 'Fechar', cancelLabel: '' });
+      } catch (err) {
+        if (!stopped) toast(err.message || 'Não foi possível abrir a mensagem.', 'error');
+      } finally {
+        el.disabled = false;
+        el.textContent = label;
       }
     } else if (action === 'delete-item') {
       const rid = Number(el.dataset.rid);

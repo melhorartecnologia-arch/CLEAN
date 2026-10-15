@@ -297,6 +297,13 @@ export class GraphConnector extends GraphClient {
     });
   }
 
+  /** Baixa uma mensagem isolada (MIME original) pelo id, para abrir o conteúdo e os anexos. */
+  async message(mailbox, id, { maxBytes = 50 * 1048576, signal = this.signal } = {}) {
+    const user = await this.resolveUser(mailbox, { signal });
+    const res = await this.api(`${user.path}/messages/${enc(id)}/$value`, { type: 'buffer', maxBytes, retries: 4, headers: { Accept: '*/*', ...IMMUTABLE_IDS }, signal });
+    return { raw: res.data, truncated: res.truncated, size: res.size || res.data.length };
+  }
+
   /** Teste da conexão: autenticação, listagem de usuários (se for o caso) e acesso a até 3 caixas. */
   async test() {
     const details = [];

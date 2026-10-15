@@ -18,8 +18,8 @@ const TENANT = 'empresa.onmicrosoft.com';
 const CLIENT = '11111111-2222-3333-4444-555555555555';
 const SECRET = 'segredo-super-secreto';
 
-/** Monta uma mensagem MIME simples (aceita Cco). */
-function mail({ subject, from, to = '', cc = '', bcc = '', body = 'x', date = 'Thu, 25 Sep 2026 10:00:00 -0300' }) {
+/** Monta uma mensagem MIME simples (aceita Cco e anexos). */
+function mail({ subject, from, to = '', cc = '', bcc = '', body = 'x', attachments = [], date = 'Thu, 25 Sep 2026 10:00:00 -0300' }) {
   const head = [
     `From: ${from}`,
     `To: ${to}`,
@@ -29,9 +29,21 @@ function mail({ subject, from, to = '', cc = '', bcc = '', body = 'x', date = 'T
     `Date: ${date}`,
     `Message-ID: <${crypto.randomUUID()}@empresa.com>`,
     'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset=utf-8',
   ];
-  return Buffer.from([...head, '', body, ''].join('\r\n'), 'utf8');
+  if (!attachments.length) return Buffer.from([...head, 'Content-Type: text/plain; charset=utf-8', '', body, ''].join('\r\n'), 'utf8');
+  const parts = [
+    ...head,
+    'Content-Type: multipart/mixed; boundary="XYZ"',
+    '',
+    '--XYZ',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    body,
+    ...attachments.flatMap((a) => ['--XYZ', `Content-Type: application/octet-stream; name="${a.name}"`, 'Content-Disposition: attachment', 'Content-Transfer-Encoding: base64', '', a.data.toString('base64')]),
+    '--XYZ--',
+    '',
+  ];
+  return Buffer.from(parts.join('\r\n'), 'utf8');
 }
 
 function graphData() {
@@ -59,8 +71,12 @@ function graphData() {
             { id: 'a3', received: '2026-09-22T10:00:00Z', raw: mail({ subject: 'Newsletter', from: 'news@parceiro.com', to: 'ana@empresa.com' }) },
           ],
           sent: [
-            // Enviada para fora, com Cc interno e Cco externo.
-            { id: 's1', received: '2026-09-23T10:00:00Z', raw: mail({ subject: 'Para o cliente', from: 'ana@empresa.com', to: 'cliente@cliente.com', cc: 'chefe@empresa.com', bcc: 'oculto@secreto.com' }) },
+            // Enviada para fora, com Cc interno, Cco externo e um anexo.
+            {
+              id: 's1',
+              received: '2026-09-23T10:00:00Z',
+              raw: mail({ subject: 'Para o cliente', from: 'ana@empresa.com', to: 'cliente@cliente.com', cc: 'chefe@empresa.com', bcc: 'oculto@secreto.com', body: 'corpo-visivel', attachments: [{ name: 'contrato.pdf', data: Buffer.from('CONTEUDO-DO-ANEXO') }] }),
+            },
           ],
         },
       },
@@ -253,6 +269,28 @@ test('API: destinatários externos (relatório somente leitura, apurações e ex
     const json = await app.api('GET', `/api/scans/${scan.data.id}/export.json`);
     assert.equal(json.data.scan.listing.kind, 'external');
     assert.equal(json.data.results.length, 3);
+
+    // Abrir a mensagem sob demanda: conteúdo, anexo e .eml.
+    const all = await app.api('GET', `/api/scans/${scan.data.id}/results?pageSize=500`);
+    const alvo = all.data.items.find((r) => r.subject === 'Para o cliente');
+    assert.ok(alvo, 'a mensagem com anexo está no relatório');
+    const msg = await app.api('GET', `/api/scans/${scan.data.id}/results/${alvo.id}/message`);
+    assert.equal(msg.status, 200);
+    assert.ok(msg.data.to.some((t) => t.includes('cliente@cliente.com')));
+    assert.ok(msg.data.bcc.some((t) => t.includes('oculto@secreto.com')), 'o Cco aparece no conteúdo');
+    assert.ok(msg.data.body.includes('corpo-visivel'));
+    assert.equal(msg.data.attachments.length, 1);
+    assert.equal(msg.data.attachments[0].name, 'contrato.pdf');
+    const att = await app.api('GET', `/api/scans/${scan.data.id}/results/${alvo.id}/attachment/0`);
+    assert.equal(att.status, 200);
+    assert.equal(att.data.toString('utf8'), 'CONTEUDO-DO-ANEXO');
+    const eml = await app.api('GET', `/api/scans/${scan.data.id}/results/${alvo.id}/message.eml`);
+    assert.equal(eml.status, 200);
+    assert.ok(eml.data.toString('utf8').includes('Subject: Para o cliente'));
+
+    // Uma linha sem mensagem para abrir é recusada (contas do domínio não têm messageId) — aqui, id inexistente.
+    const semMsg = await app.api('GET', `/api/scans/${scan.data.id}/results/999999/message`);
+    assert.equal(semMsg.status, 404);
   } finally {
     await app.close();
   }

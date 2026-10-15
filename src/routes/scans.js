@@ -36,6 +36,8 @@ import { DrivesConnector, keptCloud, keptCloudTarget, coveredByRepo, cloudTarget
 import { compileExclusions, DEFAULT_EXCLUDES } from '../scan/walker.js';
 import { createConnector } from '../mail/connectors.js';
 import { normalizeAddress } from '../mail/common.js';
+import { extractMessage } from '../scan/extractors/index.js';
+import { parseMime, formatAddress } from '../scan/extractors/mime.js';
 import { friendlyError } from '../scan/errors.js';
 import { PROJECT_ROOT } from '../config.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
@@ -450,6 +452,110 @@ export function scansRouter({ store, manager, endpoints = {} }) {
         };
       }),
     });
+  });
+
+  // ---------- Abrir uma mensagem (conteúdo, anexos e .eml), baixada sob demanda ----------
+
+  /** A linha é uma mensagem de e-mail que pode ser aberta (tem caixa, id e conexão). */
+  async function mailRecord(scan, ridRaw) {
+    if (scan.kind !== 'mail') throw new HttpError(400, 'Abrir a mensagem só vale para análises e listagens de e-mail.');
+    const rid = Number(ridRaw);
+    const records = await store.readResults(scan.id);
+    const record = records.find((r) => r.id === rid);
+    if (!record) throw new HttpError(404, 'Mensagem não encontrada nesta análise.');
+    if (!record.messageId || !record.mailbox || !record.sourceId) throw new HttpError(400, 'Esta linha não tem uma mensagem para abrir.');
+    return record;
+  }
+
+  /** Baixa o MIME original da mensagem da linha, usando a conexão atual (com os segredos decifrados). */
+  async function openMessageRaw(record, maxBytes) {
+    const source = store.getMailSource(record.sourceId);
+    if (!source) throw new HttpError(409, 'A conexão de e-mail desta mensagem foi excluída do cadastro.');
+    let secrets;
+    try {
+      secrets = store.openMailSecrets(source);
+    } catch (err) {
+      throw new HttpError(409, err.message);
+    }
+    const grantId = source.graph?.account?.grantId;
+    const onRefreshToken = grantId ? (token) => store.saveRefreshToken(source.id, grantId, token) : undefined;
+    const connector = createConnector({ ...source, secrets }, { signal: AbortSignal.timeout(120000), endpoints, onRefreshToken });
+    if (typeof connector.message !== 'function') {
+      await connector.close?.();
+      throw new HttpError(400, 'Este tipo de conexão não permite abrir a mensagem.');
+    }
+    try {
+      return await connector.message(mailboxFor(source, record), record.messageId, { maxBytes });
+    } catch (err) {
+      throw new HttpError(502, `Não foi possível abrir a mensagem: ${friendlyError(err)}`);
+    } finally {
+      await connector.close?.();
+    }
+  }
+
+  /** Nome de arquivo seguro para download (sem separadores de caminho nem caracteres de controle). */
+  const safeFileName = (name, fallback) =>
+    String(name || '')
+      .replace(/[\\/\u0000-\u001f]+/g, ' ')
+      .replace(/["]/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 100) || fallback;
+
+  // Conteúdo da mensagem: cabeçalhos, corpo (texto) e a lista de anexos. Lê a mensagem inteira na hora.
+  router.get('/:id/results/:rid/message', async (req, res) => {
+    const scan = getScan(req);
+    const record = await mailRecord(scan, req.params.rid);
+    const { raw, truncated } = await openMessageRaw(record, 50 * 1048576);
+    const msg = await extractMessage(raw, { attachments: false });
+    const people = (list) => (list || []).map(formatAddress).filter(Boolean);
+    res.json({
+      subject: msg.subject || record.subject || '',
+      from: people(msg.from),
+      to: people(msg.to),
+      cc: people(msg.cc),
+      bcc: people(msg.bcc),
+      replyTo: people(msg.replyTo),
+      date: msg.date || record.date || null,
+      messageId: msg.messageId || record.internetMessageId || null,
+      mailbox: record.mailbox,
+      mailboxName: record.mailboxName || '',
+      folder: record.folder || '',
+      sourceName: record.sourceName || '',
+      sourceType: record.sourceType || '',
+      webLink: /^https:\/\//i.test(record.webLink || '') ? record.webLink : null,
+      body: msg.body || '',
+      encrypted: Boolean(msg.encrypted || msg.opaqueSigned),
+      partial: Boolean(msg.partial || truncated),
+      attachments: (msg.attachments || []).map((a, index) => ({ index, name: a.name || `anexo-${index + 1}`, size: Number(a.size) || 0, contentType: a.contentType || '', inline: Boolean(a.inline) })),
+    });
+  });
+
+  // Baixa um anexo da mensagem (pelo índice na lista de /message).
+  router.get('/:id/results/:rid/attachment/:index', async (req, res) => {
+    const scan = getScan(req);
+    const record = await mailRecord(scan, req.params.rid);
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0) throw new HttpError(400, 'Anexo inválido.');
+    const { raw } = await openMessageRaw(record, 200 * 1048576);
+    const parsed = parseMime(raw, { decodeAttachments: true });
+    const att = parsed.attachments?.[index];
+    if (!att || !att.data) throw new HttpError(404, 'Anexo não encontrado (ou não pôde ser baixado).');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFileName(att.name, `anexo-${index + 1}`)}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(att.data);
+  });
+
+  // Baixa a mensagem original (.eml), para abrir no programa de e-mail com a formatação e os anexos.
+  router.get('/:id/results/:rid/message.eml', async (req, res) => {
+    const scan = getScan(req);
+    const record = await mailRecord(scan, req.params.rid);
+    const { raw } = await openMessageRaw(record, 200 * 1048576);
+    res.setHeader('Content-Type', 'message/rfc822');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFileName((record.subject || 'mensagem').slice(0, 60), 'mensagem')}.eml"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(raw);
   });
 
   // Exclusão manual de um item do relatório (arquivo ou mensagem), com registro de quem excluiu.
