@@ -18,8 +18,8 @@ const TENANT = 'empresa.onmicrosoft.com';
 const CLIENT = '11111111-2222-3333-4444-555555555555';
 const SECRET = 'segredo-super-secreto';
 
-/** Monta uma mensagem MIME simples (aceita Cco e anexos). */
-function mail({ subject, from, to = '', cc = '', bcc = '', body = 'x', attachments = [], date = 'Thu, 25 Sep 2026 10:00:00 -0300' }) {
+/** Monta uma mensagem MIME simples (aceita Cco, corpo HTML e anexos). */
+function mail({ subject, from, to = '', cc = '', bcc = '', body = 'x', html = false, attachments = [], date = 'Thu, 25 Sep 2026 10:00:00 -0300' }) {
   const head = [
     `From: ${from}`,
     `To: ${to}`,
@@ -30,7 +30,7 @@ function mail({ subject, from, to = '', cc = '', bcc = '', body = 'x', attachmen
     `Message-ID: <${crypto.randomUUID()}@empresa.com>`,
     'MIME-Version: 1.0',
   ];
-  if (!attachments.length) return Buffer.from([...head, 'Content-Type: text/plain; charset=utf-8', '', body, ''].join('\r\n'), 'utf8');
+  if (!attachments.length) return Buffer.from([...head, `Content-Type: text/${html ? 'html' : 'plain'}; charset=utf-8`, '', body, ''].join('\r\n'), 'utf8');
   const parts = [
     ...head,
     'Content-Type: multipart/mixed; boundary="XYZ"',
@@ -63,8 +63,8 @@ function graphData() {
         folders: [inbox, sent],
         messages: {
           inbox: [
-            // Recebida de dentro, com um externo em cópia.
-            { id: 'a1', received: '2026-09-20T10:00:00Z', raw: mail({ subject: 'Proposta', from: 'chefe@empresa.com', to: 'ana@empresa.com', cc: 'parceiro@fornecedor.com' }) },
+            // Recebida de dentro, com um externo em cópia e corpo em HTML.
+            { id: 'a1', received: '2026-09-20T10:00:00Z', raw: mail({ subject: 'Proposta', from: 'chefe@empresa.com', to: 'ana@empresa.com', cc: 'parceiro@fornecedor.com', html: true, body: '<p>Olá <b>parceiro</b>, segue a proposta.</p>' }) },
             // Só internos: fica de fora.
             { id: 'a2', received: '2026-09-21T10:00:00Z', raw: mail({ subject: 'Interno', from: 'ana@empresa.com', to: 'colega@empresa.com' }) },
             // Remetente externo, sem destinatário externo: fica de fora (mas conta como remetente externo).
@@ -189,7 +189,7 @@ async function startApp() {
   const api = async (method, url, body) => {
     const res = await fetch(base + url, { method, headers: { 'Content-Type': 'application/json', 'X-CLEAN': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
     const type = res.headers.get('content-type') || '';
-    return { status: res.status, data: type.includes('json') ? await res.json() : Buffer.from(await res.arrayBuffer()) };
+    return { status: res.status, headers: Object.fromEntries(res.headers), data: type.includes('json') ? await res.json() : Buffer.from(await res.arrayBuffer()) };
   };
   const wait = async (id) => {
     let current;
@@ -287,6 +287,22 @@ test('API: destinatários externos (relatório somente leitura, apurações e ex
     const eml = await app.api('GET', `/api/scans/${scan.data.id}/results/${alvo.id}/message.eml`);
     assert.equal(eml.status, 200);
     assert.ok(eml.data.toString('utf8').includes('Subject: Para o cliente'));
+
+    // Corpo exibido dentro do app (documento HTML seguro para o iframe): texto e CSP.
+    const bodyTxt = await app.api('GET', `/api/scans/${scan.data.id}/results/${alvo.id}/message/body.html`);
+    assert.equal(bodyTxt.status, 200);
+    const bodyTxtStr = bodyTxt.data.toString('utf8');
+    assert.ok(bodyTxtStr.includes('corpo-visivel'), 'o corpo em texto entra no documento do iframe');
+    assert.ok(/Content-Security-Policy/i.test(bodyTxtStr), 'o documento do corpo traz a CSP');
+    // Pode ser embutido no próprio app (iframe same-origin), apesar do X-Frame-Options global.
+    assert.equal(bodyTxt.headers['x-frame-options'], 'SAMEORIGIN');
+    assert.ok(/frame-ancestors 'self'/.test(bodyTxt.headers['content-security-policy'] || ''), 'a CSP da resposta libera o enquadramento same-origin');
+    assert.ok(/sandbox/.test(bodyTxt.headers['content-security-policy'] || ''), 'a resposta é sandbox (sem scripts)');
+    // Mensagem com corpo em HTML: a formatação é preservada para exibir no app.
+    const proposta = all.data.items.find((r) => r.subject === 'Proposta');
+    const bodyHtml = await app.api('GET', `/api/scans/${scan.data.id}/results/${proposta.id}/message/body.html`);
+    assert.equal(bodyHtml.status, 200);
+    assert.ok(bodyHtml.data.toString('utf8').includes('<b>parceiro</b>'), 'o corpo HTML é preservado para exibição no app');
 
     // Uma linha sem mensagem para abrir é recusada (contas do domínio não têm messageId) — aqui, id inexistente.
     const semMsg = await app.api('GET', `/api/scans/${scan.data.id}/results/999999/message`);

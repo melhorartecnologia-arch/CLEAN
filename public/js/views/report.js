@@ -2670,8 +2670,16 @@ export async function render(root, { params, query, isCurrent = () => true }) {
         if (stopped) return;
         const people = (list) => (list && list.length ? list.join('; ') : '');
         const linha = (rotulo, valor) => (valor ? html`<dt>${rotulo}</dt><dd>${valor}</dd>` : '');
+        const att = (a, dl) => `/api/scans/${id}/results/${rid}/attachment/${a.index}${dl ? '?dl=1' : ''}`;
+        const isImg = (t) => /^image\/(png|jpe?g|gif|webp|bmp)$/i.test(t || '');
+        const isPdf = (t) => /^application\/pdf$/i.test(t || '');
         const anexos = (msg.attachments || []).filter((a) => !a.inline);
         const embutidos = (msg.attachments || []).filter((a) => a.inline).length;
+        const anexoItem = (a) => html`<li class="att-item">
+            <div class="att-head"><a href="${att(a, true)}" download>${icon('download')} ${a.name}</a> <span class="muted small">${a.contentType || ''}${a.size ? ` · ${fmtBytes(a.size)}` : ''}</span></div>
+            ${isImg(a.contentType) ? html`<img class="att-img" src="${att(a)}" alt="${a.name}" loading="lazy" />` : ''}
+            ${isPdf(a.contentType) ? html`<iframe class="att-frame" src="${att(a)}" title="${a.name}" loading="lazy"></iframe>` : ''}
+          </li>`;
         const body = html`<dl class="kv">
             ${linha('De', people(msg.from))}
             ${linha('Para', people(msg.to))}
@@ -2682,22 +2690,15 @@ export async function render(root, { params, query, isCurrent = () => true }) {
             ${linha('Pasta', msg.folder)}
             ${linha('Conexão', msg.sourceName ? `${msg.sourceName}${msg.sourceType ? ` (${TYPE_LABELS[msg.sourceType] || msg.sourceType})` : ''}` : '')}
           </dl>
-          ${msg.encrypted ? html`<div class="alert">${icon('alert')}<div>Mensagem criptografada (S/MIME ou PGP): o conteúdo em texto pode não aparecer. Baixe o .eml e abra no programa de e-mail.</div></div>` : ''}
+          ${msg.encrypted ? html`<div class="alert">${icon('alert')}<div>Mensagem criptografada (S/MIME ou PGP): o conteúdo pode não aparecer. Baixe o .eml e abra no programa de e-mail.</div></div>` : ''}
           <h4>Conteúdo</h4>
-          ${msg.body
-            ? html`<pre class="msg-body">${msg.body}</pre>`
-            : html`<p class="muted">Sem corpo em texto. Use "Baixar mensagem (.eml)" para ver a versão original (com formatação e anexos).</p>`}
+          <iframe class="msg-frame" src="/api/scans/${id}/results/${rid}/message/body.html" sandbox="" title="Conteúdo da mensagem" loading="lazy"></iframe>
           ${msg.partial ? html`<p class="muted small">A mensagem é grande: apenas parte do conteúdo foi lida. Baixe o .eml para a versão completa.</p>` : ''}
           <h4>Anexos${anexos.length ? ` (${anexos.length})` : ''}</h4>
-          ${anexos.length
-            ? html`<ul class="plain">${anexos.map(
-                (a) => html`<li><a href="/api/scans/${id}/results/${rid}/attachment/${a.index}" download>${icon('download')} ${a.name}</a> <span class="muted small">${a.contentType || ''}${a.size ? ` · ${fmtBytes(a.size)}` : ''}</span></li>`,
-              )}</ul>`
-            : html`<p class="muted">Sem anexos.</p>`}
+          ${anexos.length ? html`<ul class="plain att-list">${anexos.map(anexoItem)}</ul>` : html`<p class="muted">Sem anexos.</p>`}
           ${embutidos ? html`<p class="muted small">+ ${plural(embutidos, 'imagem embutida', 'imagens embutidas')} no corpo da mensagem.</p>` : ''}
           <div class="inline" style="margin-top: 14px">
             <a class="btn small" href="/api/scans/${id}/results/${rid}/message.eml" download>${icon('download')} Baixar mensagem (.eml)</a>
-            ${msg.webLink ? html`<a class="btn small" href="${msg.webLink}" target="_blank" rel="noopener noreferrer">Abrir no Outlook na Web</a>` : ''}
           </div>`;
         await openDialog({ title: msg.subject || '(sem assunto)', body, wide: true, describe: false, submitLabel: 'Fechar', cancelLabel: '' });
       } catch (err) {

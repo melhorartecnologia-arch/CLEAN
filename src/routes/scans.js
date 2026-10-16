@@ -38,6 +38,7 @@ import { createConnector } from '../mail/connectors.js';
 import { normalizeAddress } from '../mail/common.js';
 import { extractMessage } from '../scan/extractors/index.js';
 import { parseMime, formatAddress } from '../scan/extractors/mime.js';
+import { escapeHtml } from '../report/exports.js';
 import { friendlyError } from '../scan/errors.js';
 import { PROJECT_ROOT } from '../config.js';
 import { exportXlsx, exportCsv, exportHtml, exportJson } from '../report/exports.js';
@@ -502,6 +503,39 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       .trim()
       .slice(0, 100) || fallback;
 
+  // Conteúdo do corpo exibido no app dentro de um iframe isolado (sandbox, sem scripts). A política de
+  // segurança (CSP) bloqueia qualquer carregamento externo (imagens de rastreio, scripts, fontes): só
+  // imagens embutidas em data: e estilos no próprio HTML. Nenhum link abre fora da aplicação.
+  const BODY_CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; media-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+
+  /** Monta o documento HTML seguro do corpo da mensagem (HTML original, ou o texto em <pre>). */
+  function bodyDocument(raw) {
+    const parsed = parseMime(raw, { decodeAttachments: false, keepBodies: true });
+    const bodies = parsed.bodies || [];
+    const htmlBody = bodies.find((b) => b.html && b.source && b.source.trim());
+    const textBody = bodies.find((b) => !b.html && b.source && b.source.trim());
+    let inner;
+    let hadRemote = false;
+    if (htmlBody) {
+      // Scripts não rodam (sandbox + CSP), mas são removidos por garantia; marca se havia conteúdo remoto.
+      inner = htmlBody.source
+        .replace(/<script\b[\s\S]*?<\/script\s*>/gi, '')
+        .replace(/<script\b[^>]*>/gi, '');
+      hadRemote = /\b(?:src|background)\s*=\s*["']?\s*https?:/i.test(inner) || /url\(\s*['"]?\s*https?:/i.test(inner);
+    } else if (textBody) {
+      inner = `<pre style="white-space:pre-wrap;word-break:break-word;font:inherit;margin:0">${escapeHtml(textBody.source)}</pre>`;
+    } else {
+      inner = '<p style="color:#6b7280">(sem conteúdo de texto nesta mensagem)</p>';
+    }
+    const aviso = hadRemote
+      ? '<div style="margin:0 0 12px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb;color:#6b7280;font-size:13px">As imagens e os conteúdos remotos foram bloqueados por segurança e privacidade. Para ver a mensagem com as imagens, baixe o .eml e abra no seu programa de e-mail.</div>'
+      : '';
+    return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${BODY_CSP}">
+<style>html,body{margin:0}body{padding:12px;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;line-height:1.5;color:#111827;background:#fff;word-break:break-word;overflow-wrap:anywhere}img{max-width:100%;height:auto}table{max-width:100%}a{color:#1d4ed8}</style>
+</head><body>${aviso}${inner}</body></html>`;
+  }
+
   // Conteúdo da mensagem: cabeçalhos, corpo (texto) e a lista de anexos. Lê a mensagem inteira na hora.
   router.get('/:id/results/:rid/message', async (req, res) => {
     const scan = getScan(req);
@@ -531,7 +565,27 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     });
   });
 
-  // Baixa um anexo da mensagem (pelo índice na lista de /message).
+  // Corpo da mensagem como documento HTML seguro, para exibir num iframe isolado (sandbox) dentro do
+  // app — sem abrir nada externo. A CSP e o sandbox bloqueiam scripts, links e carregamentos remotos.
+  router.get('/:id/results/:rid/message/body.html', async (req, res) => {
+    const scan = getScan(req);
+    const record = await mailRecord(scan, req.params.rid);
+    const { raw } = await openMessageRaw(record, 50 * 1048576);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Security-Policy', `sandbox; ${BODY_CSP}`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // Pode ser embutido no próprio app (iframe same-origin), mas em nenhum outro site.
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Content-Disposition', 'inline');
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(bodyDocument(raw));
+  });
+
+  // Tipos que o navegador exibe com segurança dentro do app (os demais vêm como download).
+  const INLINE_ATTACHMENT = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'application/pdf', 'text/plain']);
+
+  // Entrega um anexo (pelo índice na lista de /message): inline para ver no app (imagens, PDF, texto)
+  // ou como download (?dl=1, ou tipos que não é seguro exibir inline, como HTML/SVG).
   router.get('/:id/results/:rid/attachment/:index', async (req, res) => {
     const scan = getScan(req);
     const record = await mailRecord(scan, req.params.rid);
@@ -541,9 +595,17 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     const parsed = parseMime(raw, { decodeAttachments: true });
     const att = parsed.attachments?.[index];
     if (!att || !att.data) throw new HttpError(404, 'Anexo não encontrado (ou não pôde ser baixado).');
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${safeFileName(att.name, `anexo-${index + 1}`)}"`);
+    const type = String(att.contentType || '').toLowerCase().split(';')[0].trim();
+    const inline = req.query.dl !== '1' && INLINE_ATTACHMENT.has(type);
+    res.setHeader('Content-Type', inline ? type : 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${safeFileName(att.name, `anexo-${index + 1}`)}"`);
     res.setHeader('Cache-Control', 'no-store');
+    if (inline) {
+      // Visualização dentro do app (ex.: PDF num iframe same-origin): libera só o enquadramento próprio.
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+      res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+    }
     res.end(att.data);
   });
 

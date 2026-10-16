@@ -604,8 +604,11 @@ já cadastradas em *Caixas de e-mail*:
   externo**, mais a lista de mensagens com destinatário externo e quantas vieram de remetente externo.
   Lê só os cabeçalhos; o **Cco** só aparece quando o provedor o informa (em geral, na cópia de Enviados
   do próprio remetente). No detalhe de cada mensagem, **"Abrir mensagem"** baixa a mensagem completa na
-  hora (pela conexão) e mostra os cabeçalhos, o corpo e os anexos — com **download de cada anexo** e da
-  **mensagem original (.eml)** para abrir no programa de e-mail.
+  hora (pela conexão) e a mostra **dentro do próprio app, sem abrir nenhum link externo**: os
+  cabeçalhos, o **corpo com formatação** (HTML renderizado num quadro isolado — sandbox + CSP, sem
+  scripts, sem carregar imagens de rastreio e sem links que saiam da aplicação) e os **anexos vistos no
+  app** (imagens e PDF exibidos na própria tela). O download de cada anexo e da **mensagem original
+  (.eml)** continua disponível, mas não é necessário para ler.
 
 Cada listagem gera um relatório na tela com filtros e gráficos (por situação/tipo/conexão, no caso das
 contas; por caixa, pasta e remetente, no caso das mensagens; por domínio e destinatário externo, no

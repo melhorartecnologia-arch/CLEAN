@@ -434,10 +434,13 @@ function walk(ctx, start, end, depth, defaultType) {
   const isBodyText = (type === 'text/plain' || type === 'text/html') && !filename && disposition.value !== 'attachment';
   if (isBodyText) {
     const bytes = decodeTransfer(raw, entity.bodyStart, entity.bodyEnd, encoding);
-    let text = decodeTextPart(bytes, ct.params.charset);
+    const source = decodeTextPart(bytes, ct.params.charset);
     const html = type === 'text/html';
-    if (html) text = htmlToText(text);
+    const text = html ? htmlToText(source) : source;
     ctx.texts.push({ html, text, incomplete });
+    // Corpo original (para exibir no app): guarda o HTML/texto de cada parte, mesmo as alternativas
+    // que o ctx.texts descarta (multipart/alternative fica com a de mais texto; aqui ficam todas).
+    if (ctx.keepBodies) ctx.bodies.push({ html, source, incomplete });
     return;
   }
 
@@ -488,11 +491,11 @@ function walk(ctx, start, end, depth, defaultType) {
  * decodeAttachments: false dispensa a decodificação dos anexos (só nomes e tamanhos aproximados).
  * omittedToken: código das partes marcadas pelo conector como não baixadas (X-Clean-Omitted).
  */
-export function parseMime(buf, { truncated = false, decodeAttachments = true, omittedToken = null } = {}) {
+export function parseMime(buf, { truncated = false, decodeAttachments = true, omittedToken = null, keepBodies = false } = {}) {
   let raw = Buffer.isBuffer(buf) ? buf.toString('latin1') : String(buf);
   // Arquivos no formato mbox começam com a linha "From remetente data".
   if (raw.startsWith('From ')) raw = raw.slice(raw.indexOf('\n') + 1);
-  const ctx = { raw, truncated, decodeAttachments, omittedToken, parts: 0, texts: [], attachments: [], encrypted: false, opaqueSigned: false };
+  const ctx = { raw, truncated, decodeAttachments, omittedToken, keepBodies, parts: 0, texts: [], bodies: [], attachments: [], encrypted: false, opaqueSigned: false };
   const top = readEntity(raw, 0, raw.length);
   walk(ctx, 0, raw.length, 0, 'text/plain');
   const h = top.headers;
@@ -508,6 +511,7 @@ export function parseMime(buf, { truncated = false, decodeAttachments = true, om
     date: isoDate(String(h.date?.[0] || '').replace(/\s*\([^)]*\)\s*$/, '')),
     messageId: String(h['message-id']?.[0] || '').trim() || null,
     texts: ctx.texts,
+    bodies: ctx.bodies,
     attachments: ctx.attachments,
     encrypted: ctx.encrypted,
     opaqueSigned: ctx.opaqueSigned,
