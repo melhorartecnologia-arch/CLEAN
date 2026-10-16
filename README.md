@@ -69,8 +69,10 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
 - **Reinício de iPhones (Intune)**: reinicia de forma **agendada e recorrente** os aparelhos
   **iPhone/iPad** gerenciados no **Microsoft Intune**, pela API Microsoft Graph (`rebootNow`) — todos
   os dispositivos Apple ou uma lista específica —, com **registro de sucesso ou falha por aparelho** a
-  cada execução e **aviso dos aparelhos provavelmente offline** (que não sincronizam com o Intune e só
-  reiniciam quando reconectarem). Reaproveita o aplicativo Microsoft 365 do e-mail como credencial.
+  cada execução. Antes de cada reinício faz uma **verificação em tempo real** do estado do aparelho
+  (online/offline) e a registra no log; se não conseguir verificar, envia o reinício assim mesmo e
+  guarda o último horário em que o aparelho esteve online. Reaproveita o aplicativo Microsoft 365 do
+  e-mail como credencial.
 - Sem banco de dados e sem etapa de compilação: basta instalar o Node.js e executar.
 
 ## Sumário
@@ -1048,22 +1050,31 @@ Na lista, cada agendamento permite **Simular** (lista os aparelhos do escopo sem
 **Reiniciar agora** (com confirmação), **pausar/retomar**, ver o **histórico** (com o resultado de
 cada aparelho em cada execução) e **excluir**.
 
-### Aparelhos offline
+### Verificação em tempo real e aparelhos offline
 
 O reinício do Intune (`rebootNow`) é **enfileirado**: o Microsoft Graph aceita o comando (e o CLEAN
 registra *reinício enviado*), mas ele só chega ao aparelho na **próxima comunicação dele com o
 Intune**. Um aparelho **offline** (desligado, sem rede ou fora do alcance) só reinicia quando voltar
-a se conectar — e o Intune não expõe um status "online" em tempo real.
+a se conectar — e o Intune não expõe um status "online" instantâneo para iOS.
 
-Para você saber disso no painel, o CLEAN usa a **última sincronização** de cada aparelho com o Intune
-como indício de conectividade: um aparelho que não sincroniza há mais de **24 horas** é marcado como
-**provavelmente offline**. Esse aviso aparece:
+Por isso, **antes de enviar o reinício a cada aparelho**, o CLEAN faz uma **verificação em tempo
+real**: relê o dispositivo no Intune naquele instante e usa a **última sincronização** como indício de
+conectividade (um aparelho que não sincroniza há mais de **24 horas** é tratado como *provavelmente
+offline*). O resultado vai para o **log de execução**, por aparelho:
 
-- na **listagem de aparelhos** do formulário (coluna *Última sincronização*);
-- no **resultado de cada execução** (no histórico e logo após *Reiniciar agora*/*Simular*): a tabela
-  por aparelho mostra a última sincronização e destaca os prováveis offline, e o resumo conta quantos
-  estão nessa situação (ex.: *"2 com reinício enviado de 3 aparelho(s). 1 aparelho não sincroniza com
-  o Intune há mais de 24 horas e pode estar offline — o reinício só ocorre quando ele reconectar."*).
+- *"… verificação em tempo real — última sincronização com o Intune em &lt;data&gt; (provavelmente
+  online). Enviando o reinício."*
+- *"… sem sincronizar desde &lt;data&gt; (provavelmente offline). O reinício será entregue quando o
+  aparelho reconectar. Enviando mesmo assim."*
+- *"… não foi possível verificar o estado em tempo real (&lt;motivo&gt;). Último horário online
+  conhecido: &lt;data&gt;. Enviando o reinício mesmo assim."*
+
+Em todos os casos o **reinício é enviado** (quando não dá para verificar, o CLEAN manda assim mesmo e
+guarda o último horário em que o aparelho esteve online). No **resultado de cada execução** (no
+histórico e logo após *Reiniciar agora*/*Simular*), a tabela por aparelho mostra a coluna
+*Verificação (online)* — **Online**, **Offline** (com a última vez online) ou **Não verificado** — e o
+**log de execução** fica disponível para consulta; o resumo conta quantos estão provavelmente offline.
+A **listagem de aparelhos** do formulário também marca os prováveis offline.
 
 Assim, *reinício enviado* significa que o comando foi aceito pelo Intune; para os aparelhos offline, o
 reinício fica pendente até eles reconectarem.

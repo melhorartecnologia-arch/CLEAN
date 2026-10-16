@@ -2062,3 +2062,27 @@ table.data.compact td {
   gap: 8px;
   margin-bottom: 4px;
 }
+.run-log {
+  margin-top: 6px;
+}
+.run-log > summary {
+  cursor: pointer;
+  color: var(--accent-ink);
+  font-size: 13px;
+}
+.log-lines {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.log-lines li {
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}
+.log-lines li.log-warn {
+  color: var(--warn-ink);
+}
+.log-lines li.log-error {
+  color: var(--critical-ink);
+}

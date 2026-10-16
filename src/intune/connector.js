@@ -80,6 +80,17 @@ export class IntuneConnector extends GraphClient {
     }
   }
 
+  /**
+   * Estado atual de um dispositivo (releitura em tempo real): a última sincronização de agora, para
+   * a verificação feita logo antes do reinício. Lança em caso de falha de acesso.
+   */
+  async deviceState(deviceId, { signal } = {}) {
+    // Verificação rápida: no máximo uma nova tentativa e tempo curto — se não der para ler agora, o
+    // chamador segue com o reinício assim mesmo (sem travar a execução).
+    const d = await this.api(`/deviceManagement/managedDevices/${enc(deviceId)}?$select=id,deviceName,operatingSystem,osVersion,lastSyncDateTime`, { signal, retries: 1, timeoutMs: 20000 });
+    return intuneDevice(d);
+  }
+
   /** Envia a ação de reinício imediato a um dispositivo (rebootNow). Lança em caso de falha. */
   async reboot(deviceId, { signal } = {}) {
     await this.api(`/deviceManagement/managedDevices/${enc(deviceId)}/rebootNow`, { method: 'POST', retries: 2, signal });

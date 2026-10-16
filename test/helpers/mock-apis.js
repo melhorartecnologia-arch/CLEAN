@@ -276,7 +276,8 @@ function teamsApi({ req, res, path, graph, json }) {
  * userPrincipalName?, userDisplayName?, ... }] (os campos são repassados como vêm).
  * graph.intuneForbidden: lista recusada com 403 (permissão faltando).
  * graph.rebootErrorAll: HTTP de erro para todos os reinícios. graph.rebootErrors: Set de ids que
- * falham no reinício. graph.intunePageSize: tamanho da página (padrão: tudo numa página só).
+ * falham no reinício. graph.checkErrors: Set de ids cuja releitura (verificação em tempo real) falha
+ * com 503. graph.intunePageSize: tamanho da página (padrão: tudo numa página só).
  * graph.rebooted: ids reiniciados com sucesso (registrado pelo simulador).
  */
 function intuneApi({ req, res, path, url, base, graph, json }) {
@@ -294,6 +295,13 @@ function intuneApi({ req, res, path, url, base, graph, json }) {
     nextParams.set('$skiptoken', String(skip + size));
     const next = skip + size < all.length ? { '@odata.nextLink': `${base}/graph/v1.0/deviceManagement/managedDevices?${nextParams.toString()}` } : {};
     return json(res, 200, { value: slice, ...next }), true;
+  }
+  // Releitura de um dispositivo (verificação em tempo real antes do reinício).
+  let g = /^\/deviceManagement\/managedDevices\/([^/]+)$/.exec(path);
+  if (g && req.method === 'GET') {
+    if (graph.checkErrors?.has(g[1])) return json(res, 503, { error: { code: 'ServiceUnavailable', message: 'Serviço indisponível' } }), true;
+    const device = devices.find((d) => d.id === g[1]);
+    return (device ? json(res, 200, device) : json(res, 404, { error: { code: 'ResourceNotFound', message: 'The requested device was not found.' } })), true;
   }
   const m = /^\/deviceManagement\/managedDevices\/([^/]+)\/rebootNow$/.exec(path);
   if (m && req.method === 'POST') {

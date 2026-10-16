@@ -81,7 +81,7 @@ export async function render(root, { ctx }) {
           <a class="btn primary" href="#/intune/novo">${icon('plus')} Novo agendamento</a>
         </div>
       </div>
-      <div class="alert info">${icon('info')}<div>${zoneNote(ctx.info)} O reinício só acontece com o CLEAN em execução nesses horários. A conexão do Microsoft 365 usada precisa das permissões <span class="mono">DeviceManagementManagedDevices.Read.All</span> e <span class="mono">DeviceManagementManagedDevices.PrivilegedOperations.All</span>. O comando de reinício é <b>enfileirado pelo Intune</b> e entregue na próxima comunicação do aparelho: um aparelho <b>offline</b> (sem sincronizar com o Intune) só reinicia quando voltar a se conectar — o resultado de cada execução destaca esses casos.</div></div>
+      <div class="alert info">${icon('info')}<div>${zoneNote(ctx.info)} O reinício só acontece com o CLEAN em execução nesses horários. A conexão do Microsoft 365 usada precisa das permissões <span class="mono">DeviceManagementManagedDevices.Read.All</span> e <span class="mono">DeviceManagementManagedDevices.PrivilegedOperations.All</span>. Antes de cada reinício, o CLEAN faz uma <b>verificação em tempo real</b> do estado do aparelho no Intune e a registra no log de execução; o comando é <b>enfileirado pelo Intune</b> e entregue na próxima comunicação do aparelho, então um aparelho <b>offline</b> só reinicia quando voltar a se conectar (nesse caso o reinício é enviado assim mesmo).</div></div>
       <section class="card" data-list></section>`,
   );
   const list = root.querySelector('[data-list]');
@@ -129,23 +129,36 @@ export async function render(root, { ctx }) {
     }
   };
 
-  /** Última sincronização do aparelho com o Intune, com aviso de provável offline. */
-  const syncCell = (d) =>
-    html`${d.lastSync ? fmtServerDateTime(d.lastSync, { weekday: false }) : html`<span class="muted">nunca</span>`}${d.stale ? html`<div class="small warn-text">${icon('alert')} provavelmente offline</div>` : ''}`;
+  /** Verificação em tempo real do aparelho antes do reinício, com a última sincronização. */
+  const checkCell = (d) => {
+    const sync = d.lastSync ? fmtServerDateTime(d.lastSync, { weekday: false }) : 'nunca';
+    if (d.checked && d.online) return html`<span class="ok-text">${icon('check')} Online</span><div class="muted small">sinc. ${sync}</div>`;
+    if (d.checked && d.online === false) return html`<span class="warn-text">${icon('alert')} Offline</span><div class="muted small">última vez online: ${sync}</div>`;
+    // Não verificado (releitura indisponível): mostra o último horário online conhecido.
+    return html`<span class="muted">Não verificado</span><div class="${d.stale ? 'warn-text small' : 'muted small'}">${d.stale ? html`${icon('alert')} ` : ''}últ. sinc. ${sync}</div>`;
+  };
+
+  /** Log de execução (recolhível). */
+  const logList = (run) =>
+    (run.log || []).length
+      ? html`<details class="run-log"><summary>Log de execução (${fmtNum(run.log.length)})</summary>
+          <ul class="log-lines">${run.log.map((l) => html`<li class="log-${l.level || 'info'}">${l.message}</li>`)}</ul>
+        </details>`
+      : '';
 
   /** Tabela do resultado por aparelho de uma execução. */
   const devicesTable = (run) =>
     (run.devices || []).length
       ? html`<div class="table-wrap">
           <table class="data compact">
-            <thead><tr><th>Aparelho</th><th>Usuário</th><th>Sistema</th><th>Última sincronização</th><th>Resultado</th></tr></thead>
+            <thead><tr><th>Aparelho</th><th>Usuário</th><th>Sistema</th><th>Verificação (online)</th><th>Resultado</th></tr></thead>
             <tbody>
               ${run.devices.map(
                 (d) => html`<tr>
                   <td><b>${d.name}</b>${d.serialNumber ? html`<div class="mono small muted">${d.serialNumber}</div>` : ''}</td>
                   <td>${d.userName || d.user || html`<span class="muted">—</span>`}</td>
                   <td class="nowrap">${d.os || ''}${d.osVersion ? ` ${d.osVersion}` : ''}</td>
-                  <td class="nowrap">${syncCell(d)}</td>
+                  <td class="nowrap">${checkCell(d)}</td>
                   <td>${DEVICE_BADGE[d.status] || d.status}${d.error ? html`<div class="small danger-text clamp">${d.error}</div>` : ''}</td>
                 </tr>`,
               )}
@@ -155,7 +168,7 @@ export async function render(root, { ctx }) {
         </div>`
       : html`<p class="muted small">Nenhum aparelho no resultado desta execução.</p>`;
 
-  /** Detalhes de uma execução (resumo + resultado por aparelho). */
+  /** Detalhes de uma execução (resumo + resultado por aparelho + log). */
   const showRun = (job, run) =>
     openDialog({
       title: `Execução – ${job.name}`,
@@ -168,8 +181,9 @@ export async function render(root, { ctx }) {
           <span class="muted small">${fmtServerDateTime(run.at)} · ${(TRIGGER[run.trigger] || run.trigger)}${run.by ? ` · ${run.by}` : ''}${run.simulate ? ' · simulação' : ''}</span>
         </div>
         <p>${run.message || ''}</p>
-        ${run.total ? html`<p class="muted small">${fmtNum(run.ok || 0)} reiniciado(s), ${fmtNum(run.failed || 0)} com falha, ${fmtNum(run.skipped || 0)} ignorado(s) de ${fmtNum(run.total)}.</p>` : ''}
-        ${devicesTable(run)}`,
+        ${run.total ? html`<p class="muted small">${fmtNum(run.ok || 0)} com reinício enviado, ${fmtNum(run.failed || 0)} com falha, ${fmtNum(run.skipped || 0)} ignorado(s) de ${fmtNum(run.total)}.</p>` : ''}
+        ${devicesTable(run)}
+        ${logList(run)}`,
     });
 
   const showHistory = async (job) => {
@@ -193,6 +207,7 @@ export async function render(root, { ctx }) {
                   </div>
                   <div class="small">${h.message || ''}</div>
                   ${(h.devices || []).length ? html`<details class="run-devices"><summary>Ver ${fmtNum(h.devices.length)} aparelho(s)</summary>${devicesTable(h)}</details>` : ''}
+                  ${logList(h)}
                 </div>`,
               )}
             </div>`

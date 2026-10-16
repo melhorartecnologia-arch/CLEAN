@@ -112,6 +112,10 @@ test('motor: reinicia todos os aparelhos e apura sucesso por aparelho', async ()
     assert.equal(result.stale, 1);
     assert.equal(result.devices.find((d) => d.id === 'd-iphone2').stale, true);
     assert.ok(result.devices.filter((d) => d.id !== 'd-iphone2').every((d) => d.stale === false));
+    // Verificação em tempo real feita para cada aparelho (checked), com o veredito online.
+    assert.ok(result.devices.every((d) => d.checked === true));
+    assert.equal(result.devices.find((d) => d.id === 'd-iphone1').online, true);
+    assert.equal(result.devices.find((d) => d.id === 'd-iphone2').online, false);
   } finally {
     await mock.close();
   }
@@ -145,6 +149,45 @@ test('motor: simulação só lista (nada é reiniciado)', async () => {
     assert.equal(result.skipped, 3);
     assert.equal(result.ok, 0);
     assert.deepEqual(data.rebooted, undefined, 'nenhum rebootNow enviado');
+  } finally {
+    await mock.close();
+  }
+});
+
+test('verificação em tempo real: online/offline registrados no log; reinício enviado mesmo offline', async () => {
+  const data = graphData();
+  const mock = await startMockApis({ graph: data });
+  const { store, source } = await freshStore();
+  try {
+    const logs = [];
+    const result = await runReboot(connectorFor(store, source, mock.endpoints), { mode: 'all', names: [] }, { log: (level, message) => logs.push(message) });
+    // Todos recebem o comando, inclusive o provável offline (o reinício fica pendente).
+    assert.equal(result.ok, 3);
+    assert.deepEqual((data.rebooted || []).sort(), ['d-ipad1', 'd-iphone1', 'd-iphone2']);
+    // A releitura é feita antes do rebootNow de cada aparelho.
+    assert.ok(mock.calls.includes('GET /graph/v1.0/deviceManagement/managedDevices/d-iphone2'));
+    assert.ok(logs.some((m) => /iPhone de João.*provavelmente online/.test(m)));
+    assert.ok(logs.some((m) => /iPhone de Maria.*provavelmente offline/.test(m)));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('verificação em tempo real: sem conseguir verificar, envia o reinício mesmo assim', async () => {
+  const data = graphData({ checkErrors: new Set(['d-iphone1']) });
+  const mock = await startMockApis({ graph: data });
+  const { store, source } = await freshStore();
+  try {
+    const logs = [];
+    const result = await runReboot(connectorFor(store, source, mock.endpoints), { mode: 'list', names: ['iPhone de João'] }, { log: (level, message) => logs.push(message) });
+    assert.equal(result.total, 1);
+    assert.equal(result.ok, 1, 'reinício enviado mesmo sem conseguir verificar o estado');
+    assert.deepEqual(data.rebooted, ['d-iphone1']);
+    const joao = result.devices[0];
+    assert.equal(joao.checked, false);
+    assert.equal(joao.online, null);
+    assert.ok(joao.lastSync, 'mantém o último horário online conhecido');
+    assert.ok(logs.some((m) => /não foi possível verificar/.test(m)));
   } finally {
     await mock.close();
   }

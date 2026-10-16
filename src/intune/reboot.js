@@ -59,7 +59,7 @@ export async function listDevices(connector, scope) {
   return out;
 }
 
-const summary = (device, status, { error = null, stale = false } = {}) => ({
+const summary = (device, status, { error = null, stale = false, lastSync = device.lastSync, checked = false, online = null } = {}) => ({
   id: device.id,
   name: device.name,
   user: device.user,
@@ -67,8 +67,13 @@ const summary = (device, status, { error = null, stale = false } = {}) => ({
   model: device.model,
   os: device.os,
   osVersion: device.osVersion,
+  // Último horário online conhecido (o mais recente obtido na verificação em tempo real).
+  lastSync,
+  // Verificação em tempo real antes de reiniciar: checked (foi possível consultar o Intune agora),
+  // online (true/false; null quando não verificado).
+  checked,
+  online,
   serialNumber: device.serialNumber,
-  lastSync: device.lastSync,
   // Provável offline: o reinício foi aceito pelo Intune, mas só chega ao aparelho quando ele voltar
   // a sincronizar.
   stale,
@@ -76,13 +81,41 @@ const summary = (device, status, { error = null, stale = false } = {}) => ({
   error,
 });
 
+/** Data/hora legível de uma sincronização (ou "nunca"). */
+const syncText = (iso) => {
+  if (!iso) return 'nunca';
+  const d = new Date(iso);
+  return Number.isNaN(+d) ? String(iso) : d.toLocaleString('pt-BR');
+};
+
+/**
+ * Verificação em tempo real do estado do aparelho, logo antes de reiniciar: relê o dispositivo no
+ * Intune (a última sincronização atual) e decide se ele está provavelmente online. Se não for
+ * possível consultar agora, o reinício é enviado assim mesmo, guardando o último horário online
+ * conhecido. O Intune não expõe um status "online" instantâneo para iOS: a sincronização mais
+ * recente é o melhor indício disponível.
+ */
+async function verifyOnline(connector, device, nowMs, staleMs, signal) {
+  if (typeof connector.deviceState !== 'function') {
+    return { verified: false, online: null, lastSync: device.lastSync, error: 'releitura não suportada por esta conexão' };
+  }
+  try {
+    const fresh = await connector.deviceState(device.id, { signal });
+    const lastSync = fresh.lastSync || device.lastSync;
+    return { verified: true, online: !deviceStale(lastSync, nowMs, staleMs), lastSync };
+  } catch (err) {
+    return { verified: false, online: null, lastSync: device.lastSync, error: friendlyError(err) };
+  }
+}
+
 /**
  * Reinicia os aparelhos do escopo. Entrega { startedAt, finishedAt, total, ok, failed, skipped,
- * stale, devices: [...] }. "stale" conta os aparelhos provavelmente offline (sem sincronizar com o
- * Intune há mais de STALE_SYNC_HOURS): o reinício fica pendente até eles reconectarem. simulate: só
- * lista os aparelhos (não envia o reinício). signal: cancela.
+ * stale, devices: [...] }. Antes de cada reinício, faz uma verificação em tempo real (verify) do
+ * estado do aparelho no Intune e registra o resultado no log; se o aparelho estiver (ou parecer)
+ * offline, o reinício é enviado assim mesmo (fica pendente até ele reconectar). "stale" conta os
+ * aparelhos provavelmente offline. simulate: só verifica e lista (não reinicia). signal: cancela.
  */
-export async function runReboot(connector, scope, { concurrency = DEFAULT_CONCURRENCY, log = () => {}, signal = null, simulate = false, staleMs = STALE_SYNC_MS } = {}) {
+export async function runReboot(connector, scope, { concurrency = DEFAULT_CONCURRENCY, log = () => {}, signal = null, simulate = false, staleMs = STALE_SYNC_MS, verify = true } = {}) {
   const startedAt = new Date().toISOString();
   const nowMs = Date.parse(startedAt);
   const devices = await listDevices(connector, scope);
@@ -93,29 +126,50 @@ export async function runReboot(connector, scope, { concurrency = DEFAULT_CONCUR
   let skipped = 0;
   let stale = 0;
   const limit = Math.min(Math.max(1, Number(concurrency) || DEFAULT_CONCURRENCY), 8);
+
+  /** Faz (e registra) a verificação em tempo real e devolve { lastSync, checked, online, offline }. */
+  const check = async (device) => {
+    if (!verify) {
+      const offline = deviceStale(device.lastSync, nowMs, staleMs);
+      return { lastSync: device.lastSync, checked: false, online: null, offline };
+    }
+    const r = await verifyOnline(connector, device, nowMs, staleMs, signal);
+    const offline = r.online === null ? deviceStale(r.lastSync, nowMs, staleMs) : !r.online;
+    const tail = simulate ? '' : ' Enviando o reinício.';
+    if (!r.verified) {
+      log('warn', `"${device.name}": não foi possível verificar o estado em tempo real (${r.error}). Último horário online conhecido: ${syncText(r.lastSync)}.${simulate ? '' : ' Enviando o reinício mesmo assim.'}`);
+    } else if (r.online) {
+      log('info', `"${device.name}": verificação em tempo real — última sincronização com o Intune em ${syncText(r.lastSync)} (provavelmente online).${tail}`);
+    } else {
+      log('warn', `"${device.name}": verificação em tempo real — sem sincronizar desde ${syncText(r.lastSync)} (provavelmente offline). O reinício será entregue quando o aparelho reconectar.${simulate ? '' : ' Enviando mesmo assim.'}`);
+    }
+    return { lastSync: r.lastSync, checked: r.verified, online: r.online, offline };
+  };
+
   const worker = async (device) => {
-    const offline = deviceStale(device.lastSync, nowMs, staleMs);
-    if (offline) stale++;
-    const mk = (status, error = null) => summary(device, status, { error, stale: offline });
     if (signal?.aborted) {
       skipped++;
-      results.push(mk('skipped', 'Execução cancelada.'));
+      const offline = deviceStale(device.lastSync, nowMs, staleMs);
+      if (offline) stale++;
+      results.push(summary(device, 'skipped', { error: 'Execução cancelada.', stale: offline }));
       return undefined;
     }
+    const c = await check(device);
+    if (c.offline) stale++;
+    const fields = { stale: c.offline, lastSync: c.lastSync, checked: c.checked, online: c.online };
     if (simulate) {
       skipped++;
-      results.push(mk('skipped'));
+      results.push(summary(device, 'skipped', fields));
       return undefined;
     }
     try {
       await connector.reboot(device.id, { signal });
       ok++;
-      results.push(mk('ok'));
-      if (offline) log('warn', `"${device.name}": reinício enviado, mas o aparelho não sincroniza com o Intune desde ${device.lastSync || 'nunca'} — provavelmente offline; o reinício só ocorre quando ele reconectar.`);
+      results.push(summary(device, 'ok', fields));
     } catch (err) {
       failed++;
       const message = friendlyError(err);
-      results.push(mk('failed', message));
+      results.push(summary(device, 'failed', { ...fields, error: message }));
       log('warn', `Falha ao reiniciar "${device.name}": ${message}`);
     }
     return undefined;
