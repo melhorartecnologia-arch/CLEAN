@@ -272,7 +272,7 @@ export const scheduling = (form) => form.elements.when?.value === 'schedule';
  * Liga a seção ao formulário: mostra só os campos da repetição escolhida, atualiza a prévia e
  * avisa a tela quando o modo (agora/agendar) muda. Devolve a função de limpeza.
  */
-export function bindSchedule(form, { onModeChange = () => {}, scheduleId = null } = {}) {
+export function bindSchedule(form, { onModeChange = () => {}, scheduleId = null, previewUrl = '/api/schedules/preview', previewKey = 'scheduleId' } = {}) {
   const fields = form.querySelector('[data-schedule-fields]');
   const preview = form.querySelector('[data-preview]');
   let touchedDays = false;
@@ -329,7 +329,7 @@ export function bindSchedule(form, { onModeChange = () => {}, scheduleId = null 
     if (!scheduling(form)) return;
     const token = ++request;
     try {
-      const result = await post('/api/schedules/preview', { rule: readSchedule(form).rule, scheduleId });
+      const result = await post(previewUrl, { rule: readSchedule(form).rule, [previewKey]: scheduleId });
       if (token !== request) return;
       const next = result.next || [];
       paint(

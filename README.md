@@ -66,6 +66,10 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   (ex.: arquivos sem uso há mais de 5 anos, e-mails recebidos há mais de 10 anos), pela data da
   última modificação, do último acesso, da criação ou do recebimento — com simulação, limite de
   exclusões por execução e execução manual ou agendada.
+- **Reinício de iPhones (Intune)**: reinicia de forma **agendada e recorrente** os aparelhos
+  **iPhone/iPad** gerenciados no **Microsoft Intune**, pela API Microsoft Graph (`rebootNow`) — todos
+  os dispositivos Apple ou uma lista específica —, com **registro de sucesso ou falha por aparelho** a
+  cada execução. Reaproveita o aplicativo Microsoft 365 do e-mail como credencial.
 - Sem banco de dados e sem etapa de compilação: basta instalar o Node.js e executar.
 
 ## Sumário
@@ -89,12 +93,13 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
    - [Exclusão em lote pelo relatório](#exclusão-em-lote-pelo-relatório)
 10. [Agendamentos](#agendamentos)
 11. [Políticas de retenção](#políticas-de-retenção)
-12. [Busca por tipo de arquivo](#busca-por-tipo-de-arquivo)
-13. [Executando como serviço](#executando-como-serviço)
-14. [Configuração](#configuração)
-15. [Segurança](#segurança)
-16. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
-17. [Desenvolvimento](#desenvolvimento)
+12. [Reinício de iPhones (Intune)](#reinício-de-iphones-intune)
+13. [Busca por tipo de arquivo](#busca-por-tipo-de-arquivo)
+14. [Executando como serviço](#executando-como-serviço)
+15. [Configuração](#configuração)
+16. [Segurança](#segurança)
+17. [Formatos suportados e limitações](#formatos-suportados-e-limitações)
+18. [Desenvolvimento](#desenvolvimento)
 
 ## Requisitos
 
@@ -1017,6 +1022,45 @@ As execuções também aparecem em *Análises de arquivos* e *Análises de e-mai
 Antes de ligar a exclusão, confirme com as áreas responsáveis os **prazos legais de guarda** dos
 documentos (fiscais, trabalhistas, contábeis). Retenções e bloqueios de litígio do Microsoft Purview
 e do Google Vault continuam valendo sobre o que o CLEAN excluir.
+
+## Reinício de iPhones (Intune)
+
+Em **Intune › Reinício de iPhones**, agende o **reinício** dos aparelhos **iPhone/iPad** gerenciados
+no **Microsoft Intune**. Nos dias e horários escolhidos (as mesmas regras de recorrência dos
+[Agendamentos](#agendamentos): uma vez, a cada algumas horas, diária, semanal ou mensal), o CLEAN
+envia a cada aparelho a ação de reinício imediato pela API Microsoft Graph (`rebootNow`) e guarda, em
+cada execução, o **resultado por aparelho** (reiniciado, falha ou ignorado) no histórico.
+
+Cada agendamento tem:
+
+- **Conexão Microsoft 365**: uma conexão do tipo *Microsoft 365 (Graph)* já cadastrada em
+  [Caixas de e-mail](#microsoft-365-exchange-online) é usada como credencial do Intune (reaproveita o
+  mesmo registro de aplicativo). O botão **Testar acesso ao Intune** autentica e lê o primeiro aparelho;
+  **Listar aparelhos** mostra os iPhone/iPad gerenciados encontrados.
+- **Escopo**: **todos os iPhone e iPad** gerenciados, ou **uma lista** — um por linha, pelo **nome do
+  dispositivo**, pelo **e-mail do usuário** ou pelo **número de série**.
+- **Quando**: a regra de recorrência, com a prévia das próximas execuções (horários do servidor). Se o
+  CLEAN estiver parado no horário, a opção *executar assim que possível* reinicia uma vez ao voltar;
+  caso contrário, o horário perdido fica só registrado.
+
+Na lista, cada agendamento permite **Simular** (lista os aparelhos do escopo sem reiniciar nada),
+**Reiniciar agora** (com confirmação), **pausar/retomar**, ver o **histórico** (com o resultado de
+cada aparelho em cada execução) e **excluir**.
+
+### Permissões do aplicativo (Intune)
+
+Além das permissões que a conexão já tem para o e-mail, conceda ao registro de aplicativo, em
+*Permissões de API › Adicionar uma permissão › Microsoft Graph › Permissões de aplicativo*, e clique
+em **Conceder consentimento do administrador**:
+
+| Permissão | Para quê |
+| --- | --- |
+| **`DeviceManagementManagedDevices.Read.All`** | Listar os dispositivos gerenciados (iPhone/iPad). |
+| **`DeviceManagementManagedDevices.PrivilegedOperations.All`** | Enviar o reinício (`rebootNow`) a cada dispositivo. |
+
+O reinício usa permissões do **tipo Aplicativo** (sem usuário conectado). Se o aplicativo não tiver
+essas permissões, o CLEAN avisa com a providência a tomar. O reinício é imediato quando o aparelho
+está acessível; o Intune entrega a ação na próxima comunicação do dispositivo.
 
 ## Busca por tipo de arquivo
 

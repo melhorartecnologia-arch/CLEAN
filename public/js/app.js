@@ -20,6 +20,8 @@ import * as schedules from './views/schedules.js';
 import * as scheduleEdit from './views/schedule-edit.js';
 import * as retention from './views/retention.js';
 import * as retentionEdit from './views/retention-edit.js';
+import * as intune from './views/intune.js';
+import * as intuneEdit from './views/intune-edit.js';
 
 // [caminho, tela, item do menu, propriedades extras da tela]
 const ROUTES = [
@@ -48,6 +50,9 @@ const ROUTES = [
   [/^\/retencao$/, retention, 'retencao'],
   [/^\/retencao\/nova$/, retentionEdit, 'retencao'],
   [/^\/retencao\/([\w-]+)$/, retentionEdit, 'retencao'],
+  [/^\/intune$/, intune, 'intune'],
+  [/^\/intune\/novo$/, intuneEdit, 'intune'],
+  [/^\/intune\/([\w-]+)$/, intuneEdit, 'intune'],
 ];
 
 /** Informações do servidor (versão, fuso, opções padrão), lidas uma vez. */

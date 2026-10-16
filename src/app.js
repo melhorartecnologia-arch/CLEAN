@@ -11,7 +11,9 @@ import { scansRouter } from './routes/scans.js';
 import { mailSourcesRouter } from './routes/mail-sources.js';
 import { teamsLiveRouter } from './routes/teams-live.js';
 import { schedulesRouter } from './routes/schedules.js';
+import { intuneRouter } from './routes/intune.js';
 import { Scheduler } from './schedule/scheduler.js';
+import { IntuneScheduler } from './intune/scheduler.js';
 import { HttpError } from './routes/validate.js';
 import { PRESETS, VALIDATORS } from './scan/presets.js';
 import { DEFAULT_OPTIONS } from './scan/scanner.js';
@@ -119,7 +121,7 @@ function csrfGuard(allowed) {
 }
 
 /** scheduler: agendador das análises (o servidor o inicia; nos testes, as verificações são manuais). */
-export function createApp({ store, manager, config, scheduler = new Scheduler({ store, manager }) }) {
+export function createApp({ store, manager, config, scheduler = new Scheduler({ store, manager }), intuneScheduler = new IntuneScheduler({ store, endpoints: config.mailEndpoints }) }) {
   const app = express();
   const allowed = allowedHostNames(config.allowedHosts || []);
   app.disable('x-powered-by');
@@ -172,6 +174,7 @@ export function createApp({ store, manager, config, scheduler = new Scheduler({ 
   // Encerramento do servidor: interrompe as exclusões em lote (server.js).
   app.locals.stopBulkDeletions = scans.stopBulk;
   api.use('/schedules', schedulesRouter({ store, manager, scheduler }));
+  api.use('/intune', intuneRouter({ store, scheduler: intuneScheduler, endpoints: config.mailEndpoints }));
   api.use((req, res, next) => next(new HttpError(404, 'Rota não encontrada.')));
   // eslint-disable-next-line no-unused-vars
   api.use((err, req, res, next) => {

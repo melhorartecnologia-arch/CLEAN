@@ -270,6 +270,46 @@ function teamsApi({ req, res, path, graph, json }) {
   return false;
 }
 
+/**
+ * Microsoft Intune (device management) do simulador. Ativa só quando graph.intuneDevices existe.
+ * graph.intuneDevices: [{ id, deviceName, operatingSystem, osVersion?, model?, serialNumber?,
+ * userPrincipalName?, userDisplayName?, ... }] (os campos são repassados como vêm).
+ * graph.intuneForbidden: lista recusada com 403 (permissão faltando).
+ * graph.rebootErrorAll: HTTP de erro para todos os reinícios. graph.rebootErrors: Set de ids que
+ * falham no reinício. graph.intunePageSize: tamanho da página (padrão: tudo numa página só).
+ * graph.rebooted: ids reiniciados com sucesso (registrado pelo simulador).
+ */
+function intuneApi({ req, res, path, url, base, graph, json }) {
+  if (!graph.intuneDevices || !path.startsWith('/deviceManagement/managedDevices')) return false;
+  const devices = graph.intuneDevices;
+  if (path === '/deviceManagement/managedDevices' && req.method === 'GET') {
+    if (graph.intuneForbidden) return json(res, 403, { error: { code: 'Authorization_RequestDenied', message: 'Required permission scopes are missing in the token.' } }), true;
+    const filter = url.searchParams.get('$filter') || '';
+    const wanted = [...filter.matchAll(/operatingSystem eq '([^']+)'/g)].map((x) => x[1]);
+    const all = wanted.length ? devices.filter((d) => wanted.includes(d.operatingSystem)) : devices;
+    const size = graph.intunePageSize || 1000;
+    const skip = Number(url.searchParams.get('$skiptoken') || 0);
+    const slice = all.slice(skip, skip + size);
+    const nextParams = new URLSearchParams(url.searchParams);
+    nextParams.set('$skiptoken', String(skip + size));
+    const next = skip + size < all.length ? { '@odata.nextLink': `${base}/graph/v1.0/deviceManagement/managedDevices?${nextParams.toString()}` } : {};
+    return json(res, 200, { value: slice, ...next }), true;
+  }
+  const m = /^\/deviceManagement\/managedDevices\/([^/]+)\/rebootNow$/.exec(path);
+  if (m && req.method === 'POST') {
+    const device = devices.find((d) => d.id === m[1]);
+    if (!device) return json(res, 404, { error: { code: 'ResourceNotFound', message: 'The requested device was not found.' } }), true;
+    if (graph.rebootErrorAll || graph.rebootErrors?.has(m[1])) {
+      return json(res, graph.rebootErrorAll || 500, { error: { code: 'InternalError', message: 'Falha simulada no reinício.' } }), true;
+    }
+    graph.rebooted = [...(graph.rebooted || []), m[1]];
+    res.writeHead(204);
+    res.end();
+    return true;
+  }
+  return false;
+}
+
 /** Cabeçalho de uma mensagem MIME do simulador (primeira ocorrência). */
 function mimeHeader(raw, name) {
   const head = raw.toString('utf8').split(/\r?\n\r?\n/)[0];
@@ -478,6 +518,7 @@ export function startMockApis({ graph = null, google = null } = {}) {
         if (principal.app && path.startsWith('/me')) return json(res, 400, { error: { code: 'BadRequest', message: '/me request is only valid with delegated authentication flow.' } });
         if (drivesApi({ req, res, path, url, base, graph, find, json })) return;
         if (teamsApi({ req, res, path, graph, json })) return;
+        if (intuneApi({ req, res, path, url, base, graph, json })) return;
         if (path === '/users') {
           const filter = url.searchParams.get('$filter');
           if (filter) {

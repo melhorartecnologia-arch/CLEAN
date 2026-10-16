@@ -5,7 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { SecretBox } from './secrets.js';
 
-const EMPTY_DB = { version: 1, repositories: [], lists: [], mailSources: [], scans: [], schedules: [], pendingRemovals: [] };
+const EMPTY_DB = { version: 1, repositories: [], lists: [], mailSources: [], scans: [], schedules: [], intuneJobs: [], pendingRemovals: [] };
 const MAX_LOG = 200;
 
 function now() {
@@ -52,7 +52,7 @@ export class Store {
       if (err.code !== 'ENOENT') throw new Error(`Não foi possível ler ${this.dbFile}: ${err.message}`);
       this.db = structuredClone(EMPTY_DB);
     }
-    for (const key of ['repositories', 'lists', 'mailSources', 'scans', 'schedules', 'pendingRemovals']) if (!Array.isArray(this.db[key])) this.db[key] = [];
+    for (const key of ['repositories', 'lists', 'mailSources', 'scans', 'schedules', 'intuneJobs', 'pendingRemovals']) if (!Array.isArray(this.db[key])) this.db[key] = [];
     this.secrets = await SecretBox.open(this.dataDir);
     // Análises que estavam em andamento quando o servidor parou
     for (const scan of this.db.scans) {
@@ -237,6 +237,31 @@ export class Store {
   /** Agendamentos que usam um repositório ('files'), uma conexão de e-mail ('mail') ou uma lista ('list'). */
   schedulesUsing(kind, id) {
     return this.#list('schedules').filter((s) => (kind === 'list' ? s.listIds : s.kind === kind ? s.targetIds : [])?.includes(id));
+  }
+
+  // Reinício agendado de dispositivos no Intune (Microsoft Graph).
+  listIntuneJobs() {
+    return this.#list('intuneJobs');
+  }
+  getIntuneJob(id) {
+    return this.#get('intuneJobs', id);
+  }
+  createIntuneJob(data) {
+    return this.#create('intuneJobs', data);
+  }
+  updateIntuneJob(id, data) {
+    return this.#update('intuneJobs', id, data);
+  }
+  /** Estado mantido pelo agendador (próxima execução, histórico): não muda a data de alteração. */
+  updateIntuneJobState(id, patch) {
+    return this.#update('intuneJobs', id, patch, { touch: false });
+  }
+  deleteIntuneJob(id) {
+    return this.#delete('intuneJobs', id);
+  }
+  /** Agendamentos de reinício que usam uma conexão de e-mail (Graph). */
+  intuneJobsUsing(sourceId) {
+    return this.#list('intuneJobs').filter((j) => j.sourceId === sourceId);
   }
 
   listScans() {
