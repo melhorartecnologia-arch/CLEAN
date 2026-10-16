@@ -18,7 +18,7 @@ const RUN_BADGE = {
   missed: html`<span class="badge interrupted">Perdida</span>`,
 };
 const DEVICE_BADGE = {
-  ok: html`<span class="badge completed">Reiniciado</span>`,
+  ok: html`<span class="badge completed">Reinício enviado</span>`,
   failed: html`<span class="badge failed">Falha</span>`,
   skipped: html`<span class="badge cancelled">Ignorado</span>`,
 };
@@ -81,7 +81,7 @@ export async function render(root, { ctx }) {
           <a class="btn primary" href="#/intune/novo">${icon('plus')} Novo agendamento</a>
         </div>
       </div>
-      <div class="alert info">${icon('info')}<div>${zoneNote(ctx.info)} O reinício só acontece com o CLEAN em execução nesses horários. A conexão do Microsoft 365 usada precisa das permissões <span class="mono">DeviceManagementManagedDevices.Read.All</span> e <span class="mono">DeviceManagementManagedDevices.PrivilegedOperations.All</span>.</div></div>
+      <div class="alert info">${icon('info')}<div>${zoneNote(ctx.info)} O reinício só acontece com o CLEAN em execução nesses horários. A conexão do Microsoft 365 usada precisa das permissões <span class="mono">DeviceManagementManagedDevices.Read.All</span> e <span class="mono">DeviceManagementManagedDevices.PrivilegedOperations.All</span>. O comando de reinício é <b>enfileirado pelo Intune</b> e entregue na próxima comunicação do aparelho: um aparelho <b>offline</b> (sem sincronizar com o Intune) só reinicia quando voltar a se conectar — o resultado de cada execução destaca esses casos.</div></div>
       <section class="card" data-list></section>`,
   );
   const list = root.querySelector('[data-list]');
@@ -129,18 +129,23 @@ export async function render(root, { ctx }) {
     }
   };
 
+  /** Última sincronização do aparelho com o Intune, com aviso de provável offline. */
+  const syncCell = (d) =>
+    html`${d.lastSync ? fmtServerDateTime(d.lastSync, { weekday: false }) : html`<span class="muted">nunca</span>`}${d.stale ? html`<div class="small warn-text">${icon('alert')} provavelmente offline</div>` : ''}`;
+
   /** Tabela do resultado por aparelho de uma execução. */
   const devicesTable = (run) =>
     (run.devices || []).length
       ? html`<div class="table-wrap">
           <table class="data compact">
-            <thead><tr><th>Aparelho</th><th>Usuário</th><th>Sistema</th><th>Resultado</th></tr></thead>
+            <thead><tr><th>Aparelho</th><th>Usuário</th><th>Sistema</th><th>Última sincronização</th><th>Resultado</th></tr></thead>
             <tbody>
               ${run.devices.map(
                 (d) => html`<tr>
                   <td><b>${d.name}</b>${d.serialNumber ? html`<div class="mono small muted">${d.serialNumber}</div>` : ''}</td>
                   <td>${d.userName || d.user || html`<span class="muted">—</span>`}</td>
                   <td class="nowrap">${d.os || ''}${d.osVersion ? ` ${d.osVersion}` : ''}</td>
+                  <td class="nowrap">${syncCell(d)}</td>
                   <td>${DEVICE_BADGE[d.status] || d.status}${d.error ? html`<div class="small danger-text clamp">${d.error}</div>` : ''}</td>
                 </tr>`,
               )}

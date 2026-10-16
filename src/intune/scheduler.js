@@ -13,7 +13,7 @@
 import crypto from 'node:crypto';
 import { nextOccurrence, countBetween, validateRule } from '../schedule/recurrence.js';
 import { IntuneConnector } from './connector.js';
-import { runReboot } from './reboot.js';
+import { runReboot, STALE_SYNC_HOURS } from './reboot.js';
 
 const TICK_MS = 15000;
 // Atraso tolerado (servidor ocupado): acima disso, o horário conta como perdido.
@@ -283,12 +283,20 @@ function runStatus(result, simulate) {
   return 'ok';
 }
 
+/** Aviso sobre aparelhos provavelmente offline (quando houver). */
+function offlineNote(result) {
+  if (!result.stale) return '';
+  const one = result.stale === 1;
+  return ` ${result.stale} ${one ? 'aparelho não sincroniza' : 'aparelhos não sincronizam'} com o Intune há mais de ${STALE_SYNC_HOURS} horas e ${one ? 'pode estar' : 'podem estar'} offline — o reinício só ocorre quando ${one ? 'ele reconectar' : 'reconectarem'}.`;
+}
+
 /** Resumo em português do resultado da execução. */
 function summaryText(result, simulate) {
-  if (simulate) return `Simulação: ${result.total} aparelho(s) no escopo (nenhum foi reiniciado).`;
+  if (simulate) return `Simulação: ${result.total} aparelho(s) no escopo (nenhum foi reiniciado).${offlineNote(result)}`;
   if (result.total === 0) return 'Nenhum aparelho no escopo.';
-  const parts = [`${result.ok} reiniciado(s)`];
+  // "Reinício enviado": o rebootNow é aceito pelo Intune e entregue na próxima comunicação do aparelho.
+  const parts = [`${result.ok} com reinício enviado`];
   if (result.failed) parts.push(`${result.failed} com falha`);
   if (result.skipped) parts.push(`${result.skipped} ignorado(s)`);
-  return `${parts.join(', ')} de ${result.total} aparelho(s).`;
+  return `${parts.join(', ')} de ${result.total} aparelho(s).${offlineNote(result)}`;
 }

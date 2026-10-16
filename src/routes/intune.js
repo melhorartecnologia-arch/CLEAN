@@ -8,7 +8,7 @@ import { actor } from './scans.js';
 import { validateRule, RuleError, describeRule, upcoming, lastOccurrence, nextOccurrence } from '../schedule/recurrence.js';
 import { jobProblems, remainingOf } from '../intune/scheduler.js';
 import { IntuneConnector } from '../intune/connector.js';
-import { sanitizeScope, listDevices } from '../intune/reboot.js';
+import { sanitizeScope, listDevices, deviceStale, STALE_SYNC_HOURS } from '../intune/reboot.js';
 import { friendlyError } from '../scan/errors.js';
 
 const NEVER = 'Pela regra informada, o agendamento nunca seria executado (a data e a hora já passaram). Confira a data de início, o horário e o término.';
@@ -137,7 +137,8 @@ export function intuneRouter({ store, scheduler, endpoints = {} }) {
     const connector = connectorFor(source, AbortSignal.timeout(120000));
     try {
       const devices = await listDevices(connector, { mode: 'all', names: [] });
-      res.json({ devices, total: devices.length });
+      const now = Date.now();
+      res.json({ devices: devices.map((d) => ({ ...d, stale: deviceStale(d.lastSync, now) })), total: devices.length, staleHours: STALE_SYNC_HOURS });
     } catch (err) {
       throw new HttpError(502, `Não foi possível listar os aparelhos: ${friendlyError(err)}`);
     } finally {

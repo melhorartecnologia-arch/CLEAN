@@ -11,7 +11,7 @@ import { ScanManager } from '../src/scan/manager.js';
 import { createApp } from '../src/app.js';
 import { IntuneScheduler, jobProblems } from '../src/intune/scheduler.js';
 import { IntuneConnector } from '../src/intune/connector.js';
-import { runReboot, sanitizeScope, listDevices } from '../src/intune/reboot.js';
+import { runReboot, sanitizeScope, listDevices, deviceStale } from '../src/intune/reboot.js';
 import { validateRule } from '../src/schedule/recurrence.js';
 import { startMockApis } from './helpers/mock-apis.js';
 
@@ -19,18 +19,21 @@ const GRAPH_TENANT = 'contoso.onmicrosoft.com';
 const GRAPH_CLIENT = '11111111-2222-3333-4444-555555555555';
 const GRAPH_SECRET = 'segredo-super-secreto';
 
+const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+
 function graphData(extra = {}) {
   return {
     tenant: GRAPH_TENANT,
     clientId: GRAPH_CLIENT,
     secret: GRAPH_SECRET,
     users: [],
+    // d-iphone2 não sincroniza há 48h (provável offline); os demais sincronizaram há pouco.
     intuneDevices: [
-      { id: 'd-iphone1', deviceName: 'iPhone de João', operatingSystem: 'iOS', osVersion: '17.5', model: 'iPhone 14', serialNumber: 'SER-IPHONE-1', userPrincipalName: 'joao@contoso.com', userDisplayName: 'João' },
-      { id: 'd-ipad1', deviceName: 'iPad RH', operatingSystem: 'iPadOS', osVersion: '17.4', model: 'iPad Air', serialNumber: 'SER-IPAD-1', userPrincipalName: 'rh@contoso.com', userDisplayName: 'RH' },
-      { id: 'd-iphone2', deviceName: 'iPhone de Maria', operatingSystem: 'iOS', osVersion: '16.0', model: 'iPhone 12', serialNumber: 'SER-IPHONE-2', userPrincipalName: 'maria@contoso.com', userDisplayName: 'Maria' },
-      { id: 'd-android', deviceName: 'Galaxy', operatingSystem: 'Android', osVersion: '14', model: 'S22', serialNumber: 'SER-AND', userPrincipalName: 'x@contoso.com' },
-      { id: 'd-win', deviceName: 'Notebook', operatingSystem: 'Windows', osVersion: '11', serialNumber: 'SER-WIN' },
+      { id: 'd-iphone1', deviceName: 'iPhone de João', operatingSystem: 'iOS', osVersion: '17.5', model: 'iPhone 14', serialNumber: 'SER-IPHONE-1', userPrincipalName: 'joao@contoso.com', userDisplayName: 'João', lastSyncDateTime: hoursAgo(1) },
+      { id: 'd-ipad1', deviceName: 'iPad RH', operatingSystem: 'iPadOS', osVersion: '17.4', model: 'iPad Air', serialNumber: 'SER-IPAD-1', userPrincipalName: 'rh@contoso.com', userDisplayName: 'RH', lastSyncDateTime: hoursAgo(3) },
+      { id: 'd-iphone2', deviceName: 'iPhone de Maria', operatingSystem: 'iOS', osVersion: '16.0', model: 'iPhone 12', serialNumber: 'SER-IPHONE-2', userPrincipalName: 'maria@contoso.com', userDisplayName: 'Maria', lastSyncDateTime: hoursAgo(48) },
+      { id: 'd-android', deviceName: 'Galaxy', operatingSystem: 'Android', osVersion: '14', model: 'S22', serialNumber: 'SER-AND', userPrincipalName: 'x@contoso.com', lastSyncDateTime: hoursAgo(1) },
+      { id: 'd-win', deviceName: 'Notebook', operatingSystem: 'Windows', osVersion: '11', serialNumber: 'SER-WIN', lastSyncDateTime: hoursAgo(1) },
     ],
     ...extra,
   };
@@ -69,6 +72,13 @@ test('escopo: lista vazia é recusada; lista normaliza nomes/e-mails/série', ()
   assert.throws(() => sanitizeScope({ mode: 'list', names: [] }), /ao menos um aparelho/);
 });
 
+test('offline: sem sincronização ou sincronização antiga demais conta como provável offline', () => {
+  const now = Date.parse('2026-10-16T12:00:00Z');
+  assert.equal(deviceStale(null, now), true, 'nunca sincronizou');
+  assert.equal(deviceStale('2026-10-16T11:00:00Z', now), false, '1h atrás: acessível');
+  assert.equal(deviceStale('2026-10-14T00:00:00Z', now), true, '60h atrás: provável offline');
+});
+
 test('conector: lista só iPhone/iPad (ignora Android e Windows), paginando', async () => {
   const mock = await startMockApis({ graph: graphData({ intunePageSize: 2 }) });
   const { store, source } = await freshStore();
@@ -98,6 +108,10 @@ test('motor: reinicia todos os aparelhos e apura sucesso por aparelho', async ()
     assert.equal(result.failed, 0);
     assert.ok(result.devices.every((d) => d.status === 'ok'));
     assert.deepEqual((data.rebooted || []).sort(), ['d-ipad1', 'd-iphone1', 'd-iphone2']);
+    // Offline: o iPhone de Maria não sincroniza há 48h — o reinício foi enviado, mas fica pendente.
+    assert.equal(result.stale, 1);
+    assert.equal(result.devices.find((d) => d.id === 'd-iphone2').stale, true);
+    assert.ok(result.devices.filter((d) => d.id !== 'd-iphone2').every((d) => d.stale === false));
   } finally {
     await mock.close();
   }
@@ -274,6 +288,9 @@ test('API: conexões disponíveis, teste de acesso e listagem de aparelhos', asy
     const devices = await app.api('GET', `/api/intune/devices?sourceId=${source.id}`);
     assert.equal(devices.data.total, 3);
     assert.deepEqual(devices.data.devices.map((d) => d.id).sort(), ['d-ipad1', 'd-iphone1', 'd-iphone2']);
+    // A listagem já marca o provável offline (última sincronização antiga).
+    assert.equal(devices.data.devices.find((d) => d.id === 'd-iphone2').stale, true);
+    assert.equal(devices.data.devices.find((d) => d.id === 'd-iphone1').stale, false);
   } finally {
     await app.close();
   }

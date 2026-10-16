@@ -69,7 +69,8 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
 - **Reinício de iPhones (Intune)**: reinicia de forma **agendada e recorrente** os aparelhos
   **iPhone/iPad** gerenciados no **Microsoft Intune**, pela API Microsoft Graph (`rebootNow`) — todos
   os dispositivos Apple ou uma lista específica —, com **registro de sucesso ou falha por aparelho** a
-  cada execução. Reaproveita o aplicativo Microsoft 365 do e-mail como credencial.
+  cada execução e **aviso dos aparelhos provavelmente offline** (que não sincronizam com o Intune e só
+  reiniciam quando reconectarem). Reaproveita o aplicativo Microsoft 365 do e-mail como credencial.
 - Sem banco de dados e sem etapa de compilação: basta instalar o Node.js e executar.
 
 ## Sumário
@@ -1046,6 +1047,26 @@ Cada agendamento tem:
 Na lista, cada agendamento permite **Simular** (lista os aparelhos do escopo sem reiniciar nada),
 **Reiniciar agora** (com confirmação), **pausar/retomar**, ver o **histórico** (com o resultado de
 cada aparelho em cada execução) e **excluir**.
+
+### Aparelhos offline
+
+O reinício do Intune (`rebootNow`) é **enfileirado**: o Microsoft Graph aceita o comando (e o CLEAN
+registra *reinício enviado*), mas ele só chega ao aparelho na **próxima comunicação dele com o
+Intune**. Um aparelho **offline** (desligado, sem rede ou fora do alcance) só reinicia quando voltar
+a se conectar — e o Intune não expõe um status "online" em tempo real.
+
+Para você saber disso no painel, o CLEAN usa a **última sincronização** de cada aparelho com o Intune
+como indício de conectividade: um aparelho que não sincroniza há mais de **24 horas** é marcado como
+**provavelmente offline**. Esse aviso aparece:
+
+- na **listagem de aparelhos** do formulário (coluna *Última sincronização*);
+- no **resultado de cada execução** (no histórico e logo após *Reiniciar agora*/*Simular*): a tabela
+  por aparelho mostra a última sincronização e destaca os prováveis offline, e o resumo conta quantos
+  estão nessa situação (ex.: *"2 com reinício enviado de 3 aparelho(s). 1 aparelho não sincroniza com
+  o Intune há mais de 24 horas e pode estar offline — o reinício só ocorre quando ele reconectar."*).
+
+Assim, *reinício enviado* significa que o comando foi aceito pelo Intune; para os aparelhos offline, o
+reinício fica pendente até eles reconectarem.
 
 ### Permissões do aplicativo (Intune)
 

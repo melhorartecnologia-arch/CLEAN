@@ -2010,7 +2010,14 @@ ul.plain li {
   align-items: center;
   gap: 4px;
 }
+.warn-text {
+  color: var(--warn-ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .ok-text .icon,
+.warn-text .icon,
 .danger-text .icon {
   flex: none;
 }

@@ -127,16 +127,17 @@ export async function render(root, { params, ctx }) {
         devicesBox,
         total === 0
           ? html`<p class="muted small">Nenhum iPhone/iPad gerenciado foi encontrado nessa conexão.</p>`
-          : html`<p class="muted small">${total} aparelho(s) iPhone/iPad gerenciado(s):</p>
+          : html`<p class="muted small">${total} aparelho(s) iPhone/iPad gerenciado(s). Um aparelho que não sincroniza com o Intune há muito tempo provavelmente está offline: o reinício fica pendente até ele reconectar.</p>
               <div class="table-wrap">
                 <table class="data compact">
-                  <thead><tr><th>Aparelho</th><th>Usuário</th><th>Sistema</th><th>Nº de série</th></tr></thead>
+                  <thead><tr><th>Aparelho</th><th>Usuário</th><th>Sistema</th><th>Última sincronização</th><th>Nº de série</th></tr></thead>
                   <tbody>
                     ${devices.map(
                       (d) => html`<tr>
                         <td><b>${d.name}</b>${d.model ? html`<div class="muted small">${d.model}</div>` : ''}</td>
                         <td>${d.userName || d.user || html`<span class="muted">—</span>`}${d.userName && d.user ? html`<div class="muted small">${d.user}</div>` : ''}</td>
                         <td class="nowrap">${d.os}${d.osVersion ? ` ${d.osVersion}` : ''}</td>
+                        <td class="nowrap">${d.lastSync ? fmtServerDateTime(d.lastSync, { weekday: false }) : html`<span class="muted">nunca</span>`}${d.stale ? html`<div class="small warn-text">${icon('alert')} provavelmente offline</div>` : ''}</td>
                         <td class="mono small">${d.serialNumber || html`<span class="muted">—</span>`}</td>
                       </tr>`,
                     )}
