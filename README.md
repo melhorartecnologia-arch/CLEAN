@@ -35,8 +35,9 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   as contas registradas no domínio** (nome, endereço principal, apelidos, situação, tipo, licença,
   data de criação, departamento), a **listagem de todas as mensagens de cada caixa** com os dados de
   cada uma (remetente, destinatários, data, assunto, pasta, tamanho) e a varredura dos **destinatários
-  externos ao domínio** (quem de fora recebeu e-mails, por destinatário e por domínio) — com relatório,
-  filtros, gráficos e exportação.
+  externos ao domínio** (quem de fora recebeu e-mails e **quais caixas da organização enviam para fora
+  do domínio** — por remetente, por destinatário e por domínio) — com relatório, filtros, gráficos e
+  exportação.
 - **Microsoft Teams**: procura os termos das listas de referência nas **mensagens dos canais das
   equipes** (e nas respostas) e nos **chats** (1:1, em grupo e de reunião), no assunto, no corpo e nos
   **nomes e no conteúdo dos arquivos anexados** (baixados do SharePoint/OneDrive). Usa o mesmo
@@ -607,9 +608,14 @@ já cadastradas em *Caixas de e-mail*:
   colaboradores trocam e-mail fora do domínio. Você informa os **domínios internos** (um ou vários; em
   branco, vale o domínio de cada caixa analisada) e tudo fora deles é tratado como externo (subdomínios
   contam como internos). Dá para varrer **todas as pastas** ou **apenas Enviados** (foco em
-  compliance/vazamento) e filtrar por **período** (de/até). O relatório traz a apuração **por
-  destinatário externo** (endereço, domínio, nº de mensagens, caixas e campos) e **por domínio
-  externo**, mais a lista de mensagens com destinatário externo e quantas vieram de remetente externo.
+  compliance/vazamento) e filtrar por **período** (de/até). O relatório traz a apuração **por remetente
+  interno** — *quais e-mails da organização enviam para fora do domínio* (com o nº de mensagens, de
+  destinatários e de domínios externos, e os principais domínios de cada um) —, **por destinatário
+  externo** (endereço, domínio, nº de mensagens, caixas e campos) e **por domínio externo**, mais a
+  lista de mensagens com destinatário externo e quantas vieram de remetente externo. Varrendo **todas
+  as caixas da organização** (escopo "todas as caixas", de preferência **apenas Enviados**), é a visão
+  geral de quem envia e-mail para destinatários de fora. Clicar num remetente filtra as mensagens dele;
+  há também o filtro **Remetente (quem enviou)**.
   Lê só os cabeçalhos; o **Cco** só aparece quando o provedor o informa (em geral, na cópia de Enviados
   do próprio remetente). No detalhe de cada mensagem, **"Abrir mensagem"** baixa a mensagem completa na
   hora (pela conexão) e a mostra **dentro do próprio app, sem abrir nenhum link externo**: os
@@ -619,8 +625,9 @@ já cadastradas em *Caixas de e-mail*:
   (.eml)** continua disponível, mas não é necessário para ler.
 
 Cada listagem gera um relatório na tela com filtros e gráficos (por situação/tipo/conexão, no caso das
-contas; por caixa, pasta e remetente, no caso das mensagens; por domínio e destinatário externo, no
-caso dos destinatários externos) e exportação para **Excel**, **CSV**, **HTML** e **JSON**. As
+contas; por caixa, pasta e remetente, no caso das mensagens; por remetente interno, domínio e
+destinatário externo, no caso dos destinatários externos) e exportação para **Excel** (com a aba
+*Remetentes*), **CSV**, **HTML** e **JSON**. As
 listagens rodam em segundo plano (como as análises), podem ser canceladas e ficam separadas das
 *Análises de e-mail*, na própria seção.
 

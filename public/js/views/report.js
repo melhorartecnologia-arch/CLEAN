@@ -1408,8 +1408,8 @@ const extFields = (fields) => (fields || []).map((f) => EXTERNAL_FIELD[f] || f).
 const EXTERNAL = {
   base: '#/email/listagens',
   nav: 'email-listagens',
-  filterKeys: ['q', 'mailbox', 'source', 'domain', 'recipient', 'origin', 'sort', 'page'],
-  criteria: ['q', 'mailbox', 'source', 'domain', 'recipient', 'origin'],
+  filterKeys: ['q', 'mailbox', 'source', 'domain', 'recipient', 'sender', 'origin', 'sort', 'page'],
+  criteria: ['q', 'mailbox', 'source', 'domain', 'recipient', 'sender', 'origin'],
   descSorts: new Set(['date', 'recipients', 'size']),
   defaultSort: 'date',
   noun: ['mensagem', 'mensagens'],
@@ -1417,7 +1417,7 @@ const EXTERNAL = {
   scanNoun: 'varredura',
   resultsTitle: 'Mensagens',
   columns: 5,
-  views: { domains: 'chart', recipients: 'chart', mailboxes: 'chart' },
+  views: { senders: 'chart', domains: 'chart', recipients: 'chart', mailboxes: 'chart' },
 
   subtitle: (scan) => {
     const sources = (scan.summary?.sources || []).map((x) => `${x.name} (${TYPE_LABELS[x.type] || x.type})`).join(', ');
@@ -1429,6 +1429,7 @@ const EXTERNAL = {
   filterFields: (filters) => html`<label class="field grow"><span>Buscar</span><input type="search" name="q" value="${filters.q}" placeholder="Destinatário, domínio, assunto, pessoa ou caixa" /></label>
     <label class="field"><span>Caixa</span><select name="mailbox"><option value="">Todas</option></select></label>
     <label class="field"><span>Domínio externo</span><select name="domain"><option value="">Todos</option></select></label>
+    <label class="field"><span>Remetente (quem enviou)</span><select name="sender"><option value="">Todos</option></select></label>
     <label class="field"><span>Conexão</span><select name="source"><option value="">Todas</option></select></label>
     <label class="field"><span>Origem</span>
       <select name="origin"><option value="">Enviadas e recebidas</option>${Object.entries(ORIGIN_LABEL).map(([v, l]) => option(v, l, filters.origin))}</select>
@@ -1445,9 +1446,11 @@ const EXTERNAL = {
     </label>`,
 
   fillOptions: (form, options, filters, fill) => {
-    const o = options || { mailboxes: [], domains: [], sources: [] };
+    const o = options || { mailboxes: [], domains: [], senders: [], sources: [] };
     fill(form.elements.mailbox, o.mailboxes || [], filters.mailbox);
     fill(form.elements.domain, o.domains || [], filters.domain);
+    const senders = new Map((o.senders || []).map((s) => [s.value, s.label]));
+    fill(form.elements.sender, [...senders.keys()], filters.sender, (v) => senders.get(v) || v);
     const sources = new Map((o.sources || []).map((s) => [s.value, s.label]));
     fill(form.elements.source, [...sources.keys()], filters.source, (v) => sources.get(v) || v);
   },
@@ -1464,10 +1467,21 @@ const EXTERNAL = {
 
   charts: (summary, barChart) => {
     const msgs = (n) => plural(n, 'mensagem', 'mensagens');
+    const senders = (summary.bySender || []).map((s) => ({ label: s.name ? `${s.name} <${s.address}>` : s.address, value: s.messages, filterValue: s.address, tipValue: `${msgs(s.messages)} · ${plural(s.recipients, 'destinatário externo', 'destinatários externos')} · ${plural(s.domains, 'domínio', 'domínios')}`, tipLabel: s.name ? `${s.name} <${s.address}>` : s.address, raw: s }));
     const domains = (summary.byDomain || []).map((d) => ({ label: d.domain || '(sem domínio)', value: d.messages, filterValue: d.domain, tipValue: `${msgs(d.messages)} · ${plural(d.recipients, 'destinatário', 'destinatários')}`, tipLabel: d.domain, raw: d }));
     const recipients = (summary.byRecipient || []).map((r) => ({ label: r.address, value: r.messages, filterValue: r.address, tipValue: msgs(r.messages), tipLabel: r.name ? `${r.name} <${r.address}>` : r.address, raw: r }));
     const boxes = (summary.byMailbox || []).map((m) => ({ label: m.mailbox, value: m.messages, filterValue: m.mailbox, tipValue: `${msgs(m.messages)} · ${plural(m.recipients, 'destinatário externo', 'destinatários externos')}`, tipLabel: m.name ? `${m.name} <${m.mailbox}>` : m.mailbox, raw: m }));
     return html`${barChart({
+      key: 'senders',
+      title: 'Remetentes que enviam para fora',
+      subtitle: 'Caixas internas que enviaram a destinatários externos (quem envia para fora do domínio). Clique para filtrar.',
+      rows: senders,
+      filterKey: 'sender',
+      emptyText: 'Nenhum remetente interno enviou para fora. A direção "enviada" aparece melhor varrendo apenas os Enviados.',
+      tableHead: html`<tr><th>Remetente</th><th class="num">Mensagens</th><th class="num">Destinatários</th><th class="num">Domínios</th></tr>`,
+      tableRow: (r) => html`<tr><td>${r.raw.name ? html`${r.raw.name}<div class="muted small">${r.raw.address}</div>` : r.raw.address}${r.raw.topDomains?.length ? html`<div class="muted small">→ ${r.raw.topDomains.join(', ')}${r.raw.domains > r.raw.topDomains.length ? '…' : ''}</div>` : ''}</td><td class="num">${fmtNum(r.raw.messages)}</td><td class="num">${fmtNum(r.raw.recipients)}</td><td class="num">${fmtNum(r.raw.domains)}</td></tr>`,
+    })}
+    ${barChart({
       key: 'domains',
       title: 'Domínios externos',
       subtitle: 'Mensagens por domínio de fora da empresa. Clique para filtrar.',

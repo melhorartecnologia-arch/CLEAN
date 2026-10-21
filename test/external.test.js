@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { unzipSync, strFromU8 } from 'fflate';
 import { MailScanner } from '../src/mail/scanner.js';
+import { summarizeExternal } from '../src/report/model.js';
 import { createApp } from '../src/app.js';
 import { Store } from '../src/store.js';
 import { ScanManager } from '../src/scan/manager.js';
@@ -155,6 +156,21 @@ test('Motor: separa destinatários externos (Para/Cc/Cco), ignora só-internos e
   assert.deepEqual(byAddr['oculto@secreto.com'].fields, ['bcc'], 'Cco lido do cabeçalho Bcc');
 });
 
+test('Resumo: por remetente (quais e-mails da organização enviam para fora do domínio)', async () => {
+  const { records } = await runExternal([graphSource()], {});
+  const summary = summarizeExternal(records);
+  assert.equal(summary.sendersTotal, 3, 'chefe@, ana@ e bia@ enviaram mensagens com destinatário externo');
+  const byAddr = Object.fromEntries(summary.bySender.map((s) => [s.address, s]));
+  assert.deepEqual(Object.keys(byAddr).sort(), ['ana@empresa.com', 'bia@empresa.com', 'chefe@empresa.com']);
+  assert.equal(byAddr['ana@empresa.com'].messages, 1);
+  assert.equal(byAddr['ana@empresa.com'].recipients, 2, 'cliente@ e oculto@');
+  assert.equal(byAddr['ana@empresa.com'].domains, 2, 'cliente.com e secreto.com');
+  assert.deepEqual(byAddr['ana@empresa.com'].topDomains.sort(), ['cliente.com', 'secreto.com']);
+  assert.equal(byAddr['chefe@empresa.com'].recipients, 1);
+  // Remetente externo (a3, newsletter) não entra: ele recebe, não envia de dentro para fora.
+  assert.ok(!byAddr['news@parceiro.com']);
+});
+
 test('Motor: escopo "Apenas Enviados" varre só a pasta de enviados', async () => {
   const { records, stats } = await runExternal([graphSource({ scope: 'list', mailboxes: [{ address: 'ana@empresa.com' }] })], { folderScope: 'sent' });
   assert.equal(stats.messagesSeen, 1, 'só a mensagem da pasta Enviados');
@@ -247,9 +263,23 @@ test('API: destinatários externos (relatório somente leitura, apurações e ex
     const fornecedor = summary.data.byDomain.find((d) => d.domain === 'fornecedor.com');
     assert.equal(fornecedor.messages, 1);
 
+    // Por remetente: quais e-mails da organização enviam para fora do domínio.
+    assert.equal(summary.data.sendersTotal, 3);
+    const ana = summary.data.bySender.find((s) => s.address === 'ana@empresa.com');
+    assert.equal(ana.messages, 1);
+    assert.equal(ana.recipients, 2);
+    assert.equal(ana.domains, 2);
+
     // Filtro por domínio externo (via chave de filtro do gráfico).
     const porDominio = await app.api('GET', `/api/scans/${scan.data.id}/results?domain=cliente.com`);
     assert.deepEqual(porDominio.data.items.map((r) => r.subject).sort(), ['Outro cliente', 'Para o cliente']);
+
+    // A lista de remetentes vem nas opções de filtro do relatório (endpoint de resumo).
+    assert.ok((summary.data.options?.senders || []).some((s) => s.value === 'ana@empresa.com'));
+
+    // Filtro por remetente (clique no gráfico "Remetentes que enviam para fora").
+    const porRemetente = await app.api('GET', `/api/scans/${scan.data.id}/results?sender=ana@empresa.com`);
+    assert.deepEqual(porRemetente.data.items.map((r) => r.subject), ['Para o cliente']);
 
     // Segregação: só aparece na lista de listagens.
     const analyses = await app.api('GET', '/api/scans?kind=mail');
@@ -261,7 +291,7 @@ test('API: destinatários externos (relatório somente leitura, apurações e ex
     const xlsx = await app.api('GET', `/api/scans/${scan.data.id}/export.xlsx`);
     const parts = unzipSync(new Uint8Array(xlsx.data));
     const workbook = strFromU8(parts['xl/workbook.xml']);
-    assert.deepEqual([...workbook.matchAll(/<sheet name="([^"]*)"/g)].map((m) => m[1]), ['Resumo', 'Destinatários', 'Domínios', 'Mensagens']);
+    assert.deepEqual([...workbook.matchAll(/<sheet name="([^"]*)"/g)].map((m) => m[1]), ['Resumo', 'Remetentes', 'Destinatários', 'Domínios', 'Mensagens']);
     const csv = await app.api('GET', `/api/scans/${scan.data.id}/export.csv`);
     assert.ok(csv.data.toString('utf8').startsWith('﻿Destinatário externo;Nome;Domínio'));
     const html = await app.api('GET', `/api/scans/${scan.data.id}/export.html`);

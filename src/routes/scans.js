@@ -131,6 +131,7 @@ const MODELS = {
       return {
         mailboxes: all.byMailbox.map((m) => m.mailbox).sort(byName),
         domains: all.byDomain.map((d) => d.domain).filter(Boolean).slice(0, 2000),
+        senders: all.bySender.slice(0, 2000).map((s) => ({ value: s.address, label: s.name ? `${s.name} <${s.address}>` : s.address })),
         sources: all.bySource.map((s) => ({ value: s.sourceId, label: s.source })),
       };
     },

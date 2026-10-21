@@ -1,6 +1,7 @@
 // Exportações da varredura de destinatários externos ao domínio (somente leitura): Excel, CSV
 // (padrão Excel pt-BR) e HTML. O JSON é o comum das exportações. Uma linha por mensagem com
-// destinatário externo, mais as apurações por destinatário e por domínio.
+// destinatário externo, mais as apurações por remetente (quem envia para fora), por destinatário e
+// por domínio.
 import { writeXlsx } from './xlsx.js';
 import { writeAll, csvCell, escapeHtml, REPORT_CSS, toDate, kb } from './exports.js';
 import { summarizeExternal, formatDateTime, SCAN_STATUS_LABELS, MAIL_TYPE_LABELS } from './model.js';
@@ -41,12 +42,26 @@ function infoRows(scan, summary) {
     ['Caixas varridas', s.mailboxesDone ?? 0],
     ['Mensagens verificadas', s.messagesSeen ?? 0],
     ['Mensagens com destinatário externo', summary.messages],
+    ['Remetentes internos que enviaram para fora', summary.sendersTotal ?? 0],
     ['Destinatários externos (distintos)', summary.recipientsTotal],
     ['Domínios externos (distintos)', summary.domainsTotal],
     ['Mensagens de remetente externo', summary.externalSenders],
     ['Erros', s.errors ?? 0],
   ];
 }
+
+const SENDER_COLUMNS = [
+  ['Remetente (quem enviou para fora)', 34],
+  ['Nome', 26],
+  ['Mensagens enviadas para fora', 16],
+  ['Destinatários externos', 15],
+  ['Domínios externos', 14],
+  ['Principais domínios', 40],
+  ['Primeira', 17],
+  ['Última', 17],
+];
+
+const senderRow = (s) => [s.address, s.name, s.messages, s.recipients, s.domains, (s.topDomains || []).join(', '), toDate(s.first), toDate(s.last)];
 
 // ---------------------------------------------------------------------------------------------
 
@@ -125,6 +140,14 @@ export async function exportExternalXlsx(scan, records, errors, out) {
   const sheets = [
     { name: 'Resumo', cols: [38, 40, 14], rows: resumo },
     {
+      name: 'Remetentes',
+      cols: SENDER_COLUMNS.map(([, w]) => w),
+      header: SENDER_COLUMNS.map(([h]) => h),
+      rows: (function* () {
+        for (const s of summary.bySender) yield senderRow(s);
+      })(),
+    },
+    {
       name: 'Destinatários',
       cols: RECIPIENT_COLUMNS.map(([, w]) => w),
       header: RECIPIENT_COLUMNS.map(([h]) => h),
@@ -184,6 +207,15 @@ export async function exportExternalHtml(scan, records, out) {
   const info = infoRows(scan, summary)
     .map(([label, value]) => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value instanceof Date ? value.toLocaleString('pt-BR') : value)}</td></tr>`)
     .join('');
+  const senders = summary.bySender
+    .slice(0, 1000)
+    .map(
+      (s) =>
+        `<tr><td><b>${escapeHtml(s.address)}</b>${s.name ? `<div class="muted">${escapeHtml(s.name)}</div>` : ''}${
+          (s.topDomains || []).length ? `<div class="muted">→ ${escapeHtml(s.topDomains.join(', '))}${s.domains > s.topDomains.length ? '…' : ''}</div>` : ''
+        }</td><td class="num">${s.messages}</td><td class="num">${s.recipients}</td><td class="num">${s.domains}</td></tr>`,
+    )
+    .join('');
   const domains = summary.byDomain
     .slice(0, 100)
     .map((d) => `<tr><td>${escapeHtml(d.domain)}</td><td class="num">${d.recipients}</td><td class="num">${d.messages}</td></tr>`)
@@ -209,6 +241,7 @@ export async function exportExternalHtml(scan, records, out) {
       )}</title><style>${REPORT_CSS}</style></head><body>
 <h1>Destinatários externos ao domínio</h1><div class="muted">${escapeHtml(scan.name)} · gerado em ${escapeHtml(new Date().toLocaleString('pt-BR'))}</div>
 <h2>Resumo</h2><table class="info">${info}</table>
+<h2>Remetentes que enviam para fora (${summary.sendersTotal})</h2><table><thead><tr><th>Remetente</th><th class="num">Mensagens</th><th class="num">Destinatários</th><th class="num">Domínios</th></tr></thead><tbody>${senders}</tbody></table>
 <h2>Domínios externos (${summary.domainsTotal})</h2><table><thead><tr><th>Domínio</th><th class="num">Destinatários</th><th class="num">Mensagens</th></tr></thead><tbody>${domains}</tbody></table>
 <h2>Destinatários externos (${summary.recipientsTotal})</h2><table><thead><tr><th>Destinatário</th><th>Domínio</th><th class="num">Mensagens</th><th>Campos</th><th>Última</th></tr></thead><tbody>${recipients}</tbody></table>
 <h2>Mensagens (${sorted.length})</h2><table><thead><tr><th>Mensagem</th><th>Remetente</th><th>Destinatários externos</th><th>Recebida</th></tr></thead><tbody>`;

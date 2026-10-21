@@ -576,7 +576,15 @@ const EXTERNAL_SORTERS = {
   size: (a, b) => (a.size || 0) - (b.size || 0),
 };
 
-export const EXTERNAL_FILTER_KEYS = ['q', 'mailbox', 'source', 'domain', 'recipient', 'origin', 'sort', 'dir', 'page'];
+export const EXTERNAL_FILTER_KEYS = ['q', 'mailbox', 'source', 'domain', 'recipient', 'sender', 'origin', 'sort', 'dir', 'page'];
+
+/** Nome de exibição de um remetente formatado ("Nome <endereço>"), sem o próprio endereço. */
+function senderDisplayName(formatted, address) {
+  const s = String(formatted || '').trim();
+  const lt = s.indexOf('<');
+  const name = (lt > 0 ? s.slice(0, lt) : '').trim().replace(/^"|"$/g, '');
+  return name && name.toLowerCase() !== String(address || '').toLowerCase() ? name : '';
+}
 
 /** Filtra e ordena as mensagens com destinatário externo. Padrão: mais recentes primeiro. */
 export function filterExternal(records, filters = {}) {
@@ -588,6 +596,7 @@ export function filterExternal(records, filters = {}) {
     if (filters.source && r.sourceId !== filters.source) return false;
     if (domain && !(r.external || []).some((e) => e.domain === domain)) return false;
     if (recipient && !(r.external || []).some((e) => e.address === recipient)) return false;
+    if (filters.sender && r.fromAddress !== filters.sender) return false;
     // Origem da mensagem: remetente externo ("in", recebida de fora) ou interno ("out", enviada para fora).
     if (filters.origin === 'in' && r.fromExternal !== true) return false;
     if (filters.origin === 'out' && r.fromExternal !== false) return false;
@@ -610,6 +619,9 @@ export function summarizeExternal(records, { top = 0 } = {}) {
   const domains = new Map();
   const mailboxes = new Map();
   const sources = new Map();
+  // Remetentes internos que enviaram para fora do domínio (quais e-mails da organização enviam
+  // mensagens a destinatários externos): a resposta direta a "quem pode/consegue enviar para fora".
+  const senders = new Map();
   const fields = { to: 0, cc: 0, bcc: 0 };
   let pairs = 0;
   let externalSenders = 0;
@@ -622,6 +634,20 @@ export function summarizeExternal(records, { top = 0 } = {}) {
   for (const r of records) {
     if (r.fromExternal) externalSenders++;
     const date = r.date || r.sent || null;
+    // Agrega por remetente interno (direção "enviada para fora"): a mesma mensagem encontrada em
+    // mais de uma caixa conta uma vez (pelo Message-ID, quando houver).
+    if (r.fromExternal === false && r.fromAddress && (r.external || []).length) {
+      let snd = senders.get(r.fromAddress);
+      if (!snd) senders.set(r.fromAddress, (snd = { address: r.fromAddress, name: '', msgKeys: new Set(), recipients: new Set(), domains: new Map(), mailboxes: new Set(), first: null, last: null }));
+      if (!snd.name) snd.name = senderDisplayName(r.from, r.fromAddress);
+      snd.msgKeys.add(r.internetMessageId || `${r.sourceId}:${r.mailbox}:${r.messageId || r.id}`);
+      for (const e of r.external || []) {
+        snd.recipients.add(e.address);
+        snd.domains.set(e.domain || '', (snd.domains.get(e.domain || '') || 0) + 1);
+      }
+      snd.mailboxes.add(r.mailbox);
+      when(senders, r.fromAddress, date);
+    }
     const domainsHere = new Set();
     for (const e of r.external || []) {
       pairs++;
@@ -660,11 +686,25 @@ export function summarizeExternal(records, { top = 0 } = {}) {
   const byMailbox = [...mailboxes.values()]
     .map((m) => ({ mailbox: m.mailbox, name: m.name, messages: m.messages, recipients: m.recipients.size }))
     .sort((a, b) => b.messages - a.messages);
+  const bySender = [...senders.values()]
+    .map((s) => ({
+      address: s.address,
+      name: s.name,
+      messages: s.msgKeys.size,
+      recipients: s.recipients.size,
+      domains: s.domains.size,
+      topDomains: [...s.domains.entries()].sort((a, b) => b[1] - a[1]).map(([d]) => d).filter(Boolean).slice(0, 5),
+      mailboxes: s.mailboxes.size,
+      first: s.first,
+      last: s.last,
+    }))
+    .sort((a, b) => b.messages - a.messages || b.recipients - a.recipients || a.address.localeCompare(b.address));
   const bySource = [...sources.values()].sort((a, b) => b.messages - a.messages);
   return {
     messages: records.length,
     recipientsTotal: recipients.size,
     domainsTotal: domains.size,
+    sendersTotal: bySender.length,
     pairs,
     externalSenders,
     byField: Object.entries(fields).map(([key, messages]) => ({ key, label: FIELD_LABELS[key], messages })).filter((f) => f.messages > 0),
@@ -673,6 +713,8 @@ export function summarizeExternal(records, { top = 0 } = {}) {
     byDomain: cut(byDomain),
     byDomainTotal: byDomain.length,
     byMailbox: cut(byMailbox),
+    bySender: cut(bySender),
+    bySenderTotal: bySender.length,
     bySource,
   };
 }
