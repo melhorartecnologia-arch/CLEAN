@@ -34,9 +34,10 @@ export function compileExclusions(patterns = []) {
 /**
  * Gera { type: 'file', path, name, relativePath } para cada arquivo e { type: 'error', path, error }
  * para pastas inacessíveis. `shouldStop` interrompe a varredura (cancelamento); `skipDir(caminho)`
- * pula uma pasta inteira.
+ * pula uma pasta inteira. `allowDir(rel)` e `allowFile(rel)` limitam a varredura a algumas pastas
+ * (retenção com pastas escolhidas): as demais nem são listadas; `rel` continua relativo à raiz.
  */
-export async function* walk(root, { isExcluded = () => false, skipDir = () => false, shouldStop = () => false } = {}) {
+export async function* walk(root, { isExcluded = () => false, skipDir = () => false, shouldStop = () => false, allowDir = () => true, allowFile = () => true } = {}) {
   const stack = [''];
   while (stack.length > 0) {
     if (shouldStop()) return;
@@ -61,9 +62,9 @@ export async function* walk(root, { isExcluded = () => false, skipDir = () => fa
           const target = await fs.stat(path.join(root, childRel)).catch(() => null);
           isFile = Boolean(target?.isFile());
         } else if (entry.isDirectory()) {
-          if (!skipDir(path.join(root, childRel))) subdirs.push(childRel);
+          if (allowDir(childRel) && !skipDir(path.join(root, childRel))) subdirs.push(childRel);
         }
-        if (isFile) yield { type: 'file', path: path.join(root, childRel), name: entry.name, relativePath: childRel };
+        if (isFile && allowFile(childRel)) yield { type: 'file', path: path.join(root, childRel), name: entry.name, relativePath: childRel };
         if (shouldStop()) return;
       }
     } catch (error) {

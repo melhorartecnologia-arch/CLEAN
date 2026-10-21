@@ -8,6 +8,7 @@ import { friendlyError } from './errors.js';
 const MISSING = 'O arquivo não existe mais (já excluído ou movido).';
 const OUTSIDE =
   'Uma pasta no caminho do arquivo agora aponta para fora do repositório (atalho, link simbólico ou junção); por segurança, o arquivo não foi excluído.';
+export const OUTSIDE_FOLDERS = 'O arquivo não está dentro das pastas escolhidas na política; por segurança, ele não foi excluído.';
 
 /** Repositório no OneDrive ou no SharePoint (os demais são pastas do Windows). */
 export const isCloudRepo = (repo) => repo?.type === 'onedrive' || repo?.type === 'sharepoint';
@@ -128,7 +129,7 @@ async function checkFolders(root, dir) {
  * continua dentro do repositório e fora das pastas protegidas: uma pasta trocada depois da análise
  * por um atalho levaria a exclusão para outro lugar.
  */
-async function checkLocation(root, filePath, guards) {
+async function checkLocation(root, filePath, guards, within = null) {
   const dir = path.dirname(filePath);
   let realRoot;
   let realDir;
@@ -139,6 +140,11 @@ async function checkLocation(root, filePath, guards) {
     return checkFolders(root, dir);
   }
   if (!isWithin(realRoot, realDir)) return { status: 'failed', error: OUTSIDE };
+  if (within) {
+    // Também pelo caminho real: a pasta do arquivo continua dentro de uma das pastas escolhidas.
+    const real = await Promise.all(within.map((w) => fs.realpath(w).catch(() => null)));
+    if (!real.some((w) => w && isWithin(realRoot, w) && isWithin(w, realDir))) return { status: 'failed', error: OUTSIDE_FOLDERS };
+  }
   const realFile = path.join(realDir, path.basename(filePath));
   for (const g of guards) {
     const real = { ...g, path: await realOrSame(g.path), except: await Promise.all((g.except || []).map(realOrSame)) };
@@ -155,12 +161,15 @@ async function checkLocation(root, filePath, guards) {
  * protect: pastas cujos arquivos nunca são excluídos ({ path, except?, error }).
  * check(st): conferência extra na hora de excluir (ex.: o arquivo continua expirado pela política de
  * retenção); devolve o motivo para manter o arquivo (status 'changed') ou null. Ignorada com force.
+ * within: pastas (caminhos completos) escolhidas na política: o arquivo precisa estar dentro de uma
+ * delas, pelo caminho e pelo caminho real. Vale também com force (não depende de check).
  */
-export async function deleteFile(filePath, { root, expected = null, force = false, protect = [], check = null } = {}) {
+export async function deleteFile(filePath, { root, expected = null, force = false, protect = [], check = null, within = null } = {}) {
   if (!isInside(root, filePath)) return { status: 'failed', error: 'O arquivo não está dentro da pasta do repositório.' };
+  if (within && !within.some((w) => isInside(w, filePath))) return { status: 'failed', error: OUTSIDE_FOLDERS };
   const guard = guardFor(protect, filePath);
   if (guard) return { status: 'failed', error: guard.error };
-  const location = await checkLocation(root, filePath, protect);
+  const location = await checkLocation(root, filePath, protect, within);
   if (location) return location;
   let st;
   try {
@@ -206,16 +215,33 @@ export async function deleteFile(filePath, { root, expected = null, force = fals
  * (exclusoes.ndjson). `item` descreve o que foi excluído (caminho do arquivo ou caixa, pasta e
  * assunto da mensagem), para que o registro não dependa do relatório.
  */
-export function deletionEvent(recordId, result, { mode, method, by, item }) {
+export function deletionEvent(recordId, result, { mode, method, by, item, target = null }) {
   return {
     recordId,
     status: result.status,
     error: result.error || null,
     note: result.note || null,
-    mode, // 'auto' (durante a análise) ou 'manual' (pelo relatório)
-    method, // 'file', 'permanent' ou 'trash'
+    mode, // 'auto' (durante a análise), 'retention' (política) ou 'manual' (pelo relatório)
+    method, // 'file', 'permanent', 'trash' ou 'teams'
     by: by || null,
     item: item || null,
+    // O que foi excluído (repositório ou conexão, tamanho...): o registro geral não depende do relatório.
+    ...(target ? { target } : {}),
     at: new Date().toISOString(),
+  };
+}
+
+/** Dados de um arquivo (pasta do Windows, OneDrive ou SharePoint) para o registro de exclusões. */
+export function fileTarget(r) {
+  if (!r) return null;
+  return {
+    type: r.cloud ? r.cloud.kind || 'cloud' : 'local',
+    repositoryId: r.repositoryId ?? null,
+    repositoryName: r.repositoryName ?? null,
+    relativePath: r.relativePath ?? null,
+    size: Number(r.size) || 0,
+    ...(r.retention?.date ? { criterionDate: r.retention.date } : {}),
+    ...(r.retention?.folder ? { scopeFolder: r.retention.folder } : {}),
+    ...(r.cloud ? { account: r.cloud.accountName || r.cloud.account || null, library: r.cloud.library || null } : {}),
   };
 }

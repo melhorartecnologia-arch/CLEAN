@@ -424,7 +424,7 @@ export class ScanManager {
     if (targets.length === 0 || targets.some((t) => !t)) throw new ScanError(mail ? 'Selecione conexões de e-mail válidas.' : 'Selecione repositórios válidos.');
     let retention;
     try {
-      retention = sanitizeRetention(body.retention, mail ? 'mail' : 'files', { cloud: !mail && targets.some(isCloudRepo) });
+      retention = sanitizeRetention(body.retention, mail ? 'mail' : 'files', { cloud: !mail && targets.some(isCloudRepo), targets });
     } catch (err) {
       throw new ScanError(err.message);
     }

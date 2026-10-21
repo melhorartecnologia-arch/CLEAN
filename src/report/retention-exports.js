@@ -5,7 +5,7 @@ import { writeXlsx } from './xlsx.js';
 import { writeAll, csvCell, escapeHtml, REPORT_CSS, toDate, kb, deletionsSheet, deletionInfoRows } from './exports.js';
 import { sourceText } from './mail-exports.js';
 import { summarizeRetention, deletionText, formatDateTime, SOURCE_LABELS, SCAN_STATUS_LABELS, MAIL_DELETION_LABELS } from './model.js';
-import { FILE_CRITERIA, MAIL_CRITERIA, amountText, describeRetention, ageBucket } from '../retention/policy.js';
+import { FILE_CRITERIA, MAIL_CRITERIA, amountText, describeRetention, ageBucket, dateBr } from '../retention/policy.js';
 
 const mb = (bytes) => Math.round(((Number(bytes) || 0) / 1048576) * 100) / 100;
 const isMail = (scan) => scan.kind === 'mail';
@@ -36,14 +36,18 @@ function policyRows(scan) {
   const r = scan.retention;
   const mail = isMail(scan);
   const criterion = (mail ? MAIL_CRITERIA : FILE_CRITERIA)[r.criterion];
+  // Pastas escolhidas, com o nome do repositório de cada uma.
+  const names = new Map((scan.summary?.repositories || []).map((x) => [x.id, x.name]));
+  const folders = (r.folders || []).map((f) => `${names.get(f.repositoryId) || 'repositório removido'}: ${f.path}`);
   return [
     ['Regra', describeRetention(r, mail ? 'mail' : 'files')],
     ['Critério de data', criterion?.label || r.criterion],
-    ['Idade máxima', amountText(r)],
+    r.since ? [mail ? 'Data fixa (recebidas antes de)' : 'Data fixa (sem uso desde)', dateBr(r.since)] : ['Idade máxima', amountText(r)],
     ['Data de corte (expiram os anteriores)', toDate(r.cutoff)],
     mail
       ? ['Lixeira / Lixo eletrônico', `${r.includeTrash ? 'inclui' : 'ignora'} a lixeira; ${r.includeJunk ? 'inclui' : 'ignora'} o lixo eletrônico`]
-      : ['Nomes de arquivo', r.patterns?.length ? r.patterns.join('; ') : 'todos'],
+      : ['Nomes de arquivo', r.patterns?.length ? r.patterns.join('; ') : 'todos (qualquer tipo de arquivo)'],
+    ...(mail ? [] : [['Pastas da política', folders.length ? folders.join('; ') : 'todas (repositórios inteiros)']]),
     ['Limite de exclusões por execução', r.maxDeletions ? r.maxDeletions : 'sem limite'],
   ];
 }

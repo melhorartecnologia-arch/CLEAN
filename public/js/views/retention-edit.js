@@ -1,11 +1,12 @@
 // Nova política de retenção (#/retencao/nova?tipo=email) ou edição (#/retencao/<id>): arquivos ou
-// mensagens mais antigos que a idade máxima, pelo critério de data escolhido, são listados no
-// relatório e — se a política excluir — eliminados. Execução manual ou agendada.
+// mensagens mais antigos que a idade máxima (ou sem uso desde uma data fixa), pelo critério de data
+// escolhido, são listados no relatório e — se a política excluir — eliminados. Arquivos: todos os
+// repositórios marcados ou só algumas pastas deles. Execução manual ou agendada.
 import { get, post, put } from '../api.js';
 import { html, render as paint, icon, toast, fmtServerDateTime, plural } from '../ui.js';
 import { go } from '../nav.js';
 import { scheduleSection, bindSchedule, readSchedule, scheduling, keepField } from '../schedule-form.js';
-import { FILE_CRITERIA, MAIL_CRITERIA, UNITS, DEFAULT_MAX_DELETIONS, describeRetention, cutoffPreview, deletionsText } from '../retention.js';
+import { FILE_CRITERIA, MAIL_CRITERIA, UNITS, DEFAULT_MAX_DELETIONS, ACCESS_CRITERIA, describeRetention, cutoffPreview, deletionsText } from '../retention.js';
 
 const CLOUD_LABELS = { onedrive: 'OneDrive', sharepoint: 'SharePoint' };
 const TYPE_LABELS = { graph: 'Microsoft 365', gmail: 'Google Workspace', imap: 'IMAP' };
@@ -15,9 +16,16 @@ function sourceDetail(s) {
   return `${TYPE_LABELS[s.type] || s.type} · ${plural(s.mailboxes.length, 'caixa', 'caixas')}`;
 }
 
+/** Hoje ("AAAA-MM-DD", hora local): o limite do campo de data (o servidor recusa datas futuras). */
+function todayIso() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 /** O que expira, na prévia: "arquivos modificados pela última vez antes de 26/09/2021". */
 const EXPIRES = {
   used: (d) => `arquivos sem nenhuma data (modificação, último acesso ou criação) a partir de ${d}`,
+  'opened-or-modified': (d) => `arquivos sem abertura (último acesso) nem modificação a partir de ${d}`,
   modified: (d) => `arquivos modificados pela última vez antes de ${d}`,
   accessed: (d) => `arquivos acessados pela última vez antes de ${d}`,
   created: (d) => `arquivos criados antes de ${d}`,
@@ -60,13 +68,16 @@ export async function render(root, { params, query, ctx }) {
   const chk = (value) => (value ? 'checked' : '');
   const sel = (a, b) => (String(a) === String(b) ? 'selected' : '');
   const isCloud = (t) => Boolean(CLOUD_LABELS[t.type]);
+  const byDate = Boolean(r.since);
+  // Pastas salvas, por repositório (uma por linha no campo de cada um).
+  const savedFolders = (tid) => (r.folders || []).filter((f) => f.repositoryId === tid).map((f) => f.path.split('/').join(isCloud(targets.find((t) => t.id === tid) || {}) ? '/' : '\\'));
 
   paint(
     root,
     html`<div class="page-head">
         <div>
           <h1>${title}</h1>
-          <div class="sub">${mail ? 'Mensagens' : 'Arquivos'} mais antig${o}s que a idade máxima são listad${o}s no relatório e, se a política excluir, eliminad${o}s.</div>
+          <div class="sub">${mail ? 'Mensagens' : 'Arquivos (de qualquer tipo)'} mais antig${o}s que a idade máxima, ou sem uso desde uma data, são listad${o}s no relatório e, se a política excluir, eliminad${o}s — cada exclusão fica no Registro de exclusões.</div>
         </div>
       </div>
       <form class="card" data-form novalidate>
@@ -90,8 +101,26 @@ export async function render(root, { params, query, ctx }) {
             </div>
           </fieldset>
 
+          ${mail
+            ? ''
+            : html`<fieldset class="full" data-folders-box>
+                <legend>Pastas (opcional)</legend>
+                <p class="muted small">Para limpar só algumas pastas de um repositório, informe-as abaixo, uma por linha; as subpastas entram. Em branco: o repositório inteiro. Os arquivos fora das pastas não são listados nem excluídos — nem com a exclusão manual pelo relatório.</p>
+                <div class="stack">
+                  ${targets.map(
+                    (t) => html`<label class="field" data-folders-for="${t.id}" hidden>
+                      <span>Somente estas pastas de <b>${t.name}</b></span>
+                      <textarea name="folders:${t.id}" rows="2" spellcheck="false" placeholder="${isCloud(t) ? 'Projetos/2019\nDocumentos Compartilhados/Financeiro' : `Financeiro\\2019\n${t.path.replace(/[\\/]+$/, '')}\\Compartilhado\\Antigos`}">${savedFolders(t.id).join('\n')}</textarea>
+                      <small>${isCloud(t)
+                        ? 'Caminho dentro da biblioteca (vale em todas as bibliotecas) ou com o nome dela na frente (Documentos Compartilhados/Financeiro). Só o nome da biblioteca: a biblioteca inteira.'
+                        : html`Relativo à raiz do repositório (Financeiro\\2019) ou o caminho completo dentro dele (<span class="mono">${t.path}</span>…). A pasta precisa existir e não pode ser atalho, link simbólico ou junção.`}</small>
+                    </label>`,
+                  )}
+                </div>
+              </fieldset>`}
+
           <fieldset>
-            <legend>Regra de idade</legend>
+            <legend>Regra de data</legend>
             <div class="stack">
             ${mail
               ? html`<div class="field"><span>Critério de data</span><b>${MAIL_CRITERIA.received.label}</b><small>${MAIL_CRITERIA.received.hint}</small></div>`
@@ -101,6 +130,13 @@ export async function render(root, { params, query, ctx }) {
                   <small data-criterion-hint>${criteria[criterion]?.hint}</small>
                 </label>`}
             <div class="field">
+              <span id="cut-label">Corte</span>
+              <div class="option-row" role="radiogroup" aria-labelledby="cut-label">
+                <label class="check"><input type="radio" name="cutMode" value="age" ${chk(!byDate)} /><span>Idade máxima</span></label>
+                <label class="check"><input type="radio" name="cutMode" value="date" ${chk(byDate)} /><span>${mail ? 'Data fixa (recebidas antes de)' : 'Data fixa (sem uso desde)'}</span></label>
+              </div>
+            </div>
+            <div class="field" data-cut="age" ${byDate ? 'hidden' : ''}>
               <span id="age-label">Idade máxima</span>
               <div class="option-row" role="group" aria-labelledby="age-label">
                 <input type="number" name="amount" min="1" max="${UNITS[r.unit || 'years'].max}" value="${r.amount || 5}" aria-label="Idade máxima (quantidade)" />
@@ -108,8 +144,13 @@ export async function render(root, { params, query, ctx }) {
                   ${Object.entries(UNITS).map(([value, u]) => html`<option value="${value}" ${sel(r.unit || 'years', value)}>${u.many}</option>`)}
                 </select>
               </div>
-              <small>${mail ? 'Mensagens' : 'Arquivos'} com a data do critério mais antiga que isso expiram.</small>
+              <small>${mail ? 'Mensagens' : 'Arquivos'} com a data do critério mais antiga que isso expiram. O corte anda a cada execução.</small>
             </div>
+            <label class="field" data-cut="date" ${byDate ? '' : 'hidden'}>
+              <span>${mail ? 'Recebidas antes de' : 'Sem uso desde'}</span>
+              <input type="date" name="since" min="1980-01-02" max="${todayIso()}" value="${r.since || ''}" />
+              <small>${mail ? 'Mensagens recebidas antes desse dia expiram' : 'Arquivos com a data do critério anterior a esse dia (00:00, hora do servidor) expiram: com "Sem abertura nem modificação", os que não foram abertos nem alterados desde então'}. A data não anda: todas as execuções usam o mesmo corte.</small>
+            </label>
             ${mail
               ? html`<label class="check"><input type="checkbox" name="includeTrash" ${chk(r.includeTrash !== false)} /><span>Incluir a Lixeira (Itens Excluídos)</span></label>
                   <label class="check"><input type="checkbox" name="includeJunk" ${chk(r.includeJunk !== false)} /><span>Incluir o Lixo Eletrônico (spam)</span></label>`
@@ -128,14 +169,14 @@ export async function render(root, { params, query, ctx }) {
             : html`<div class="alert full" data-access-warning hidden>
                   ${icon('alert')}
                   <div>
-                    <b>O último acesso só é confiável se o Windows do servidor de arquivos o registrar</b> — em muitos servidores esse registro fica desligado.
+                    <b>O último acesso (abertura) só é confiável se o Windows do servidor de arquivos o registrar</b> — em muitos servidores esse registro fica desligado.
                     Para conferir, rode no servidor <span class="mono">fsutil behavior query disablelastaccess</span>: 0 ou 2, registra; 1 ou 3, não registra.
                     Sem o registro, a data fica parada (na criação ou na cópia do arquivo) e um arquivo aberto todos os dias, mas não alterado, parece antigo — e seria excluído.
-                    Isso vale também para <b>Sem uso</b>, que nesse caso só protege os arquivos modificados ou criados recentemente.
+                    Com <b>Sem abertura nem modificação</b>, nesse caso só a modificação protege o arquivo. Isso vale também para <b>Sem uso</b>, que então só protege os arquivos modificados ou criados recentemente.
                     No sentido oposto, programas que leem todos os arquivos (antivírus, backup, indexação e as análises de conteúdo do CLEAN) podem atualizar o último acesso de tudo — e aí nada expira por esse critério.
                   </div>
                 </div>
-                <div class="alert error full" data-cloud-warning hidden>${icon('alert')}<div>O OneDrive e o SharePoint não informam o último acesso de cada arquivo: escolha outro critério ou desmarque os repositórios da nuvem.</div></div>`}
+                <div class="alert error full" data-cloud-warning hidden>${icon('alert')}<div>O OneDrive e o SharePoint não informam o último acesso (abertura) de cada arquivo: escolha outro critério ou desmarque os repositórios da nuvem.</div></div>`}
 
           <fieldset class="full">
             <legend>O que fazer com ${o}s ${items} expirad${o}s</legend>
@@ -202,18 +243,41 @@ export async function render(root, { params, query, ctx }) {
   const submit = form.querySelector('[data-submit]');
   const preview = form.querySelector('[data-rule-preview]');
   const currentCriterion = () => (mail ? 'received' : form.elements.criterion.value);
-  const cloudChosen = () => [...form.querySelectorAll('[name="targetIds"]:checked')].some((el) => el.dataset.cloud);
+  const checkedTargets = () => [...form.querySelectorAll('[name="targetIds"]:checked')];
+  const cloudChosen = () => checkedTargets().some((el) => el.dataset.cloud);
+  const cutMode = () => (form.querySelector('[name="cutMode"]:checked')?.value === 'date' ? 'date' : 'age');
+
+  /** Pastas escolhidas, só dos repositórios marcados: [{ repositoryId, path }] (o servidor valida). */
+  const readFolders = () =>
+    checkedTargets().flatMap((el) =>
+      String(form.elements.namedItem(`folders:${el.value}`)?.value || '')
+        .split(/\r?\n/)
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .map((p) => ({ repositoryId: el.value, path: p })),
+    );
+
+  /** Pasta para a prévia: o caminho completo dentro do repositório vira relativo (como o servidor salva). */
+  const shortFolder = (f) => {
+    const t = targets.find((x) => x.id === f.repositoryId);
+    if (!t || isCloud(t)) return f.path;
+    const norm = (v) => String(v).replace(/[\\/]+/g, '/').replace(/\/+$/, '');
+    const [rootPath, value] = [norm(t.path), norm(f.path)];
+    if (value.toLowerCase() === rootPath.toLowerCase()) return '(repositório inteiro)';
+    return value.toLowerCase().startsWith(`${rootPath.toLowerCase()}/`) ? value.slice(rootPath.length + 1) : value;
+  };
 
   /** A regra como a API espera. */
   const readRetention = () => {
     const f = new FormData(form);
+    const folders = mail ? [] : readFolders();
     return {
       criterion: currentCriterion(),
-      amount: Number(f.get('amount')),
-      unit: f.get('unit'),
+      // Idade máxima (o corte anda a cada execução) ou data fixa (o mesmo corte sempre).
+      ...(cutMode() === 'date' ? { mode: 'date', since: String(f.get('since') || '') } : { mode: 'age', amount: Number(f.get('amount')), unit: f.get('unit') }),
       ...(mail
         ? { includeTrash: f.get('includeTrash') === 'on', includeJunk: f.get('includeJunk') === 'on' }
-        : { patterns: String(f.get('patterns') || '').split(/\r?\n/).map((p) => p.trim()).filter(Boolean) }),
+        : { patterns: String(f.get('patterns') || '').split(/\r?\n/).map((p) => p.trim()).filter(Boolean), ...(folders.length ? { folders } : {}) }),
       maxDeletions: limitValue(),
       // Lida da opção marcada (mesmo desativada: sem OneDrive/SharePoint, a escolha fica guardada).
       deleteMode: form.querySelector('[name="deleteMode"]:checked')?.value === 'trash' ? 'trash' : 'permanent',
@@ -232,11 +296,17 @@ export async function render(root, { params, query, ctx }) {
     const deletingNow = form.elements.action.value === 'delete';
     const retention = readRetention();
     const c = currentCriterion();
+    const byDateNow = retention.mode === 'date';
     form.querySelector('[data-delete-options]').hidden = !deletingNow;
+    form.querySelectorAll('[data-cut]').forEach((el) => (el.hidden = el.dataset.cut !== retention.mode));
     if (!mail) {
       form.querySelector('[data-criterion-hint]').textContent = FILE_CRITERIA[c]?.hint || '';
-      form.querySelector('[data-access-warning]').hidden = c !== 'accessed';
-      form.querySelector('[data-cloud-warning]').hidden = !(c === 'accessed' && cloudChosen());
+      form.querySelector('[data-access-warning]').hidden = !ACCESS_CRITERIA.has(c);
+      form.querySelector('[data-cloud-warning]').hidden = !(ACCESS_CRITERIA.has(c) && cloudChosen());
+      // O campo de pastas de cada repositório marcado (o texto fica guardado se ele for desmarcado).
+      const checked = new Set(checkedTargets().map((el) => el.value));
+      form.querySelectorAll('[data-folders-for]').forEach((el) => (el.hidden = !checked.has(el.dataset.foldersFor)));
+      form.querySelector('[data-folders-box]').hidden = checked.size === 0;
     }
     if (!mail) {
       // "Para a lixeira" só existe no OneDrive e no SharePoint: sem eles, a opção fica desativada (a
@@ -248,14 +318,20 @@ export async function render(root, { params, query, ctx }) {
         ? 'Só para o OneDrive e o SharePoint. Nos repositórios escolhidos (pastas do Windows) a exclusão é sempre definitiva: arquivos excluídos pela rede não vão para a Lixeira.'
         : 'Vale no OneDrive e no SharePoint (Lixeira do site). Nas pastas do Windows a exclusão é sempre definitiva: arquivos excluídos pela rede não vão para a Lixeira.';
     }
-    form.elements.amount.max = String(UNITS[retention.unit]?.max || 100);
+    if (!byDateNow) form.elements.amount.max = String(UNITS[retention.unit]?.max || 100);
     const cutoff = cutoffPreview(retention);
     const limit = retention.maxDeletions;
     const limitText = !deletingNow ? '' : limit === null ? ' Informe um limite de exclusões válido (0 = sem limite).' : limit ? ` No máximo ${deletionsText(limit)} por execução.` : ' Sem limite de exclusões por execução.';
+    const folderCount = retention.folders?.length || 0;
+    const scoped = new Set((retention.folders || []).map((f) => f.repositoryId)).size;
+    const others = checkedTargets().length > scoped ? '; nos demais repositórios marcados, em todas as pastas' : '';
+    const where = mail || !folderCount ? '' : ` Somente ${folderCount === 1 ? 'na pasta informada' : `nas ${folderCount} pastas informadas`} (e subpastas)${others}.`;
     const content = cutoff
-      ? html`<div class="preview-title">${icon('clock')} <b>${describeRetention(retention, kind)}</b></div>
-          <div class="muted small">Se executada hoje, a política ${deletingNow ? 'excluiria' : 'listaria'} os ${EXPIRES[c](cutoff.toLocaleDateString('pt-BR'))}.${limitText}</div>`
-      : html`<div class="danger-text small">${icon('alert')} Informe a idade máxima: de 1 a ${UNITS[retention.unit]?.max || 100} ${UNITS[retention.unit]?.many || 'anos'}.</div>`;
+      ? html`<div class="preview-title">${icon('clock')} <b>${describeRetention({ ...retention, folders: retention.folders?.map((f) => ({ ...f, path: shortFolder(f) })) }, kind)}</b></div>
+          <div class="muted small">${byDateNow ? 'Em cada execução' : 'Se executada hoje'}, a política ${deletingNow ? 'excluiria' : 'listaria'} os ${EXPIRES[c](cutoff.toLocaleDateString('pt-BR'))}.${where}${limitText}</div>`
+      : byDateNow
+        ? html`<div class="danger-text small">${icon('alert')} Informe a data de corte: de 02/01/1980 até hoje (datas futuras não valem).</div>`
+        : html`<div class="danger-text small">${icon('alert')} Informe a idade máxima: de 1 a ${UNITS[retention.unit]?.max || 100} ${UNITS[retention.unit]?.many || 'anos'}.</div>`;
     // A prévia é uma região "aria-live": só é redesenhada quando o texto muda.
     if (content.value !== lastPreview) {
       lastPreview = content.value;
@@ -300,10 +376,16 @@ export async function render(root, { params, query, ctx }) {
     }
     if (targetIds.length === 0) return toast(mail ? 'Selecione ao menos uma conexão de e-mail.' : 'Selecione ao menos um repositório.', 'error');
     if (!cutoffPreview(retention)) {
+      if (retention.mode === 'date') {
+        form.elements.since.focus();
+        return toast('Informe a data de corte: de 02/01/1980 até hoje (datas futuras não valem).', 'error');
+      }
       form.elements.amount.focus();
       return toast(`Informe a idade máxima: de 1 a ${UNITS[retention.unit].max} ${UNITS[retention.unit].many}.`, 'error');
     }
-    if (!mail && retention.criterion === 'accessed' && cloudChosen()) return toast('O OneDrive e o SharePoint não informam o último acesso: escolha outro critério.', 'error');
+    if (!mail && ACCESS_CRITERIA.has(retention.criterion) && cloudChosen()) {
+      return toast('O OneDrive e o SharePoint não informam o último acesso (abertura) de cada arquivo: escolha outro critério.', 'error');
+    }
     if (retention.maxDeletions === null) {
       // Só vale com a exclusão (o campo fica escondido em "Somente listar"): o padrão é mantido.
       if (!deletingNow) retention.maxDeletions = policy?.retention?.maxDeletions ?? DEFAULT_MAX_DELETIONS;

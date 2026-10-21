@@ -336,7 +336,8 @@ export class TeamsScanner {
       countDeletion(this.stats, status);
       if (status === 'failed') this.error(conv.path, `Falha ao excluir a mensagem "${p.subject || '(sem assunto)'}": ${r.error}`);
       const item = `${conv.path} › ${p.subject || '(sem assunto)'}`;
-      this.emit({ type: 'deletions', items: [deletionEvent(recordId, { status, error: r.ok ? null : r.error, note: r.note }, { mode: 'auto', method: 'teams', by: this.deletedBy, item })] });
+      const target = { type: 'teams', sourceId: source.id, sourceName: source.name, folder: conv.path };
+      this.emit({ type: 'deletions', items: [deletionEvent(recordId, { status, error: r.ok ? null : r.error, note: r.note }, { mode: 'auto', method: 'teams', by: this.deletedBy, item, target })] });
       this.progress();
     };
     let failure = source.allowDelete ? null : 'A exclusão não está permitida nesta conexão.';

@@ -300,7 +300,7 @@ export class DrivesConnector extends GraphClient {
    * para cada pasta lida e { type: 'error', path, error } para pastas que não puderam ser lidas.
    * Atalhos para itens de outras bibliotecas ("Adicionar atalho a Meus arquivos") são ignorados.
    */
-  async *walk(drive, { isExcluded = () => false, shouldStop = () => false } = {}) {
+  async *walk(drive, { isExcluded = () => false, shouldStop = () => false, allowDir = () => true, allowFile = () => true } = {}) {
     const stack = [{ id: null, rel: '' }];
     while (stack.length > 0) {
       if (shouldStop()) return;
@@ -316,8 +316,10 @@ export class DrivesConnector extends GraphClient {
             if (item.remoteItem) continue;
             const rel = folder.rel ? `${folder.rel}/${item.name}` : item.name;
             if (isExcluded(item.name, rel)) continue;
-            if (item.folder || item.package) subdirs.push({ id: item.id, rel });
-            else if (item.file) yield { type: 'file', item, relativePath: rel };
+            // allowDir/allowFile: só as pastas escolhidas na política (e as que levam até elas).
+            if (item.folder || item.package) {
+              if (allowDir(rel)) subdirs.push({ id: item.id, rel });
+            } else if (item.file && allowFile(rel)) yield { type: 'file', item, relativePath: rel };
           }
           if (shouldStop()) return;
           url = this.next(page);

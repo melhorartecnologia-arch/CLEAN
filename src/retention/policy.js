@@ -1,12 +1,19 @@
+import path from 'node:path';
+
 // Políticas de retenção: arquivos e mensagens mais antigos que a idade máxima, pelo critério de data
 // escolhido, são listados no relatório e — se a política excluir — eliminados.
 //
 // Retenção (depois de validada):
-//   { criterion, amount, unit: 'days' | 'months' | 'years',
-//     patterns: ['*.tmp', ...]   // arquivos: só estes nomes (vazio: todos)
-//     includeTrash, includeJunk  // e-mail: inclui a Lixeira e o Lixo Eletrônico
+//   { criterion,
+//     amount, unit: 'days' | 'months' | 'years'   // idade máxima (o corte anda a cada execução), ou
+//     since: 'AAAA-MM-DD',                        // data fixa: sem uso desde esse dia (00:00, hora do servidor)
 //     maxDeletions,              // limite de exclusões por execução (0: sem limite)
-//     deleteMode: 'permanent' | 'trash' }
+//     deleteMode: 'permanent' | 'trash',
+//     patterns: ['*.tmp', ...]   // arquivos: só estes nomes (vazio: todos)
+//     folders: [{ repositoryId, path }]  // arquivos: só estas pastas (relativas à raiz; ausente: tudo)
+//     includeTrash, includeJunk  // e-mail: inclui a Lixeira e o Lixo Eletrônico }
+// As chaves novas (since, folders) só aparecem quando usadas: uma política salva antes delas continua
+// com o mesmo JSON (o agendador compara a política da execução com a salva, scheduler.js).
 // A data de corte ("cutoff") é calculada quando a análise é criada: itens com a data do critério
 // anterior a ela estão expirados.
 
@@ -23,6 +30,11 @@ export const FILE_CRITERIA = {
     label: 'Sem uso (nenhuma data recente)',
     phrase: 'sem uso',
     hint: 'O mais seguro: o arquivo só expira se a modificação, o último acesso e a criação forem todos mais antigos que o limite.',
+  },
+  'opened-or-modified': {
+    label: 'Sem abertura nem modificação',
+    phrase: 'sem abertura nem modificação',
+    hint: 'A data mais recente entre a última abertura (último acesso) e a última modificação; a criação não conta. O último acesso só é confiável se o Windows o registrar no servidor de arquivos. Não disponível no OneDrive e no SharePoint.',
   },
   modified: { label: 'Última modificação', phrase: 'sem modificação', hint: 'Data em que o conteúdo foi alterado pela última vez (confiável em qualquer servidor).' },
   accessed: {
@@ -44,36 +56,54 @@ export const UNITS = {
 };
 
 const MAX_PATTERNS = 100;
+const MAX_FOLDERS = 200;
 export const DEFAULT_MAX_DELETIONS = 1000;
 const DAY = 86400000;
+// Critérios que dependem do último acesso (abertura), que o OneDrive e o SharePoint não informam.
+const ACCESS_CRITERIA = new Set(['accessed', 'opened-or-modified']);
 
 const toInt = (value) => (typeof value === 'number' ? value : typeof value === 'string' && /^\s*\d+\s*$/.test(value) ? Number(value) : NaN);
 
 /**
  * Valida a retenção de uma política. kind: 'files' | 'mail'; cloud: algum repositório do OneDrive
- * ou do SharePoint (sem data de último acesso).
+ * ou do SharePoint (sem data de último acesso); targets: os repositórios da política (para validar as
+ * pastas); now: o "agora" da data fixa (que não pode estar no futuro).
  */
-export function sanitizeRetention(input, kind, { cloud = false } = {}) {
+export function sanitizeRetention(input, kind, { cloud = false, targets = null, now = new Date() } = {}) {
   const r = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
   const mail = kind === 'mail';
   const criteria = mail ? MAIL_CRITERIA : FILE_CRITERIA;
   const criterion = r.criterion === undefined || r.criterion === null || r.criterion === '' ? (mail ? 'received' : 'used') : r.criterion;
   if (!Object.hasOwn(criteria, criterion)) throw new RetentionError('Escolha o critério de data da política.');
-  if (criterion === 'accessed' && cloud) {
-    throw new RetentionError('O OneDrive e o SharePoint não informam o último acesso de cada arquivo: use "Sem uso", "Última modificação" ou "Criação".');
+  if (ACCESS_CRITERIA.has(criterion) && cloud) {
+    throw new RetentionError(
+      criterion === 'accessed'
+        ? 'O OneDrive e o SharePoint não informam o último acesso de cada arquivo: use "Sem uso", "Última modificação" ou "Criação".'
+        : 'O OneDrive e o SharePoint não informam a última abertura (último acesso) de cada arquivo: use "Sem uso", "Última modificação" ou "Criação".',
+    );
   }
-  const unit = r.unit === undefined || r.unit === null || r.unit === '' ? 'years' : r.unit;
-  if (!Object.hasOwn(UNITS, unit)) throw new RetentionError('Escolha a unidade da idade máxima: dias, meses ou anos.');
-  const amount = toInt(r.amount);
-  if (!Number.isInteger(amount) || amount < 1 || amount > UNITS[unit].max) {
-    throw new RetentionError(`Informe a idade máxima: de 1 a ${UNITS[unit].max} ${UNITS[unit].many}.`);
+  // Corte: idade máxima (relativa a cada execução) ou data fixa ("sem uso desde"). Sem "mode", vale a
+  // forma salva: com "since", data fixa.
+  const byDate = r.mode === 'date' || (r.mode !== 'age' && typeof r.since === 'string' && r.since.trim() !== '');
+  let cut;
+  if (byDate) {
+    cut = { since: sinceField(r.since, now, mail) };
+  } else {
+    const unit = r.unit === undefined || r.unit === null || r.unit === '' ? 'years' : r.unit;
+    if (!Object.hasOwn(UNITS, unit)) throw new RetentionError('Escolha a unidade da idade máxima: dias, meses ou anos.');
+    const amount = toInt(r.amount);
+    if (!Number.isInteger(amount) || amount < 1 || amount > UNITS[unit].max) {
+      throw new RetentionError(`Informe a idade máxima: de 1 a ${UNITS[unit].max} ${UNITS[unit].many}.`);
+    }
+    cut = { amount, unit };
   }
   const maxDeletions = r.maxDeletions === undefined || r.maxDeletions === null || r.maxDeletions === '' ? DEFAULT_MAX_DELETIONS : toInt(r.maxDeletions);
   if (!Number.isInteger(maxDeletions) || maxDeletions < 0 || maxDeletions > 10_000_000) {
     throw new RetentionError('Informe o limite de exclusões por execução (0 = sem limite).');
   }
-  const out = { criterion, amount, unit, maxDeletions, deleteMode: r.deleteMode === 'trash' ? 'trash' : 'permanent' };
+  const out = { criterion, ...cut, maxDeletions, deleteMode: r.deleteMode === 'trash' ? 'trash' : 'permanent' };
   if (mail) {
+    if (Array.isArray(r.folders) && r.folders.length) throw new RetentionError('A escolha de pastas vale para arquivos (repositórios), e não para e-mails.');
     out.includeTrash = r.includeTrash !== false;
     out.includeJunk = r.includeJunk !== false;
   } else {
@@ -82,12 +112,200 @@ export function sanitizeRetention(input, kind, { cloud = false } = {}) {
     if (patterns.length > MAX_PATTERNS) throw new RetentionError(`Informe no máximo ${MAX_PATTERNS} padrões de nomes.`);
     if (patterns.some((p) => p.length > 200 || /[\\/]/.test(p))) throw new RetentionError('Os padrões de nomes valem para o nome do arquivo (sem pastas), com até 200 caracteres. Ex.: *.tmp');
     out.patterns = patterns;
+    const folders = sanitizeFolders(r.folders, { targets });
+    if (folders.length) out.folders = folders;
   }
   return out;
 }
 
-/** Data de corte: agora menos a idade máxima (meses e anos pelo calendário, na hora local). */
+/** "AAAA-MM-DD" válido (calendário real), a partir de 02/01/1980 e não no futuro (hora do servidor). */
+function sinceField(value, now, mail) {
+  const text = String(value ?? '').trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!m) throw new RetentionError('Informe a data de corte (dia, mês e ano).');
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const date = new Date(y, mo - 1, d);
+  if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) throw new RetentionError(`Data de corte inválida: ${text}.`);
+  if (y < 1980 || (y === 1980 && mo === 1 && d < 2)) throw new RetentionError('A data de corte deve ser a partir de 02/01/1980 (datas anteriores são tratadas como desconhecidas).');
+  if (+date > +now) {
+    throw new RetentionError(`A data de corte não pode estar no futuro: ${mail ? 'todas as mensagens seriam consideradas antigas' : 'todos os arquivos seriam considerados sem uso'}.`);
+  }
+  return text;
+}
+
+/** Instante da data fixa: 00:00 do dia, na hora local do servidor (e não UTC). */
+export function sinceDate(since) {
+  const [y, m, d] = String(since).split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+/** "AAAA-MM-DD" → "DD/MM/AAAA" (sem passar por Date: sem desvio de fuso). */
+export function dateBr(text) {
+  const [y, m, d] = String(text).split('-');
+  return `${d}/${m}/${y}`;
+}
+
+// ---------- pastas da política ----------
+
+const winStyle = (p) => /^[a-z]:[\\/]/i.test(p) || /^[\\/]{2}[^\\/]+[\\/]+[^\\/]+/.test(p);
+const isCloudType = (type) => type === 'onedrive' || type === 'sharepoint';
+// Nomes de pasta proibidos no Windows/SharePoint ou perigosos (curingas, fluxos alternativos ":").
+const BAD_SEGMENT = /[*?"<>|:\u0000-\u001f]/;
+
+/**
+ * Caminho de pasta relativo à raiz do repositório, com "/" (vazio: a raiz, o repositório inteiro).
+ * Aceita relativo (Financeiro\2019, Documentos/Projetos) ou, nas pastas do Windows, o caminho
+ * completo dentro do repositório (D:\Dados\Financeiro\2019). Lança RetentionError.
+ */
+export function folderRelative(repo, value) {
+  let text = String(value ?? '').trim();
+  if (!text) throw new RetentionError(`Informe o caminho da pasta do repositório "${repo.name}".`);
+  if (text.length > 1000) throw new RetentionError('O caminho de uma pasta deve ter no máximo 1000 caracteres.');
+  if (!isCloudType(repo.type)) {
+    const win = winStyle(repo.path);
+    const p = win ? path.win32 : path.posix;
+    // Caminho completo: C:\..., \\servidor\..., ou /... num repositório fora do Windows.
+    const absolute = winStyle(text) || (!win && text.startsWith('/'));
+    if (absolute) {
+      const rel = p.relative(p.resolve(repo.path), p.resolve(text));
+      if (rel === '') return '';
+      if (rel === '..' || rel.startsWith(`..${p.sep}`) || p.isAbsolute(rel)) {
+        throw new RetentionError(`A pasta "${text}" não fica dentro do repositório "${repo.name}" (${repo.path}). Informe uma pasta dentro dele.`);
+      }
+      text = rel;
+    }
+  } else if (/^https?:\/\//i.test(text)) {
+    throw new RetentionError('Nas pastas do OneDrive e do SharePoint, informe o caminho dentro da biblioteca (ex.: Documentos/Projetos), e não o endereço.');
+  }
+  const segments = text.split(/[\\/]+/).filter(Boolean);
+  if (!segments.length) return '';
+  for (const s of segments) {
+    if (s === '.' || s === '..') throw new RetentionError(`Caminho de pasta inválido: "${text}" (sem "." nem "..").`);
+    if (BAD_SEGMENT.test(s) || /[. ]$/.test(s) || s.length > 255) {
+      throw new RetentionError(`Caminho de pasta inválido: "${text}". Informe a pasta sem curingas (* ?), sem os caracteres : " < > | e sem ponto ou espaço no fim dos nomes.`);
+    }
+  }
+  return segments.join('/');
+}
+
+/** Chave de comparação de um caminho relativo de pasta ("/" como separador). */
+export function folderKey(rel, insensitive) {
+  const n = String(rel ?? '').replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '');
+  return insensitive ? n.toLowerCase() : n;
+}
+
+/** Comparação sem diferenciar maiúsculas: pastas do Windows e da nuvem. */
+export const foldersInsensitive = (repo) => isCloudType(repo?.type) || winStyle(repo?.path || '');
+
+/**
+ * Valida as pastas da política: [{ repositoryId, path }], com o caminho relativo à raiz do
+ * repositório. targets: os repositórios da política (obrigatório quando há pastas: sem eles a
+ * validação falha, em vez de valer para o repositório inteiro). Pastas repetidas ou dentro de outra
+ * pasta escolhida saem; a raiz (o caminho do próprio repositório) vale o repositório inteiro.
+ * O resultado é ordenado: validar de novo devolve o mesmo JSON.
+ */
+export function sanitizeFolders(input, { targets = null } = {}) {
+  const items = Array.isArray(input) ? input : [];
+  if (!items.length) return [];
+  if (!Array.isArray(targets)) throw new RetentionError('Não foi possível conferir as pastas da política: os repositórios não foram informados.');
+  if (items.length > MAX_FOLDERS) throw new RetentionError(`Informe no máximo ${MAX_FOLDERS} pastas.`);
+  const byId = new Map(targets.filter(Boolean).map((t) => [t.id, t]));
+  const perRepo = new Map(); // repositoryId → [{ path, key }]
+  const whole = new Set();
+  for (const raw of items) {
+    const item = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const repo = byId.get(item.repositoryId);
+    if (!repo) throw new RetentionError('Uma das pastas é de um repositório que não está marcado na política.');
+    const rel = folderRelative(repo, item.path);
+    if (rel === '') {
+      whole.add(repo.id);
+      continue;
+    }
+    const list = perRepo.get(repo.id) || perRepo.set(repo.id, []).get(repo.id);
+    list.push({ path: rel, key: folderKey(rel, foldersInsensitive(repo)) });
+  }
+  const out = [];
+  for (const id of [...perRepo.keys()].sort()) {
+    if (whole.has(id)) continue; // a raiz escolhida: o repositório inteiro
+    const sorted = perRepo.get(id).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const kept = [];
+    for (const f of sorted) {
+      // Repetida ou dentro de outra pasta escolhida: já está coberta (não lista nem exclui duas vezes).
+      if (kept.some((k) => f.key === k.key || f.key.startsWith(`${k.key}/`))) continue;
+      kept.push(f);
+    }
+    for (const f of kept) out.push({ repositoryId: id, path: f.path });
+  }
+  return out;
+}
+
+/** Pastas da política num repositório (relativas, com "/"); null: o repositório inteiro. */
+export function foldersOf(retention, repositoryId) {
+  const list = (retention?.folders || []).filter((f) => f.repositoryId === repositoryId).map((f) => f.path);
+  return list.length ? list : null;
+}
+
+/**
+ * Escopo de pastas: allowDir(rel) — a pasta está dentro de uma pasta da política ou é uma das
+ * pastas acima dela (é preciso passar por ela); allowFile(rel) — o arquivo está dentro de uma pasta
+ * da política; folderOf(rel) — a pasta da política que contém o arquivo. rel: caminho relativo à
+ * raiz (separador \ ou /). Sem pastas válidas, nada é permitido (nunca vale o repositório inteiro).
+ */
+export function folderScope(paths, { insensitive = false } = {}) {
+  const list = (paths || []).map((p) => folderKey(p, insensitive)).filter(Boolean);
+  const folderOf = (rel) => {
+    const r = folderKey(rel, insensitive);
+    return list.find((f) => r.startsWith(`${f}/`)) ?? null;
+  };
+  return {
+    folders: list,
+    allowDir: (rel) => {
+      const r = folderKey(rel, insensitive);
+      return list.some((f) => r === f || r.startsWith(`${f}/`) || f.startsWith(`${r}/`));
+    },
+    allowFile: (rel) => folderOf(rel) !== null,
+    folderOf,
+  };
+}
+
+/**
+ * Pastas escolhidas numa biblioteca do OneDrive/SharePoint: cada uma vale pelo caminho dentro da
+ * biblioteca ou com o nome dela na frente (Documentos/Projetos); o nome da própria biblioteca vale a
+ * biblioteca inteira (null). Devolve { rels: [{ spec, rel }], scope } (sem diferenciar maiúsculas).
+ */
+export function cloudFolderScope(specs, library) {
+  const lib = folderKey(library, true);
+  const rels = [];
+  for (const spec of specs) {
+    const key = folderKey(spec, true);
+    if (key === lib) return null;
+    if (key.startsWith(`${lib}/`)) rels.push({ spec, rel: key.slice(lib.length + 1) });
+    rels.push({ spec, rel: key });
+  }
+  return { rels, scope: folderScope(rels.map((r) => r.rel), { insensitive: true }) };
+}
+
+/**
+ * O arquivo (registro de um relatório de retenção) está dentro das pastas escolhidas na política?
+ * Sem pastas para o repositório dele, sim. Conferência pelo caminho (a das pastas do Windows pelo
+ * caminho real é feita em deleteFile, com `within`).
+ */
+export function recordInScope(retention, record) {
+  const specs = foldersOf(retention, record.repositoryId);
+  if (!specs) return true;
+  if (record.cloud) {
+    const cloud = cloudFolderScope(specs, record.cloud.library || '');
+    return cloud === null || cloud.scope.allowFile(record.relativePath || '');
+  }
+  return folderScope(specs, { insensitive: process.platform === 'win32' }).allowFile(record.relativePath || '');
+}
+
+/**
+ * Data de corte: a data fixa (00:00 do dia, hora local) ou agora menos a idade máxima (meses e anos
+ * pelo calendário, na hora local).
+ */
 export function cutoffDate(retention, now = new Date()) {
+  if (retention.since) return sinceDate(retention.since);
   const d = new Date(now);
   if (retention.unit === 'years' || retention.unit === 'months') {
     const months = retention.unit === 'years' ? retention.amount * 12 : retention.amount;
@@ -116,7 +334,8 @@ export function fileDate(st, criterion) {
   if (criterion === 'modified') return modified;
   if (criterion === 'accessed') return accessed;
   if (criterion === 'created') return created;
-  const known = [modified, accessed, created].filter((v) => v !== null);
+  // Abertura ou modificação: a mais recente das duas; a criação (ou a cópia) não conta.
+  const known = (criterion === 'opened-or-modified' ? [modified, accessed] : [modified, accessed, created]).filter((v) => v !== null);
   return known.length ? Math.max(...known) : null;
 }
 
@@ -126,7 +345,8 @@ export function cloudDate(item, criterion) {
   const created = valid(Date.parse(item.createdDateTime));
   if (criterion === 'modified') return modified;
   if (criterion === 'created') return created;
-  if (criterion === 'accessed') return null;
+  // Sem último acesso na nuvem: nunca expira por um critério que dependa dele.
+  if (ACCESS_CRITERIA.has(criterion)) return null;
   const known = [modified, created].filter((v) => v !== null);
   return known.length ? Math.max(...known) : null;
 }
@@ -169,8 +389,9 @@ export function limitWarning(
   return `${items} não foram excluíd${o}s nesta execução: as vagas do limite ficaram reservadas para exclusões que falharam. ${next}`;
 }
 
-/** "5 anos", "1 mês", "30 dias". */
+/** "5 anos", "1 mês", "30 dias" (na data fixa: "desde DD/MM/AAAA"). */
 export function amountText(retention) {
+  if (retention.since) return `desde ${dateBr(retention.since)}`;
   const u = UNITS[retention.unit] || UNITS.years;
   return `${retention.amount} ${retention.amount === 1 ? u.one : u.many}`;
 }
@@ -188,12 +409,24 @@ export function describeRetention(retention, kind) {
           : junk
             ? 'inclusive o Lixo Eletrônico; sem a Lixeira'
             : 'sem a Lixeira e o Lixo Eletrônico';
-    return `Mensagens recebidas há mais de ${amountText(retention)} (${where})`;
+    const when = retention.since ? `antes de ${dateBr(retention.since)}` : `há mais de ${amountText(retention)}`;
+    return `Mensagens recebidas ${when} (${where})`;
   }
   const c = FILE_CRITERIA[retention.criterion] || FILE_CRITERIA.used;
-  const verb = retention.criterion === 'created' ? 'criados há mais de' : `${c.phrase} há mais de`;
+  const created = retention.criterion === 'created';
+  const rule = retention.since
+    ? `${created ? 'criados antes de' : `${c.phrase} desde`} ${dateBr(retention.since)}`
+    : `${created ? 'criados há mais de' : `${c.phrase} há mais de`} ${amountText(retention)}`;
   const only = retention.patterns?.length ? ` (somente ${retention.patterns.slice(0, 5).join(', ')}${retention.patterns.length > 5 ? '…' : ''})` : '';
-  return `Arquivos ${verb} ${amountText(retention)}${only}`;
+  return `Arquivos ${rule}${only}${foldersText(retention.folders)}`;
+}
+
+/** " — somente nas pastas A, B e mais 2" (vazio sem pastas). */
+export function foldersText(folders) {
+  if (!folders?.length) return '';
+  const names = folders.slice(0, 3).map((f) => f.path);
+  const more = folders.length > 3 ? ` e mais ${folders.length - 3}` : '';
+  return ` — somente ${folders.length === 1 ? 'na pasta' : 'nas pastas'} ${names.join(', ')}${more}`;
 }
 
 /**

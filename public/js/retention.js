@@ -7,6 +7,12 @@ export const FILE_CRITERIA = {
     date: 'Data mais recente (uso)',
     hint: 'O mais seguro: o arquivo só expira se a modificação, o último acesso e a criação forem todos mais antigos que o limite.',
   },
+  'opened-or-modified': {
+    label: 'Sem abertura nem modificação',
+    short: 'sem abertura nem modificação',
+    date: 'Última abertura ou modificação',
+    hint: 'A data mais recente entre a última abertura (último acesso) e a última modificação; a criação não conta. O último acesso só é confiável se o Windows o registrar no servidor de arquivos. Não disponível no OneDrive e no SharePoint.',
+  },
   modified: {
     label: 'Última modificação',
     short: 'sem modificação',
@@ -34,8 +40,18 @@ export const UNITS = {
 
 export const DEFAULT_MAX_DELETIONS = 1000;
 
-/** "5 anos", "1 mês", "30 dias". */
+/** Critérios que dependem do último acesso (sem esse dado no OneDrive e no SharePoint). */
+export const ACCESS_CRITERIA = new Set(['accessed', 'opened-or-modified']);
+
+/** "AAAA-MM-DD" → "DD/MM/AAAA" (sem passar por Date: sem desvio de fuso). */
+export function dateBr(text) {
+  const [y, m, d] = String(text).split('-');
+  return `${d}/${m}/${y}`;
+}
+
+/** "5 anos", "1 mês", "30 dias" (na data fixa: "desde DD/MM/AAAA"). */
 export function amountText(r) {
+  if (r.since) return `desde ${dateBr(r.since)}`;
   const u = UNITS[r.unit] || UNITS.years;
   return `${r.amount} ${Number(r.amount) === 1 ? u.one : u.many}`;
 }
@@ -52,17 +68,47 @@ export function describeRetention(r, kind) {
           : r.includeJunk
             ? 'inclusive o Lixo Eletrônico; sem a Lixeira'
             : 'sem a Lixeira e o Lixo Eletrônico';
-    return `Mensagens recebidas há mais de ${amountText(r)} (${where})`;
+    const when = r.since ? `antes de ${dateBr(r.since)}` : `há mais de ${amountText(r)}`;
+    return `Mensagens recebidas ${when} (${where})`;
   }
   const c = FILE_CRITERIA[r.criterion] || FILE_CRITERIA.used;
-  const verb = r.criterion === 'created' ? 'criados há mais de' : `${c.short} há mais de`;
+  const created = r.criterion === 'created';
+  const rule = r.since
+    ? `${created ? 'criados antes de' : `${c.short} desde`} ${dateBr(r.since)}`
+    : `${created ? 'criados há mais de' : `${c.short} há mais de`} ${amountText(r)}`;
   const patterns = r.patterns || [];
   const only = patterns.length ? ` (somente ${patterns.slice(0, 5).join(', ')}${patterns.length > 5 ? '…' : ''})` : '';
-  return `Arquivos ${verb} ${amountText(r)}${only}`;
+  return `Arquivos ${rule}${only}${foldersText(r.folders)}`;
 }
 
-/** Data de corte de hoje (prévia no formulário): agora menos a idade máxima, pelo calendário. */
+/** " — somente nas pastas A, B e mais 2" (vazio sem pastas). */
+export function foldersText(folders) {
+  if (!folders?.length) return '';
+  const names = folders.slice(0, 3).map((f) => f.path);
+  const more = folders.length > 3 ? ` e mais ${folders.length - 3}` : '';
+  return ` — somente ${folders.length === 1 ? 'na pasta' : 'nas pastas'} ${names.join(', ')}${more}`;
+}
+
+/**
+ * Instante de uma data fixa "AAAA-MM-DD" (00:00 do dia na hora local) ou null se a data for
+ * inválida, anterior a 02/01/1980 ou futura (o servidor recusa as mesmas).
+ */
+export function sinceInstant(text, now = new Date()) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(text ?? '').trim());
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const date = new Date(y, mo - 1, d);
+  if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) return null;
+  if (y < 1980 || (y === 1980 && mo === 1 && d < 2) || +date > +now) return null;
+  return date;
+}
+
+/**
+ * Data de corte (prévia no formulário): a data fixa ou agora menos a idade máxima, pelo calendário.
+ * null quando a regra está incompleta ou é inválida.
+ */
 export function cutoffPreview(r, now = new Date()) {
+  if (r.mode === 'date' || (r.mode !== 'age' && r.since)) return sinceInstant(r.since, now);
   const amount = Number(r.amount);
   if (!Number.isInteger(amount) || amount < 1 || !UNITS[r.unit] || amount > UNITS[r.unit].max) return null;
   const d = new Date(now);

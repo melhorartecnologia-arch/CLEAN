@@ -24,7 +24,7 @@ import {
   redraw,
 } from '../ui.js';
 import { replaceQuery, setActiveNav } from '../nav.js';
-import { FILE_CRITERIA, MAIL_CRITERIA, describeRetention, ageText, deletionModeText, deletionsText } from '../retention.js';
+import { FILE_CRITERIA, MAIL_CRITERIA, describeRetention, ageText, deletionModeText, deletionsText, dateBr } from '../retention.js';
 import { categoryLabel, describeFileTypes } from '../file-types.js';
 
 const CONTENT_STATUS = {
@@ -1928,10 +1928,22 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const mode = P.retention ? deletionModeText(scan.kind, scan.retention, (scan.summary?.repositories || []).map((r) => r.type || 'local')) : '';
     const limit = scan.retention?.maxDeletions ? `, até ${deletionsText(scan.retention.maxDeletions)} por execução` : '';
     const blocked = scan.deletionBlocked ? ` · exclusão desativada nesta execução: ${scan.deletionBlocked}` : '';
+    // Data fixa: o dia escolhido na política (00:00 no servidor); idade máxima: o instante calculado.
+    const cutoffWhen = scan.retention?.since
+      ? html`<b>${dateBr(scan.retention.since)}</b> (data fixa)`
+      : html`<b>${fmtServerDateTime(scan.retention?.cutoff, { weekday: false })}</b>`;
     const cutoff = P.retention
-      ? html`<div class="sub">Expiram ${P.o === 'a' ? 'as mensagens' : 'os arquivos'} com a data do critério anterior a <b>${fmtServerDateTime(scan.retention.cutoff, { weekday: false })}</b>${scan.options?.deleteMatches
+      ? html`<div class="sub">Expiram ${P.o === 'a' ? 'as mensagens' : 'os arquivos'} com a data do critério anterior a ${cutoffWhen}${scan.options?.deleteMatches
           ? ` · ${mode}${limit}${scan.deletionRevoked ? ` · exclusão interrompida: ${scan.deletionRevoked}` : ''}`
           : blocked || ' · simulação: nada é excluído'}</div>`
+      : '';
+    // Pastas da política (por repositório); os demais repositórios da análise valem inteiros.
+    const folders = scan.retention?.folders || [];
+    const repoName = (rid) => (scan.summary?.repositories || []).find((r) => r.id === rid)?.name || 'repositório removido';
+    const foldersLine = folders.length
+      ? html`<div class="sub">${icon('folder')} Somente ${folders.length === 1 ? 'na pasta' : 'nas pastas'} ${[...new Set(folders.map((f) => f.repositoryId))]
+          .map((rid) => `${repoName(rid)}: ${folders.filter((f) => f.repositoryId === rid).map((f) => f.path).join(', ')}`)
+          .join(' · ')} (e subpastas)</div>`
       : '';
     // Busca por tipo: exclusão automática (com o limite) ou só a busca, com a revisão pelo relatório.
     const typesLine = P.types
@@ -1955,7 +1967,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           ${scan.scheduleId || period
             ? html`<div class="sub">${scan.scheduleId ? schedule : ''}${scan.scheduleId && period ? ' · ' : ''}${period}</div>`
             : ''}
-          ${cutoff}${typesLine}
+          ${cutoff}${foldersLine}${typesLine}
         </div>
         <div class="actions">
           ${isActive(scan) ? html`<button type="button" class="btn danger" data-action="cancel">${icon('stop')} Cancelar ${noun}</button>` : ''}

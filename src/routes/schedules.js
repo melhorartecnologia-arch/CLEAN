@@ -82,7 +82,7 @@ function parseSchedule(body = {}, { store, existing = null, by }) {
     deleting = body.options?.deleteMatches === true;
   } else if (policy) {
     try {
-      retention = sanitizeRetention(body.retention, kind, { cloud: kind === 'files' && targets.some(isCloudRepo) });
+      retention = sanitizeRetention(body.retention, kind, { cloud: kind === 'files' && targets.some(isCloudRepo), targets });
     } catch (err) {
       if (err instanceof RetentionError) throw bad(err.message);
       throw err;

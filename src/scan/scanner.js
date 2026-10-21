@@ -9,9 +9,9 @@ import { extractFile, extractBuffer } from './extractors/index.js';
 import { OwnerResolver } from './owner.js';
 import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
 import { friendlyError, withTimeout } from './errors.js';
-import { deleteFile, deletionEvent, isWithin, isCloudRepo, guardFor } from './delete.js';
+import { deleteFile, deletionEvent, fileTarget, isWithin, isCloudRepo, guardFor, OUTSIDE_FOLDERS } from './delete.js';
 import { DrivesConnector, person, keptCloudTarget, cloudTarget } from '../cloud/drives.js';
-import { fileDate, cloudDate, ageDays, patternMatcher, limitWarning } from '../retention/policy.js';
+import { fileDate, cloudDate, ageDays, patternMatcher, limitWarning, foldersOf, folderScope, folderKey, cloudFolderScope, recordInScope } from '../retention/policy.js';
 import { typeMatcher, describeFileTypes, categoryOfExtension } from '../types/catalog.js';
 import { detectType, sameContainer, HEADER_BYTES } from '../types/signature.js';
 
@@ -68,6 +68,16 @@ export function createGuard(timeoutMs) {
       holder.fn = null;
     }
   };
+}
+
+
+/**
+ * A pasta escolhida na política (como foi escrita) que corresponde à chave encontrada pelo escopo.
+ * insensitive: comparação sem diferenciar maiúsculas (nuvem e Windows).
+ */
+function specOf(specs, key, insensitive = process.platform === 'win32') {
+  if (!key || !specs) return null;
+  return specs.find((s) => folderKey(s, insensitive) === key || folderKey(s, true).endsWith(`/${key}`)) || key;
 }
 
 function iso(date) {
@@ -172,6 +182,10 @@ export class Scanner {
     // (sem termos: o conteúdo não é lido).
     const r = config.retention || null;
     this.retention = r ? { ...r, cutoffMs: Date.parse(r.cutoff), matchName: patternMatcher(r.patterns || []) } : null;
+    // Pastas escolhidas na política: escopo de cada repositório (local) ou biblioteca (nuvem) e, nas
+    // pastas do Windows, os caminhos completos que a exclusão confere de novo (deleteFile within).
+    this.folderScopes = new Map();
+    this.scopeWithin = new Map();
     // Busca por tipo: arquivos pela extensão (e, se pedido, pelo tipo real no início do arquivo).
     const t = config.fileTypes || null;
     this.typeSearch = t ? { ...t, match: typeMatcher(t), minBytes: Math.round((t.minSizeMB || 0) * 1048576) } : null;
@@ -238,7 +252,8 @@ export class Scanner {
     const started = Date.now();
     if (this.retention) {
       const cutoff = new Date(this.retention.cutoffMs).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
-      this.log('info', `Retenção iniciada em ${this.repositories.length} repositório(s): arquivos com a data do critério anterior a ${cutoff}.`);
+      const fixed = this.retention.since ? ' (data fixa)' : '';
+      this.log('info', `Retenção iniciada em ${this.repositories.length} repositório(s): arquivos com a data do critério anterior a ${cutoff}${fixed}.`);
     } else if (this.typeSearch) {
       this.log('info', `Busca por tipo iniciada em ${this.repositories.length} repositório(s): ${describeFileTypes(this.typeSearch)}.`);
       if (this.typeSearch.checkContent && this.repositories.some(isCloudRepo)) {
@@ -291,10 +306,25 @@ export class Scanner {
       this.log('error', `Repositório "${repo.name}" inacessível: ${friendlyError(err)}`);
       return;
     }
-    this.log('info', `Analisando "${repo.name}" (${repo.path})`);
+    const isExcluded = compileExclusions([...DEFAULT_EXCLUDES, ...(repo.exclude || [])]);
+    // Retenção com pastas escolhidas: só elas são varridas (as demais nem são listadas).
+    const specs = this.retention ? foldersOf(this.retention, repo.id) : null;
+    let scope = null;
+    if (specs) {
+      const valid = await this.checkScopeFolders(repo, specs, isExcluded);
+      if (!valid.length) {
+        this.log('warn', `Repositório "${repo.name}": nenhuma das pastas escolhidas na política pôde ser usada; nada foi analisado nele.`);
+        return;
+      }
+      scope = folderScope(valid, { insensitive: process.platform === 'win32' });
+      this.folderScopes.set(repo.id, scope);
+      this.scopeWithin.set(repo.id, valid.map((rel) => path.join(repo.path, ...rel.split('/'))));
+      this.log('info', `Analisando "${repo.name}" (${repo.path}) somente nas pastas: ${valid.join(', ')}`);
+    } else {
+      this.log('info', `Analisando "${repo.name}" (${repo.path})`);
+    }
     // Na retenção o log de auditoria não é carregado (o último usuário vem do proprietário).
     const auditIndex = this.retention ? null : await this.loadAudit(repo);
-    const isExcluded = compileExclusions([...DEFAULT_EXCLUDES, ...(repo.exclude || [])]);
     // A pasta de dados do CLEAN (com os relatórios, que contêm os próprios termos) não é analisada.
     const dataDir = this.protect.find((p) => p.data)?.path;
     const skipDir = (dir) => {
@@ -302,7 +332,7 @@ export class Scanner {
       this.log('info', `Pasta de dados do CLEAN ignorada: ${dir}`);
       return true;
     };
-    const iterator = walk(repo.path, { isExcluded, skipDir, shouldStop: () => this.cancelled });
+    const iterator = walk(repo.path, { isExcluded, skipDir, shouldStop: () => this.cancelled, ...(scope ? { allowDir: scope.allowDir, allowFile: scope.allowFile } : {}) });
     const worker = async () => {
       for (;;) {
         if (this.cancelled) return;
@@ -331,6 +361,79 @@ export class Scanner {
     await iterator.return?.();
   }
 
+  /**
+   * Retenção: confere as pastas escolhidas num repositório local antes de varrer. Uma pasta que não
+   * existe, não é pasta, é (ou passa por) um atalho, link simbólico ou junção, ou está entre as
+   * pastas ignoradas do repositório fica de fora, com o motivo nos erros — nunca vale o repositório
+   * inteiro no lugar dela. Devolve os caminhos relativos que podem ser varridos.
+   */
+  async checkScopeFolders(repo, specs, isExcluded) {
+    const valid = [];
+    for (const rel of specs) {
+      const parts = rel.split('/');
+      const full = path.join(repo.path, ...parts);
+      let problem = null;
+      let current = repo.path;
+      let relSoFar = '';
+      for (const part of parts) {
+        current = path.join(current, part);
+        relSoFar = relSoFar ? path.join(relSoFar, part) : part;
+        let st;
+        try {
+          st = await fs.lstat(current);
+        } catch (err) {
+          problem = err.code === 'ENOENT' || err.code === 'ENOTDIR' ? 'a pasta escolhida na política não foi encontrada' : `a pasta escolhida na política não pôde ser lida (${friendlyError(err)})`;
+          break;
+        }
+        if (st.isSymbolicLink()) {
+          problem = 'a pasta escolhida na política é (ou passa por) um atalho, link simbólico ou junção; por segurança, ela não foi analisada';
+          break;
+        }
+        if (!st.isDirectory()) {
+          problem = 'o caminho escolhido na política não é uma pasta';
+          break;
+        }
+        if (isExcluded(part, relSoFar)) {
+          problem = 'a pasta escolhida na política está entre as pastas ignoradas do repositório';
+          break;
+        }
+      }
+      if (problem) {
+        this.error(full, `${problem[0].toUpperCase()}${problem.slice(1)}.`);
+        this.stats.gaps++;
+        this.log('warn', `Repositório "${repo.name}": ${problem}: ${full}`);
+        continue;
+      }
+      valid.push(rel);
+    }
+    return valid;
+  }
+
+  /**
+   * Retenção na nuvem: escopo das pastas escolhidas numa biblioteca. Cada pasta vale pelo caminho
+   * dentro da biblioteca ou com o nome dela na frente (Documentos/Projetos); o nome da própria
+   * biblioteca vale a biblioteca inteira (null). reached: pastas encontradas (para avisar das demais).
+   */
+  cloudScope(specs, library, reached) {
+    const cloud = cloudFolderScope(specs, library);
+    if (cloud === null) {
+      // O nome da biblioteca: ela inteira.
+      for (const spec of specs) if (folderKey(spec, true) === folderKey(library, true)) reached.add(spec);
+      return null;
+    }
+    const { rels, scope } = cloud;
+    scope.reach = (dirRel) => {
+      const d = folderKey(dirRel, true);
+      for (const r of rels) if (r.rel === d) reached.add(r.spec);
+    };
+    return scope;
+  }
+
+  /** Retenção na nuvem: o arquivo está dentro das pastas escolhidas (conferido também ao excluir)? */
+  cloudInScope(repo, record) {
+    return recordInScope(this.retention, { ...record, repositoryId: repo.id });
+  }
+
   // ---------------------------------------------------------------------------------------------
   // OneDrive e SharePoint
 
@@ -349,6 +452,10 @@ export class Scanner {
     this.log('info', `Analisando "${repo.name}" (${kind})`);
     const connector = this.cloudConnector(repo);
     const isExcluded = compileExclusions([...DEFAULT_EXCLUDES, ...(repo.exclude || [])]);
+    // Retenção com pastas escolhidas: valem em cada biblioteca (pelo caminho dentro dela).
+    const specs = this.retention ? foldersOf(this.retention, repo.id) : null;
+    const reached = new Set();
+    if (specs) this.log('info', `"${repo.name}": somente nas pastas ${specs.join(', ')}`);
     let skipped = 0;
     try {
       for await (const drive of connector.drives()) {
@@ -366,7 +473,7 @@ export class Scanner {
         }
         // Biblioteca ignorada pelo nome (ex.: "Site Assets") ou pelo caminho ("Documentos/Antigo").
         if (isExcluded(drive.library, drive.library)) continue;
-        await this.scanDrive(repo, connector, drive, isExcluded);
+        await this.scanDrive(repo, connector, drive, isExcluded, specs ? this.cloudScope(specs, drive.library, reached) : null);
         this.stats.libraries++;
         this.progress(true);
       }
@@ -375,15 +482,24 @@ export class Scanner {
       this.error(repo.name, err);
       this.stats.gaps++;
       this.log('error', `Repositório "${repo.name}" inacessível: ${friendlyError(err)}`);
+      return;
+    }
+    // Pasta escolhida que não apareceu em nenhuma biblioteca: provável erro de digitação.
+    for (const spec of specs || []) {
+      if (this.cancelled || reached.has(spec)) continue;
+      this.error(`${repo.name} › ${spec}`, 'A pasta escolhida na política não foi encontrada em nenhuma biblioteca.');
+      this.stats.gaps++;
+      this.log('warn', `"${repo.name}": a pasta escolhida na política "${spec}" não foi encontrada em nenhuma biblioteca.`);
     }
     if (skipped > 20) this.log('info', `${skipped} conta(s) sem OneDrive foram ignoradas.`);
   }
 
-  async scanDrive(repo, connector, drive, isExcluded) {
+  async scanDrive(repo, connector, drive, isExcluded, scope = null) {
     this.current = { repository: repo.name, path: drive.label };
     // Os padrões valem para o caminho dentro da biblioteca e também com o nome dela na frente.
     const excluded = (name, rel) => isExcluded(name, rel) || isExcluded(name, `${drive.library}/${rel}`);
-    const iterator = connector.walk(drive, { isExcluded: excluded, shouldStop: () => this.cancelled });
+    if (scope) this.folderScopes.set(`${repo.id}|${drive.id}`, scope);
+    const iterator = connector.walk(drive, { isExcluded: excluded, shouldStop: () => this.cancelled, ...(scope ? { allowDir: scope.allowDir, allowFile: scope.allowFile } : {}) });
     const worker = async () => {
       for (;;) {
         if (this.cancelled) return;
@@ -394,6 +510,7 @@ export class Scanner {
           if (entry.path === drive.label) this.stats.gaps++; // a raiz da biblioteca não pôde ser listada
         } else if (entry.type === 'dir') {
           this.stats.directories++;
+          scope?.reach(entry.path);
         } else {
           const key = `${drive.label} › ${entry.relativePath}`;
           this.inFlight.add(key);
@@ -528,8 +645,8 @@ export class Scanner {
     };
   }
 
-  /** Campos de um item expirado (retenção), sem termos. */
-  expiredFields(when) {
+  /** Campos de um item expirado (retenção), sem termos. folder: a pasta escolhida que o contém. */
+  expiredFields(when, folder = null) {
     return {
       contentType: null,
       contentStatus: 'not-requested',
@@ -538,7 +655,7 @@ export class Scanner {
       occurrences: 0,
       terms: [],
       matches: [],
-      retention: { criterion: this.retention.criterion, date: iso(new Date(when)), ageDays: ageDays(when) },
+      retention: { criterion: this.retention.criterion, date: iso(new Date(when)), ageDays: ageDays(when), ...(folder ? { folder } : {}) },
     };
   }
 
@@ -546,6 +663,9 @@ export class Scanner {
   async processExpiredFile(repo, entry, st) {
     const r = this.retention;
     if (!r.matchName(entry.name)) return;
+    // Pastas escolhidas: o arquivo precisa estar dentro de uma delas (a varredura já as limita).
+    const scope = this.folderScopes.get(repo.id);
+    if (foldersOf(r, repo.id) && !scope?.allowFile(entry.relativePath)) return;
     const when = fileDate(st, r.criterion);
     if (when === null) {
       this.stats.retentionUnknown++; // sem a data do critério: nunca é excluído
@@ -571,7 +691,7 @@ export class Scanner {
       ownerError: null,
       lastUser: null,
       lastUserSource: null,
-      ...this.expiredFields(when),
+      ...this.expiredFields(when, scope ? specOf(foldersOf(r, repo.id), scope.folderOf(entry.relativePath)) : null),
     };
     if (this.options.resolveOwner) {
       this.pendingOwners.push(record);
@@ -587,6 +707,8 @@ export class Scanner {
     const r = this.retention;
     const { item } = entry;
     if (!r.matchName(item.name)) return;
+    const scope = this.folderScopes.get(`${repo.id}|${drive.id}`);
+    if (scope && !scope.allowFile(entry.relativePath)) return;
     const when = cloudDate(item, r.criterion);
     if (when === null) {
       this.stats.retentionUnknown++;
@@ -595,7 +717,7 @@ export class Scanner {
     if (when >= r.cutoffMs) return;
     this.stats.filesMatched++;
     this.stats.bytesExpired += Number(item.size) || 0;
-    const record = this.cloudRecord(repo, drive, entry, this.expiredFields(when));
+    const record = this.cloudRecord(repo, drive, entry, this.expiredFields(when, scope ? specOf(foldersOf(r, repo.id), scope.folderOf(entry.relativePath), true) : null));
     this.finishRecords([record]);
     await this.deleteRecords([record]);
   }
@@ -898,7 +1020,7 @@ export class Scanner {
       }
       countDeletion(this.stats, result.status);
       if (result.status === 'failed') this.error(record.path, `Falha ao excluir: ${result.error}`);
-      this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: 'auto', method, by: this.deletedBy, item: record.path })] });
+      this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: 'auto', method, by: this.deletedBy, item: record.path, target: fileTarget(record) })] });
     }
   }
 
@@ -938,6 +1060,9 @@ export class Scanner {
       this.stats.deleteProtected++;
       return;
     }
+    // Retenção com pastas escolhidas: na nuvem, confere de novo que o item está dentro delas (nas
+    // pastas do Windows, deleteFile confere pelo caminho e pelo caminho real, com `within`).
+    const outside = this.retention && cloud && !this.cloudInScope(repo, record);
     const limit = this.selection.limit;
     while (limit && this.deleteAttempts >= limit && this.deleteFailures < limit && this.deletesInFlight.size) {
       await Promise.race(this.deletesInFlight);
@@ -950,12 +1075,14 @@ export class Scanner {
     const job = (async () => {
       try {
         if (unverified) return { status: 'failed', error: unverified.error };
+        if (outside) return { status: 'failed', error: OUTSIDE_FOLDERS };
         if (cloud) return await connector.deleteItem(cloudTarget(record), method, { signal: null });
         return await deleteFile(record.path, {
           root: repo.path,
           expected: { size: record.size, modified: record.modified },
           protect: [...this.protect, ...(repo.keep || [])],
           check: this.retention ? (st) => this.stillExpired(st) : null,
+          within: this.retention && foldersOf(this.retention, repo.id) ? this.scopeWithin.get(repo.id) || [] : null,
         });
       } catch (err) {
         return { status: 'failed', error: friendlyError(err) };
@@ -972,7 +1099,7 @@ export class Scanner {
     if (result.status === 'failed') this.deleteFailures++;
     countDeletion(this.stats, result.status);
     if (result.status === 'failed') this.error(record.path, `Falha ao excluir: ${result.error}`);
-    this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: this.selection.mode, method, by: this.deletedBy, item: record.path })] });
+    this.emit({ type: 'deletions', items: [deletionEvent(record.id, result, { mode: this.selection.mode, method, by: this.deletedBy, item: record.path, target: fileTarget(record) })] });
   }
 
   /**

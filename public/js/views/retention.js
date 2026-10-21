@@ -1,6 +1,6 @@
 // Políticas de retenção: listam (e, se configuradas para isso, excluem) os arquivos e as mensagens
-// mais antigos que a idade máxima de cada política. Execução manual ("Simular agora" e "Executar
-// agora") ou agendada.
+// mais antigos que a idade máxima de cada política, ou sem uso desde uma data fixa (em repositórios
+// inteiros ou só em algumas pastas). Execução manual ("Simular agora" e "Executar agora") ou agendada.
 import { get, post, del } from '../api.js';
 import { html, render as paint, icon, toast, confirmDialog, openDialog, fmtNum, fmtServerDateTime, statusBadge, redraw, plural } from '../ui.js';
 import { zoneNote } from '../schedule-form.js';
@@ -64,6 +64,7 @@ export async function render(root, { ctx }) {
       <td>
         ${p.retentionText}
         ${deleting ? html`<div class="muted small">${deletionText(p)}</div>` : ''}
+        ${deleting ? html`<div class="small"><a href="#/exclusoes?politica=${encodeURIComponent(p.id)}">Ver as exclusões desta política</a></div>` : ''}
       </td>
       <td>
         ${p.description}
@@ -98,11 +99,12 @@ export async function render(root, { ctx }) {
     html`<div class="page-head">
         <div>
           <h1>Políticas de retenção</h1>
-          <div class="sub">Eliminam os arquivos e as mensagens mais antigos que a idade máxima de cada política, pela data da última modificação, do último acesso, da criação ou do recebimento.</div>
+          <div class="sub">Eliminam os arquivos (de qualquer tipo) e as mensagens mais antigos que a idade máxima de cada política, ou sem uso desde uma data fixa, pela data da última modificação, da última abertura (último acesso), da criação ou do recebimento — nos repositórios inteiros ou só nas pastas escolhidas.</div>
         </div>
         <div class="actions">
           <a class="btn primary" href="#/retencao/nova">${icon('plus')} Política de arquivos</a>
           <a class="btn primary" href="#/retencao/nova?tipo=email">${icon('plus')} Política de e-mail</a>
+          <a class="btn" href="#/exclusoes">${icon('history')} Registro de exclusões</a>
         </div>
       </div>
       <div class="alert info">${icon('info')}<div>
@@ -120,7 +122,7 @@ export async function render(root, { ctx }) {
         list,
         policies.length === 0
           ? html`<div class="empty">
-              <p>Nenhuma política ainda. Crie uma para eliminar, por exemplo, os arquivos sem uso há mais de 5 anos ou os e-mails com mais de 10 anos.</p>
+              <p>Nenhuma política ainda. Crie uma para eliminar, por exemplo, os arquivos sem uso há mais de 5 anos, os arquivos de uma pasta que não foram abertos nem modificados desde 01/01/2020 ou os e-mails com mais de 10 anos.</p>
               <div class="inline">
                 <a class="btn primary" href="#/retencao/nova" data-action="new-files">${icon('plus')} Política de arquivos</a>
                 <a class="btn" href="#/retencao/nova?tipo=email" data-action="new-mail">${icon('plus')} Política de e-mail</a>

@@ -166,7 +166,7 @@ export function scheduleProblems(store, schedule) {
   if (!retention && lists.length && lists.every((l) => !(l.terms || []).length)) problems.push('As listas de referência do agendamento não têm termos.');
   if (retention) {
     try {
-      sanitizeRetention(schedule.retention, schedule.kind, { cloud: targets.some(isCloudRepo) });
+      sanitizeRetention(schedule.retention, schedule.kind, { cloud: targets.some(isCloudRepo), targets });
     } catch (err) {
       problems.push(`${err.message} Edite a política.`);
     }

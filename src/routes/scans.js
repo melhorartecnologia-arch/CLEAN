@@ -31,7 +31,7 @@ import {
   DELETION_LABELS,
   MAIL_DELETION_LABELS,
 } from '../report/model.js';
-import { deleteFile, deletionEvent, cleanPaths, keptPaths, isCloudRepo, guardMatcher } from '../scan/delete.js';
+import { deleteFile, deletionEvent, fileTarget, cleanPaths, keptPaths, isCloudRepo, guardMatcher, OUTSIDE_FOLDERS } from '../scan/delete.js';
 import { DrivesConnector, keptCloud, keptCloudTarget, coveredByRepo, cloudTarget } from '../cloud/drives.js';
 import { compileExclusions, DEFAULT_EXCLUDES } from '../scan/walker.js';
 import { createConnector } from '../mail/connectors.js';
@@ -49,7 +49,7 @@ import { exportTeamsXlsx, exportTeamsCsv, exportTeamsHtml } from '../report/team
 import { TeamsConnector } from '../teams/connector.js';
 import { RETENTION_EXPORTS } from '../report/retention-exports.js';
 import { TYPE_EXPORTS } from '../report/type-exports.js';
-import { fileDate } from '../retention/policy.js';
+import { fileDate, foldersOf, recordInScope } from '../retention/policy.js';
 
 const byName = (a, b) => a.localeCompare(b, 'pt-BR');
 
@@ -687,8 +687,14 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       const kept = keptCloudTarget(record.cloud, entry.kept);
       // Protegido (e não uma falha ao conferir as proteções no Microsoft 365).
       if (kept && skipProtected && kept !== entry.kept?.unresolved) return { result: null, method, protected: kept.error };
-      return { result: kept ? { status: 'failed', error: kept.error } : await entry.connector.deleteItem(cloudTarget(record), method, { force }), method };
+      if (kept) return { result: { status: 'failed', error: kept.error }, method };
+      // Política com pastas escolhidas: só dentro delas (vale também com "excluir mesmo assim").
+      if (scan.retention && !recordInScope(scan.retention, record)) return { result: { status: 'failed', error: OUTSIDE_FOLDERS }, method };
+      return { result: await entry.connector.deleteItem(cloudTarget(record), method, { force }), method };
     }
+    // Política com pastas escolhidas: as da análise, no caminho atual do repositório (deleteFile confere
+    // pelo caminho e pelo caminho real, também com "excluir mesmo assim").
+    const folders = scan.retention ? foldersOf(scan.retention, repo.id) : null;
     const result = await deleteFile(record.path, {
       root: repo.path,
       expected: { size: record.size, modified: record.modified },
@@ -696,6 +702,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       protect: [...cleanPaths({ dataDir: store.dataDir, appDir: PROJECT_ROOT }), ...keptPaths(repo, store.listRepositories())],
       // Relatório de retenção: o arquivo ainda está expirado pela política (ex.: não foi aberto depois)?
       check: scan.retention ? (st) => expiredCheck(scan.retention, st) : null,
+      within: folders ? folders.map((rel) => path.join(repo.path, ...rel.split('/'))) : null,
     });
     return { result, method };
   }
@@ -780,7 +787,13 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       item = record.path;
       if (result.status === 'changed') return res.status(409).json({ error: `${result.error} Confirme para excluir mesmo assim.`, code: 'changed' });
     }
-    const event = deletionEvent(record.id, result, { mode: 'manual', method, by, item });
+    // O que foi excluído, para o registro geral (que não depende do relatório).
+    const target = mail
+      ? { type: 'mail', sourceId: record.sourceId, sourceName: record.sourceName, mailbox: record.mailbox, folder: record.folder, size: Number(record.size) || 0 }
+      : scan.kind === 'teams'
+        ? { type: 'teams', sourceId: record.sourceId, sourceName: record.sourceName, folder: record.folder }
+        : fileTarget(record);
+    const event = deletionEvent(record.id, result, { mode: 'manual', method, by, item, target });
     const labels = mail || scan.kind === 'teams' ? MAIL_DELETION_LABELS : DELETION_LABELS;
     const outcome = result.status === 'failed' ? `falhou: ${result.error}` : `${labels[result.status].toLowerCase()}${result.note ? ` (${result.note})` : ''}`;
     memo.forget(scan.id);
@@ -1093,7 +1106,7 @@ export function scansRouter({ store, manager, endpoints = {} }) {
           failures = 0;
           folderFailures.set(folder, 0);
         }
-        if (!(await record(deletionEvent(item.id, result, { mode: 'manual', method, by: `${job.by} (exclusão em lote)`, item: item.path })))) {
+        if (!(await record(deletionEvent(item.id, result, { mode: 'manual', method, by: `${job.by} (exclusão em lote)`, item: item.path, target: fileTarget(item) })))) {
           // Sem o registro, nada mais é excluído: uma exclusão não pode ficar sem rastro.
           job.halted = 'falha ao gravar o registro de exclusões (confira o espaço em disco da pasta de dados do CLEAN)';
           break;
