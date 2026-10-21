@@ -12,6 +12,7 @@ import { mailSourcesRouter } from './routes/mail-sources.js';
 import { teamsLiveRouter } from './routes/teams-live.js';
 import { schedulesRouter } from './routes/schedules.js';
 import { intuneRouter } from './routes/intune.js';
+import { deletionsRouter } from './routes/deletions.js';
 import { Scheduler } from './schedule/scheduler.js';
 import { IntuneScheduler } from './intune/scheduler.js';
 import { HttpError } from './routes/validate.js';
@@ -175,6 +176,8 @@ export function createApp({ store, manager, config, scheduler = new Scheduler({ 
   app.locals.stopBulkDeletions = scans.stopBulk;
   api.use('/schedules', schedulesRouter({ store, manager, scheduler }));
   api.use('/intune', intuneRouter({ store, scheduler: intuneScheduler, endpoints: config.mailEndpoints }));
+  // Registro geral de exclusões (todas as análises, inclusive as de relatórios já excluídos).
+  api.use('/deletions', deletionsRouter({ store }));
   api.use((req, res, next) => next(new HttpError(404, 'Rota não encontrada.')));
   // eslint-disable-next-line no-unused-vars
   api.use((err, req, res, next) => {

@@ -28,6 +28,56 @@ async function withRetry(operation) {
 
 const renameWithRetry = (from, to) => withRetry(() => fs.rename(from, to));
 
+// Leitura do registro geral de exclusões: blocos lidos em fluxo e, na leitura de linhas pela
+// posição, o maior trecho lido de uma vez (linhas próximas vêm numa leitura só).
+const LOG_CHUNK = 1024 * 1024;
+const LOG_SPAN = 4 * 1024 * 1024;
+// O registro não existe (ainda) ou o caminho não é um arquivo: lido como vazio.
+const MISSING_LOG = new Set(['ENOENT', 'EISDIR', 'ENOTDIR']);
+
+/** Uma linha NDJSON (bytes de start a end): o objeto, ou null se estiver vazia ou corrompida. */
+function parseLine(buf, start, end) {
+  const text = buf.toString('utf8', start, end);
+  if (!text.trim()) return null;
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch {
+    return null; // linha corrompida: ignora
+  }
+}
+
+/**
+ * Contexto da análise copiado para cada linha do registro geral de exclusões, para que ele continue
+ * completo depois que o relatório for excluído: tipo da análise, finalidade, agendamento ou política
+ * e a regra da política de retenção (só os campos que a análise tiver).
+ */
+function deletionContext(scan) {
+  const r = scan?.retention;
+  const context = {
+    scanKind: scan?.kind || 'files',
+    purpose: r ? 'retention' : scan?.fileTypes ? 'types' : 'terms',
+    scheduleId: scan?.scheduleId || null,
+    scheduleName: scan?.scheduleName || null,
+  };
+  if (r) {
+    const policy = {};
+    const copy = (key) => {
+      if (r[key] !== undefined && r[key] !== null && r[key] !== '') policy[key] = r[key];
+    };
+    copy('criterion');
+    copy('cutoff');
+    if (r.since) copy('since');
+    else {
+      copy('amount');
+      copy('unit');
+    }
+    if (Array.isArray(r.folders) && r.folders.length) policy.folders = r.folders;
+    context.policy = policy;
+  }
+  return context;
+}
+
 export class Store {
   constructor(dataDir) {
     this.dataDir = path.resolve(dataDir);
@@ -354,13 +404,17 @@ export class Store {
 
   /**
    * Registro das exclusões (automáticas e manuais) dos itens de uma análise, copiado também para o
-   * registro geral (data/exclusoes.ndjson). A promessa é rejeitada se a gravação falhar.
+   * registro geral (data/exclusoes.ndjson). No registro geral, cada linha leva também o contexto da
+   * análise (tipo, finalidade, agendamento ou política e a regra da retenção); os campos do evento
+   * prevalecem. A promessa é rejeitada se a gravação falhar.
    */
   async appendDeletions(id, items) {
-    const scanName = this.getScan(id)?.name || '';
+    const scan = this.getScan(id);
+    const scanName = scan?.name || '';
+    const context = deletionContext(scan);
     await Promise.all([
       this.#append(id, 'deletions.ndjson', items, { strict: true }),
-      this.#appendTo(this.deletionLog, items.map((item) => ({ scanId: id, scanName, ...item })), { strict: true }),
+      this.#appendTo(this.deletionLog, items.map((item) => ({ scanId: id, scanName, ...context, ...item })), { strict: true }),
     ]);
   }
 
@@ -368,6 +422,118 @@ export class Store {
   async flushScan(id) {
     const dir = this.scanDir(id);
     await Promise.all([...this.appendChains.entries()].filter(([file]) => file.startsWith(dir)).map(([, chain]) => chain));
+  }
+
+  /** Aguarda a gravação pendente do registro geral de exclusões (inclusive a que chegar enquanto espera). */
+  async flushDeletionLog() {
+    let waited = null;
+    for (let chain = this.appendChains.get(this.deletionLog); chain && chain !== waited; chain = this.appendChains.get(this.deletionLog)) {
+      waited = chain;
+      await chain;
+    }
+  }
+
+  /**
+   * Lê o registro geral de exclusões em fluxo (ele pode ter centenas de MB): { offset, length, event }
+   * para cada linha completa, na ordem do arquivo (offset e length em bytes, sem a quebra de linha).
+   * Linhas corrompidas são ignoradas, assim como a última se ainda não tiver a quebra de linha (em
+   * gravação). Sem o arquivo (ou se o caminho não for um arquivo), não devolve nada. end: lê só até
+   * essa posição (ex.: o tamanho do arquivo quando a leitura começou).
+   */
+  async *readDeletionLog({ end = Infinity } = {}) {
+    await this.flushDeletionLog();
+    let fh;
+    try {
+      fh = await fs.open(this.deletionLog, 'r');
+    } catch (err) {
+      if (MISSING_LOG.has(err.code)) return;
+      throw err;
+    }
+    try {
+      const st = await fh.stat();
+      if (!st.isFile()) return;
+      const limit = Math.min(st.size, end);
+      const block = Buffer.allocUnsafe(LOG_CHUNK);
+      let rest = null; // começo de uma linha que continua no próximo bloco
+      let restOffset = 0;
+      let position = 0;
+      while (position < limit) {
+        let bytesRead;
+        try {
+          ({ bytesRead } = await fh.read(block, 0, Math.min(LOG_CHUNK, limit - position), position));
+        } catch (err) {
+          if (MISSING_LOG.has(err.code)) return;
+          throw err;
+        }
+        if (!bytesRead) break;
+        let data = block.subarray(0, bytesRead);
+        let base = position;
+        if (rest) {
+          data = Buffer.concat([rest, data]);
+          base = restOffset;
+          rest = null;
+        }
+        position += bytesRead;
+        let start = 0;
+        for (let nl = data.indexOf(0x0a, start); nl !== -1; nl = data.indexOf(0x0a, start)) {
+          const event = parseLine(data, start, nl);
+          if (event) yield { offset: base + start, length: nl - start, event };
+          start = nl + 1;
+        }
+        if (start < data.length) {
+          rest = Buffer.from(data.subarray(start)); // cópia: o bloco é reaproveitado na próxima leitura
+          restOffset = base + start;
+        }
+      }
+    } finally {
+      await fh.close();
+    }
+  }
+
+  /**
+   * Lê linhas do registro geral pela posição ({ offset, length } de readDeletionLog), ex.: uma página
+   * depois de uma passada com filtros. Devolve os eventos na ordem pedida (null para uma linha que
+   * não pôde ser lida, ex.: o registro foi substituído).
+   */
+  async readDeletionLines(refs) {
+    const out = refs.map(() => null);
+    if (!refs.length) return out;
+    let fh;
+    try {
+      fh = await fs.open(this.deletionLog, 'r');
+    } catch (err) {
+      if (MISSING_LOG.has(err.code)) return out;
+      throw err;
+    }
+    try {
+      const order = refs.map((_, i) => i).sort((a, b) => refs[a].offset - refs[b].offset);
+      for (let i = 0; i < order.length; ) {
+        const first = refs[order[i]].offset;
+        let end = first + refs[order[i]].length;
+        let j = i;
+        while (j + 1 < order.length && refs[order[j + 1]].offset + refs[order[j + 1]].length - first <= LOG_SPAN) {
+          j++;
+          end = Math.max(end, refs[order[j]].offset + refs[order[j]].length);
+        }
+        const buf = Buffer.alloc(end - first);
+        let bytesRead = 0;
+        try {
+          if (buf.length) ({ bytesRead } = await fh.read(buf, 0, buf.length, first));
+        } catch (err) {
+          if (MISSING_LOG.has(err.code)) return out;
+          throw err;
+        }
+        for (let k = i; k <= j; k++) {
+          const ref = refs[order[k]];
+          const start = ref.offset - first;
+          if (start + ref.length <= bytesRead) out[order[k]] = parseLine(buf, start, start + ref.length);
+        }
+        i = j + 1;
+      }
+    } finally {
+      await fh.close();
+    }
+    return out;
   }
 
   /**

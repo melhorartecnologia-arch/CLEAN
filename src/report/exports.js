@@ -202,15 +202,24 @@ function scanInfoRows(scan) {
   ];
 }
 
-/** Grava textos em `out` respeitando o controle de fluxo (espera o "drain" quando necessário). */
+/**
+ * Grava textos em `out` respeitando o controle de fluxo (espera o "drain" quando necessário).
+ * chunks: iterável comum ou assíncrono (ex.: linhas de um arquivo lido em fluxo).
+ */
 export async function writeAll(out, chunks) {
   let buffer = '';
-  for (const chunk of chunks) {
+  // Acumula um texto; devolve true quando o fluxo de saída pediu para esperar.
+  const add = (chunk) => {
     buffer += chunk;
-    if (buffer.length >= 64 * 1024) {
-      if (!out.write(buffer)) await once(out, 'drain');
-      buffer = '';
-    }
+    if (buffer.length < 64 * 1024) return false;
+    const full = !out.write(buffer);
+    buffer = '';
+    return full;
+  };
+  if (typeof chunks?.[Symbol.asyncIterator] === 'function') {
+    for await (const chunk of chunks) if (add(chunk)) await once(out, 'drain');
+  } else {
+    for (const chunk of chunks) if (add(chunk)) await once(out, 'drain');
   }
   if (buffer) out.write(buffer);
 }

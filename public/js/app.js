@@ -20,6 +20,7 @@ import * as schedules from './views/schedules.js';
 import * as scheduleEdit from './views/schedule-edit.js';
 import * as retention from './views/retention.js';
 import * as retentionEdit from './views/retention-edit.js';
+import * as deletions from './views/deletions.js';
 import * as intune from './views/intune.js';
 import * as intuneEdit from './views/intune-edit.js';
 
@@ -50,6 +51,7 @@ const ROUTES = [
   [/^\/retencao$/, retention, 'retencao'],
   [/^\/retencao\/nova$/, retentionEdit, 'retencao'],
   [/^\/retencao\/([\w-]+)$/, retentionEdit, 'retencao'],
+  [/^\/exclusoes$/, deletions, 'exclusoes'],
   [/^\/intune$/, intune, 'intune'],
   [/^\/intune\/novo$/, intuneEdit, 'intune'],
   [/^\/intune\/([\w-]+)$/, intuneEdit, 'intune'],

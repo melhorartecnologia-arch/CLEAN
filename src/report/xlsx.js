@@ -113,7 +113,7 @@ function sheetName(name, used) {
 
 /**
  * Grava um .xlsx em `out` (fluxo gravável, ex.: a resposta HTTP), respeitando o controle de fluxo.
- * sheets: [{ name, cols?: [larguras], header?: [células], rows: iterável de linhas }]
+ * sheets: [{ name, cols?: [larguras], header?: [células], rows: iterável (comum ou assíncrono) de linhas }]
  *   Com header, a primeira linha é congelada e recebe filtro automático.
  * célula: texto | número | Date | { v, s: 'header'|'date'|'wrap'|'bold'|'title'|'int' }
  */
@@ -171,11 +171,13 @@ export async function writeXlsx(sheets, out, { title = 'Relatório', creator = '
     };
     open();
     let pending = 0;
-    for (const row of sheet.rows) {
+    // Acrescenta uma linha; devolve true quando é hora de esperar o fluxo de saída (drain).
+    const add = (row) => {
+      let flush = false;
       if (written >= limit) {
         close();
-        await drain();
         open();
+        flush = true;
       }
       part.rows++;
       written++;
@@ -185,8 +187,15 @@ export async function writeXlsx(sheets, out, { title = 'Relatório', creator = '
         part.file.push(strToU8(chunk));
         chunk = '';
         pending = 0;
-        await drain();
+        flush = true;
       }
+      return flush;
+    };
+    // As linhas podem vir de um iterável comum ou assíncrono (ex.: um arquivo lido em fluxo).
+    if (typeof sheet.rows?.[Symbol.asyncIterator] === 'function') {
+      for await (const row of sheet.rows) if (add(row)) await drain();
+    } else {
+      for (const row of sheet.rows) if (add(row)) await drain();
     }
     close();
     await drain();

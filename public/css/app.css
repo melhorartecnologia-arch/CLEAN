@@ -2086,3 +2086,25 @@ table.data.compact td {
 .log-lines li.log-error {
   color: var(--critical-ink);
 }
+
+/* ---------- Registro de exclusões (#/exclusoes) ---------- */
+
+.deletions-scope {
+  margin: -6px 0 16px;
+}
+.deletions-scope .chip .icon-btn {
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  padding: 0;
+}
+table.data tr.is-active > td {
+  background: var(--accent-soft);
+}
+table.data.deletions td.deletion-item {
+  min-width: 260px;
+}
+table.data.deletions td:last-child {
+  min-width: 140px;
+  overflow-wrap: anywhere;
+}

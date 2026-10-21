@@ -63,10 +63,15 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   selecionados ou todos os filtrados), com registro de cada exclusão.
 - **Agendamentos**: análises executadas sozinhas, uma vez ou com repetição (a cada algumas horas,
   diária, semanal ou mensal), com análise incremental, histórico e retenção dos relatórios.
-- **Políticas de retenção**: eliminam os arquivos e as mensagens mais antigos que uma idade máxima
-  (ex.: arquivos sem uso há mais de 5 anos, e-mails recebidos há mais de 10 anos), pela data da
-  última modificação, do último acesso, da criação ou do recebimento — com simulação, limite de
-  exclusões por execução e execução manual ou agendada.
+- **Políticas de retenção**: eliminam os arquivos (de qualquer tipo) e as mensagens mais antigos que
+  uma idade máxima ou **sem uso desde uma data fixa** (ex.: arquivos sem uso há mais de 5 anos,
+  arquivos da pasta *Financeiro* que não foram abertos nem modificados desde 01/01/2020, e-mails
+  recebidos há mais de 10 anos), pela data da última modificação, da última abertura (último
+  acesso), da criação ou do recebimento — nos repositórios inteiros ou **só em pastas escolhidas** —,
+  com simulação, limite de exclusões por execução e execução manual ou agendada.
+- **Registro de exclusões**: relatório consolidado de tudo o que o CLEAN excluiu (políticas,
+  exclusões automáticas, item a item e em lote), com filtros por período, política, repositório,
+  situação e origem, totais de itens e espaço liberado, e exportação em Excel, CSV e HTML.
 - **Reinício de iPhones (Intune)**: reinicia de forma **agendada e recorrente** os aparelhos
   **iPhone/iPad** gerenciados no **Microsoft Intune**, pela API Microsoft Graph (`rebootNow`) — todos
   os dispositivos Apple ou uma lista específica —, com **registro de sucesso ou falha por aparelho** a
@@ -95,6 +100,7 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
    - [Teams ao vivo (visualizador por usuário)](#teams-ao-vivo-visualizador-por-usuário)
 9. [Exclusão dos itens encontrados](#exclusão-dos-itens-encontrados)
    - [Exclusão em lote pelo relatório](#exclusão-em-lote-pelo-relatório)
+   - [Registro de exclusões](#registro-de-exclusões)
 10. [Agendamentos](#agendamentos)
 11. [Políticas de retenção](#políticas-de-retenção)
 12. [Reinício de iPhones (Intune)](#reinício-de-iphones-intune)
@@ -757,7 +763,8 @@ Salvaguardas:
   **Exclusões** do Excel (quando, o quê, automática ou manual, por quem e o resultado), no CSV
   (coluna *Exclusão*) e no HTML (situação abaixo de cada item). Há também um registro geral,
   **`data\exclusoes.ndjson`** (uma linha por exclusão, com a análise, o item, quando, como, por quem
-  e o resultado), que continua existindo mesmo que o relatório seja excluído;
+  e o resultado), que continua existindo mesmo que o relatório seja excluído e pode ser consultado,
+  filtrado e exportado no [Registro de exclusões](#registro-de-exclusões);
 - "quem excluiu" é o usuário da autenticação (`AUTH_USER` — uma conta única, compartilhada por quem
   usa o CLEAN) com o endereço de acesso; atrás de um proxy na mesma máquina (IIS com ARR, por
   exemplo), o endereço do navegador informado pelo proxy. Nas exclusões automáticas, fica registrado
@@ -837,6 +844,37 @@ encerrar, o CLEAN não começa novos lotes e espera o arquivo em exclusão termi
 que já foi excluído fica registrado, e o Registro da análise anota a interrupção) e pode ser
 iniciado de novo com os arquivos que restaram. Nos relatórios de e-mail, a exclusão continua item a
 item.
+
+### Registro de exclusões
+
+Em **Automação › Registro de exclusões** está o relatório consolidado de **tudo o que o CLEAN
+excluiu** — pelas políticas de retenção, pela exclusão automática das análises e das buscas por
+tipo, item a item e em lote pelo relatório —, inclusive o que veio de relatórios que já foram
+excluídos. Ele lê o registro geral `data\exclusoes.ndjson` (uma linha por tentativa de exclusão, que
+só recebe linhas novas e nunca é apagado pelo CLEAN).
+
+- **Filtros**: período (*De* e *Até*, dias inteiros na hora do servidor), política ou agendamento
+  (inclusive *Sem política*: análises avulsas e exclusões manuais), repositório ou conexão, situação
+  (excluídos, não encontrados, falhas ou alterados), origem (automática pela política, automática
+  pela análise, manual) e tipo (pastas do Windows, OneDrive, SharePoint, e-mail, Teams), além da
+  busca por texto (arquivo, assunto, análise, política ou quem excluiu). Os filtros ficam no
+  endereço da página, e a lista de políticas tem o atalho *Ver as exclusões desta política*;
+- **números**: itens excluídos (cada item conta uma vez, mesmo com várias tentativas), **espaço
+  liberado** (a soma dos tamanhos dos excluídos), falhas e alterados mantidos e não encontrados,
+  com as tabelas *Por política* e *Por repositório* (clique para filtrar);
+- **lista** paginada, das exclusões mais recentes para as mais antigas: quando, situação, item e
+  pasta, repositório ou conexão, política, origem e forma da exclusão e quem excluiu;
+- **exportações** com os filtros aplicados: **Excel** (abas *Resumo* — filtros, período, totais e as
+  tabelas por política, repositório, situação e dia — e *Exclusões*, com uma linha por exclusão:
+  quando, situação, tipo, repositório ou conexão, política, finalidade, origem, item, pasta
+  relativa, tamanho, data do critério, data de corte, forma, quem excluiu, detalhe e análise), **CSV**
+  (separado por `;`, para o Excel) e **HTML** (até 10.000 linhas; para todas, use o Excel). Os
+  arquivos são gerados aos poucos, sem carregar o registro inteiro na memória.
+
+As exclusões gravadas a partir desta versão trazem também o repositório ou a conexão, a pasta
+relativa, o tamanho, a data do critério e o corte da política; nas linhas antigas, o CLEAN recupera o
+que ainda consegue pelos cadastros e relatórios existentes (o que não for possível aparece como *(não
+identificado)*, e o tamanho fica de fora do espaço liberado).
 
 ## Agendamentos
 
@@ -925,14 +963,19 @@ Como funcionam:
 ## Políticas de retenção
 
 Em **Automação › Retenção**, crie políticas que eliminam os arquivos e as mensagens de e-mail **mais
-antigos que uma idade máxima** — por exemplo, *arquivos sem uso há mais de 5 anos* ou *e-mails
-recebidos há mais de 10 anos*. Aqui não há listas de referência: vale só a data do item.
+antigos que uma idade máxima** ou **sem uso desde uma data fixa** — por exemplo, *arquivos sem uso há
+mais de 5 anos*, *arquivos das pastas Financeiro\2015 e Compras que não foram abertos nem
+modificados desde 01/01/2020* ou *e-mails recebidos há mais de 10 anos*. Aqui não há listas de
+referência: vale só a data do item, e a regra vale para **qualquer tipo de arquivo** (documentos,
+planilhas, imagens, vídeos, compactados, executáveis, arquivos sem extensão...): o conteúdo não é
+lido nem precisa ser reconhecido. Para limitar a alguns tipos, use os padrões de nomes (abaixo).
 
 **Critério de data dos arquivos:**
 
 | Critério | Data considerada | Quando usar |
 |---|---|---|
 | **Sem uso** (padrão) | A mais recente entre a última modificação, o último acesso e a criação | O mais seguro: o arquivo só expira se **nenhuma** dessas datas for recente. Sem o registro do último acesso (veja abaixo), um arquivo só lido não tem data recente — ele fica protegido só se tiver sido modificado ou criado recentemente. |
+| **Sem abertura nem modificação** | A mais recente entre o último acesso (abertura) e a última modificação; a criação não conta | *Arquivos que não foram abertos nem modificados desde...*: uma cópia recente de um arquivo antigo e nunca aberto expira. Depende do registro do último acesso (veja abaixo). Não existe no OneDrive e no SharePoint. |
 | **Última modificação** | Quando o conteúdo foi alterado pela última vez | Confiável em qualquer servidor. Não considera os arquivos que só foram abertos (lidos). |
 | **Último acesso (abertura)** | Quando o arquivo foi aberto pela última vez | Só se o servidor de arquivos registrar o último acesso (veja abaixo). Não existe no OneDrive e no SharePoint. |
 | **Criação** | Quando o arquivo foi criado **ou copiado** para o repositório | Pastas de passagem: digitalizações, exportações, arquivos temporários. |
@@ -953,22 +996,48 @@ registro, a data fica parada — em geral na criação ou na cópia do arquivo �
 todos os dias parece antigo: pelo critério *Último acesso*, ele seria excluído. No sentido oposto,
 programas que leem todos os arquivos (antivírus, backup, indexação e as **análises de conteúdo do
 próprio CLEAN**) podem atualizar o último acesso de tudo, e aí nada expira pelos critérios *Último
-acesso* e *Sem uso*; nos repositórios analisados com frequência, prefira *Última modificação*. Depois
+acesso*, *Sem abertura nem modificação* e *Sem uso* (as políticas de retenção não leem o conteúdo e
+não mudam o último acesso); nos repositórios analisados com frequência, prefira *Última modificação*. Depois
 de uma migração de servidor, a data de criação costuma ser a da cópia: com *Sem uso* ou *Criação*,
 nada expira até essa data ficar antiga.
 
-**Idade máxima:** em dias, meses ou anos (meses e anos pelo calendário). A **data de corte** é
-calculada no início de cada execução — expiram os itens com a data do critério **anterior** a ela —
-e fica registrada no relatório; o formulário mostra a data de corte se a política fosse executada
-hoje. Itens sem a data do critério (um sistema de arquivos sem data de criação, por exemplo) — ou
-com datas anteriores a 02/01/1980, que são valores padrão de sistemas antigos e de datas perdidas
-(01/01/1970, 01/01/1980) — nunca expiram e são contados à parte.
+**Corte — idade máxima ou data fixa:**
+
+- **Idade máxima**: em dias, meses ou anos (meses e anos pelo calendário). A **data de corte** é
+  calculada no início de cada execução, e por isso anda junto com o calendário: numa política
+  semanal de 5 anos, cada execução pega os itens que completaram 5 anos;
+- **Data fixa (sem uso desde)**: um dia escolhido (a partir de 02/01/1980, e não no futuro).
+  Expiram os itens com a data do critério **anterior a esse dia, às 00:00 na hora do servidor** —
+  com *Sem abertura nem modificação* e 01/01/2020, os arquivos que não foram abertos nem modificados
+  desde 01/01/2020. A data não anda: todas as execuções usam o mesmo corte (um arquivo aberto em
+  2021 nunca expira por essa política). No e-mail, *recebidas antes de* a data.
+
+Expiram os itens com a data do critério **anterior** ao corte, que fica registrado no relatório; o
+formulário mostra o corte se a política fosse executada hoje. Itens sem a data do critério (um
+sistema de arquivos sem data de criação, por exemplo) — ou com datas anteriores a 02/01/1980, que são
+valores padrão de sistemas antigos e de datas perdidas (01/01/1970, 01/01/1980) — nunca expiram e são
+contados à parte.
+
+**Pastas (opcional, arquivos):** para limpar só algumas pastas de um repositório, informe-as no
+campo *Somente estas pastas* de cada repositório marcado, uma por linha; as subpastas entram, e um
+repositório sem pastas vale inteiro. Nas pastas do Windows, informe o caminho relativo à raiz do
+repositório (`Financeiro\2015`) ou o caminho completo dentro dele
+(`\\servidor\dados\Financeiro\2015`); a pasta precisa existir e não pode ser um atalho, link
+simbólico ou junção (a execução registra o erro e não analisa aquela pasta — nunca passa a valer o
+repositório inteiro). No OneDrive e no SharePoint, informe o caminho dentro da biblioteca
+(`Projetos/2019`, que vale em todas as bibliotecas) ou com o nome dela na frente
+(`Documentos Compartilhados/Projetos`); só o nome da biblioteca vale a biblioteca inteira. Pastas
+repetidas ou dentro de outra já escolhida são unidas. Os arquivos fora das pastas não são listados
+nem excluídos — também não pela exclusão manual ou em lote do relatório —, e a pasta de cada
+arquivo é conferida de novo na hora de excluir (nas pastas do Windows, também pelo caminho real:
+uma pasta trocada por um atalho depois da listagem não leva a exclusão para outro lugar).
 
 **Demais opções:**
 
 - arquivos: **somente os nomes** que combinam com padrões (`*.tmp`, `*.bak`, `~$*` — um por linha, só
-  o nome, sem pastas); em branco, todos os arquivos. Pastas e arquivos ignorados no cadastro do
-  repositório continuam ignorados;
+  o nome, sem pastas); em branco, todos os arquivos, de qualquer tipo. Pastas e arquivos ignorados
+  no cadastro do repositório continuam ignorados, assim como os ignorados por padrão em todas as
+  análises (arquivos temporários do Office `~$*`, `Thumbs.db`, `desktop.ini` e semelhantes);
 - e-mail: incluir ou não a **Lixeira** (Itens Excluídos) e o **Lixo Eletrônico**; as pastas
   ignoradas no cadastro da conexão continuam ignoradas. Com a exclusão *para a lixeira*, as
   mensagens expiradas que já estão na Lixeira aparecem no relatório (marcadas *na lixeira*), mas não
@@ -1005,11 +1074,14 @@ editar e excluir. As políticas agendadas aparecem no painel, em *Próximas exec
 
 **Relatório de cada execução:** os itens expirados com a data considerada e a idade, os mais antigos
 primeiro; gráficos por faixa de idade (clique para filtrar), espaço por extensão e por repositório,
-últimos usuários, caixas, pastas e remetentes; a regra, a data de corte e a forma de exclusão no
-cabeçalho. O Excel (abas *Resumo*, *Arquivos expirados* ou *Mensagens expiradas*, *Exclusões* e
-*Erros*), o CSV e o HTML têm uma linha por item, com a data considerada, a idade e a faixa de idade.
-As execuções também aparecem em *Análises de arquivos* e *Análises de e-mail*, marcadas como
-*retenção*.
+últimos usuários, caixas, pastas e remetentes; a regra, a data de corte (com *data fixa*, o dia
+escolhido), as pastas da política e a forma de exclusão no cabeçalho. O Excel (abas *Resumo*,
+*Arquivos expirados* ou *Mensagens expiradas*, *Exclusões* e *Erros*), o CSV e o HTML têm uma linha
+por item, com a data considerada, a idade e a faixa de idade; o *Resumo* traz o critério, a idade
+máxima ou a data fixa e as pastas da política. As execuções também aparecem em *Análises de
+arquivos* e *Análises de e-mail*, marcadas como *retenção*. O conjunto das exclusões de todas as
+execuções (por período, por política, por repositório) está no
+[Registro de exclusões](#registro-de-exclusões).
 
 **Como os itens são lidos e excluídos:**
 
@@ -1024,10 +1096,11 @@ As execuções também aparecem em *Análises de arquivos* e *Análises de e-mai
   versão do arquivo;
 - e-mail: só os cabeçalhos das mensagens anteriores à data de corte são lidos (no Microsoft 365 e no
   Gmail, o próprio servidor filtra pela data); o corpo e os anexos não são baixados;
-- as exclusões ficam registradas no relatório, na aba *Exclusões* do Excel e em
-  `data\exclusoes.ndjson` como **Política de retenção**, com o nome da política e quem confirmou a
-  exclusão (ex.: `política de retenção "Temporários" (exclusão confirmada por acesso local em
-  26/09/2026 10:00)`).
+- as exclusões ficam registradas no relatório, na aba *Exclusões* do Excel e no
+  [Registro de exclusões](#registro-de-exclusões) (`data\exclusoes.ndjson`) como **Política de
+  retenção**, com o nome da política, o repositório, a pasta, o tamanho, a data do critério, o corte e
+  quem confirmou a exclusão (ex.: `política de retenção "Temporários" (exclusão confirmada por acesso
+  local em 26/09/2026 10:00)`).
 
 Antes de ligar a exclusão, confirme com as áreas responsáveis os **prazos legais de guarda** dos
 documentos (fiscais, trabalhistas, contábeis). Retenções e bloqueios de litígio do Microsoft Purview
