@@ -975,7 +975,7 @@ lido nem precisa ser reconhecido. Para limitar a alguns tipos, use os padrões d
 | Critério | Data considerada | Quando usar |
 |---|---|---|
 | **Sem uso** (padrão) | A mais recente entre a última modificação, o último acesso e a criação | O mais seguro: o arquivo só expira se **nenhuma** dessas datas for recente. Sem o registro do último acesso (veja abaixo), um arquivo só lido não tem data recente — ele fica protegido só se tiver sido modificado ou criado recentemente. |
-| **Sem abertura nem modificação** | A mais recente entre o último acesso (abertura) e a última modificação; a criação não conta | *Arquivos que não foram abertos nem modificados desde...*: uma cópia recente de um arquivo antigo e nunca aberto expira. Depende do registro do último acesso (veja abaixo). Não existe no OneDrive e no SharePoint. |
+| **Sem abertura nem modificação** | A mais recente entre o último acesso (abertura) e a última modificação; a criação não conta | *Arquivos que não foram abertos nem modificados desde...* Depende do registro do último acesso (veja abaixo). Uma cópia costuma receber um novo último acesso (o da cópia): ela só expira quando essa data também ficar antiga. Não existe no OneDrive e no SharePoint. |
 | **Última modificação** | Quando o conteúdo foi alterado pela última vez | Confiável em qualquer servidor. Não considera os arquivos que só foram abertos (lidos). |
 | **Último acesso (abertura)** | Quando o arquivo foi aberto pela última vez | Só se o servidor de arquivos registrar o último acesso (veja abaixo). Não existe no OneDrive e no SharePoint. |
 | **Criação** | Quando o arquivo foi criado **ou copiado** para o repositório | Pastas de passagem: digitalizações, exportações, arquivos temporários. |
@@ -1026,11 +1026,15 @@ repositório (`Financeiro\2015`) ou o caminho completo dentro dele
 simbólico ou junção (a execução registra o erro e não analisa aquela pasta — nunca passa a valer o
 repositório inteiro). No OneDrive e no SharePoint, informe o caminho dentro da biblioteca
 (`Projetos/2019`, que vale em todas as bibliotecas) ou com o nome dela na frente
-(`Documentos Compartilhados/Projetos`); só o nome da biblioteca vale a biblioteca inteira. Pastas
+(`Documentos Compartilhados/Projetos`, que vale só nessa biblioteca do site); só o nome da
+biblioteca vale a biblioteca inteira. Uma pasta que não aparece em nenhuma biblioteca, ou que não
+pôde ser listada, fica nos erros e deixa a execução marcada como incompleta. Pastas
 repetidas ou dentro de outra já escolhida são unidas. Os arquivos fora das pastas não são listados
 nem excluídos — também não pela exclusão manual ou em lote do relatório —, e a pasta de cada
-arquivo é conferida de novo na hora de excluir (nas pastas do Windows, também pelo caminho real:
-uma pasta trocada por um atalho depois da listagem não leva a exclusão para outro lugar).
+arquivo é conferida de novo na hora de excluir: nas pastas do Windows, também pelo caminho real
+(uma pasta escolhida, ou uma pasta dentro ou acima dela, trocada por um atalho depois da listagem não
+leva a exclusão para outro lugar); no OneDrive e no SharePoint, pelo local atual do arquivo (um
+arquivo movido para fora das pastas não é excluído, nem com *excluir mesmo assim*).
 
 **Demais opções:**
 

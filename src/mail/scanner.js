@@ -656,7 +656,7 @@ export class MailScanner {
         countDeletion(this.stats, status);
         if (status === 'failed') this.error(`${mailbox.address} › ${p.folder}`, `Falha ao excluir a mensagem "${p.subject || '(sem assunto)'}": ${r.error}`);
         const item = `${mailbox.address} › ${p.folder} › ${p.subject || '(sem assunto)'}`;
-        const target = { type: 'mail', sourceId: source.id, sourceName: source.name, mailbox: mailbox.address, folder: p.folder, size: p.size || 0 };
+        const target = { type: 'mail', sourceId: source.id, sourceName: source.name, mailbox: mailbox.address, folder: p.folder, size: p.size || 0, ...(p.date ? { criterionDate: p.date } : {}) };
         return deletionEvent(p.recordId, { status, error: r.ok ? null : r.error, note: r.note }, { mode: this.retention ? 'retention' : 'auto', method, by: this.deletedBy, item, target });
       });
       this.emit({ type: 'deletions', items });
@@ -756,7 +756,7 @@ export class MailScanner {
       return;
     }
     this.deleteQueued++;
-    this.pendingDeletes.push({ recordId: this.seq, messageId: item.id, internetMessageId: item.internetMessageId || null, folder: item.folder, subject: item.subject || '', size: Number(item.size) || 0 });
+    this.pendingDeletes.push({ recordId: this.seq, messageId: item.id, internetMessageId: item.internetMessageId || null, folder: item.folder, subject: item.subject || '', size: Number(item.size) || 0, date: item.receivedAt || null });
   }
 
   countAttachments(attachments) {

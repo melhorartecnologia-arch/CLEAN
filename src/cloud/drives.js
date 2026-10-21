@@ -167,6 +167,7 @@ export class DrivesConnector extends GraphClient {
         accountName: user.name || owner?.name || '',
         aliases: [...new Set([user.address, user.mail, user.upn, owner?.email].filter(Boolean).map(lower))],
         library: drive.name || 'OneDrive',
+        libraries: [drive.name || 'OneDrive'], // as bibliotecas da conta (só o OneDrive)
         webUrl: drive.webUrl || '',
         owner: owner?.email || user.address,
         label: `OneDrive de ${user.address}`,
@@ -206,9 +207,12 @@ export class DrivesConnector extends GraphClient {
         yield { error: err, account: url };
         continue;
       }
-      for (const d of drives) {
-        if (d.driveType && d.driveType !== 'documentLibrary') continue;
-        yield { id: d.id, kind: 'sharepoint', account: url, accountName: name, aliases: [lower(url)], library: d.name || 'Documentos', webUrl: d.webUrl || url, owner: null, label: `${name} › ${d.name}` };
+      const libraries = drives.filter((d) => !d.driveType || d.driveType === 'documentLibrary');
+      // Os nomes das bibliotecas do site: uma pasta da política que começa pelo nome de uma delas vale
+      // só nela (retenção com pastas escolhidas).
+      const names = libraries.map((d) => d.name || 'Documentos');
+      for (const d of libraries) {
+        yield { id: d.id, kind: 'sharepoint', account: url, accountName: name, aliases: [lower(url)], library: d.name || 'Documentos', libraries: names, webUrl: d.webUrl || url, owner: null, label: `${name} › ${d.name}` };
       }
     }
   }
@@ -328,7 +332,7 @@ export class DrivesConnector extends GraphClient {
         if (this.signal?.aborted) throw err;
         failure = err;
       }
-      if (failure) yield { type: 'error', path: folder.rel ? `${drive.label} › ${folder.rel}` : drive.label, error: failure };
+      if (failure) yield { type: 'error', path: folder.rel ? `${drive.label} › ${folder.rel}` : drive.label, rel: folder.rel, error: failure };
       else yield { type: 'dir', path: folder.rel };
       // As subpastas já listadas continuam na fila mesmo se uma página seguinte falhar.
       subdirs.sort((a, b) => b.rel.localeCompare(a.rel));
@@ -346,9 +350,12 @@ export class DrivesConnector extends GraphClient {
    * 'permanent' = exclusão definitiva. target (record.cloud): driveId, itemId e o que a análise viu
    * (cTag/eTag, nome, pasta, tamanho e data). Se o arquivo mudou de conteúdo, de nome ou de pasta
    * depois disso, nada é excluído (status 'changed'), a não ser com force.
+   * scopeCheck(caminho): retenção com pastas escolhidas — recebe o caminho atual do arquivo dentro da
+   * biblioteca e devolve o motivo para não excluir (ou null). O item é excluído pelo id, que acompanha
+   * o arquivo movido: por isso o local atual é conferido sempre, também com force.
    * Retorna { status: 'deleted' | 'missing' | 'changed' | 'failed', error? }.
    */
-  async deleteItem(target, mode = 'trash', { force = false, signal } = {}) {
+  async deleteItem(target, mode = 'trash', { force = false, signal, scopeCheck = null } = {}) {
     const base = `/drives/${enc(target.driveId)}/items/${enc(target.itemId)}`;
     const tag = target.cTag || target.eTag || '';
     // Uma tentativa interrompida (falha de rede, 5xx) pode ter sido feita pelo servidor: nesse caso,
@@ -358,10 +365,12 @@ export class DrivesConnector extends GraphClient {
       if (error.status !== 429) uncertain = true;
     };
     try {
-      if (!force) {
+      if (!force || scopeCheck) {
         const current = await this.api(`${base}?$select=id,name,size,cTag,eTag,lastModifiedDateTime,parentReference`, { signal });
-        const changed = changedSince(target, current);
+        const changed = force ? null : changedSince(target, current);
         if (changed) return { status: 'changed', error: changed };
+        const outside = scopeCheck?.(itemPath(current));
+        if (outside) return { status: 'failed', error: outside };
       }
       // Com If-Match, o servidor também recusa se o arquivo mudar entre a conferência e a exclusão.
       const headers = !force && tag ? { 'If-Match': tag } : {};
@@ -429,6 +438,23 @@ export class DrivesConnector extends GraphClient {
     }
     return { ok: true, message: this.kind === 'onedrive' ? 'Conexão com o OneDrive funcionando.' : 'Conexão com o SharePoint funcionando.', details };
   }
+}
+
+/**
+ * Caminho atual de um item dentro da biblioteca ("Pasta/Sub/arquivo.ext"), pelo parentReference.path
+ * do Graph ("/drives/{id}/root:/Pasta/Sub", com codificação de URL). Sem o caminho da pasta, o item é
+ * tratado como estando na raiz da biblioteca.
+ */
+export function itemPath(item) {
+  const p = item?.parentReference?.path;
+  const at = typeof p === 'string' ? p.indexOf('root:') : -1;
+  let folder = at >= 0 ? p.slice(at + 5) : '';
+  try {
+    folder = decodeURIComponent(folder);
+  } catch {
+    // Sequência % inválida: o caminho fica como veio (no pior caso, fora das pastas e não excluído).
+  }
+  return [...folder.split('/').filter(Boolean), item?.name || ''].join('/');
 }
 
 /** O que mudou no arquivo desde a análise (conteúdo, nome ou pasta), ou null. */

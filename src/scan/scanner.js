@@ -72,12 +72,12 @@ export function createGuard(timeoutMs) {
 
 
 /**
- * A pasta escolhida na política (como foi escrita) que corresponde à chave encontrada pelo escopo.
- * insensitive: comparação sem diferenciar maiúsculas (nuvem e Windows).
+ * A pasta escolhida na política (como foi escrita) que corresponde à chave encontrada pelo escopo
+ * (pastas do Windows; na nuvem, cloudFolderScope().specOf). Sem diferenciar maiúsculas no Windows.
  */
 function specOf(specs, key, insensitive = process.platform === 'win32') {
   if (!key || !specs) return null;
-  return specs.find((s) => folderKey(s, insensitive) === key || folderKey(s, true).endsWith(`/${key}`)) || key;
+  return specs.find((s) => folderKey(s, insensitive) === key) || key;
 }
 
 function iso(date) {
@@ -317,6 +317,15 @@ export class Scanner {
         return;
       }
       scope = folderScope(valid, { insensitive: process.platform === 'win32' });
+      // Uma pasta escolhida (ou uma pasta acima dela) que não pôde ser listada deixa a análise incompleta.
+      scope.blocks = (dir) => {
+        const rel = path.relative(repo.path, dir);
+        return !rel.startsWith('..') && valid.some((v) => {
+          const k = folderKey(v, process.platform === 'win32');
+          const r = folderKey(rel, process.platform === 'win32');
+          return r === '' || k === r || k.startsWith(`${r}/`);
+        });
+      };
       this.folderScopes.set(repo.id, scope);
       this.scopeWithin.set(repo.id, valid.map((rel) => path.join(repo.path, ...rel.split('/'))));
       this.log('info', `Analisando "${repo.name}" (${repo.path}) somente nas pastas: ${valid.join(', ')}`);
@@ -340,7 +349,8 @@ export class Scanner {
         if (done) return;
         if (entry.type === 'error') {
           this.error(entry.path, entry.error);
-          if (entry.path === repo.path) this.stats.gaps++; // a raiz do repositório não pôde ser listada
+          // A raiz do repositório (ou, com pastas escolhidas, uma delas ou uma pasta acima) não pôde ser listada.
+          if (entry.path === repo.path || scope?.blocks(entry.path)) this.stats.gaps++;
         } else if (entry.type === 'dir') {
           this.stats.directories++;
         } else {
@@ -369,6 +379,7 @@ export class Scanner {
    */
   async checkScopeFolders(repo, specs, isExcluded) {
     const valid = [];
+    const dataDir = this.protect.find((p) => p.data)?.path;
     for (const rel of specs) {
       const parts = rel.split('/');
       const full = path.join(repo.path, ...parts);
@@ -398,6 +409,8 @@ export class Scanner {
           break;
         }
       }
+      // A pasta de dados do CLEAN nunca é analisada (a varredura a pularia sem avisar).
+      if (!problem && dataDir && isWithin(dataDir, full)) problem = 'a pasta escolhida na política fica dentro da pasta de dados do CLEAN, que não é analisada';
       if (problem) {
         this.error(full, `${problem[0].toUpperCase()}${problem.slice(1)}.`);
         this.stats.gaps++;
@@ -414,17 +427,26 @@ export class Scanner {
    * dentro da biblioteca ou com o nome dela na frente (Documentos/Projetos); o nome da própria
    * biblioteca vale a biblioteca inteira (null). reached: pastas encontradas (para avisar das demais).
    */
-  cloudScope(specs, library, reached) {
-    const cloud = cloudFolderScope(specs, library);
+  cloudScope(specs, library, reached, libraries = null) {
+    const cloud = cloudFolderScope(specs, library, libraries);
     if (cloud === null) {
       // O nome da biblioteca: ela inteira.
       for (const spec of specs) if (folderKey(spec, true) === folderKey(library, true)) reached.add(spec);
       return null;
     }
-    const { rels, scope } = cloud;
+    const { rels, scope, specOf: cloudSpecOf } = cloud;
+    scope.specOf = cloudSpecOf;
     scope.reach = (dirRel) => {
       const d = folderKey(dirRel, true);
       for (const r of rels) if (r.rel === d) reached.add(r.spec);
+    };
+    // Pasta que não pôde ser listada: é uma escolhida ou fica acima de uma? (Então a análise ficou
+    // incompleta, e a pasta escolhida conta como encontrada: o erro real já foi registrado.)
+    scope.blocks = (dirRel) => {
+      const d = folderKey(dirRel, true);
+      const hit = rels.filter((r) => d === '' || r.rel === d || r.rel.startsWith(`${d}/`));
+      for (const r of hit) reached.add(r.spec);
+      return hit.length > 0;
     };
     return scope;
   }
@@ -473,7 +495,7 @@ export class Scanner {
         }
         // Biblioteca ignorada pelo nome (ex.: "Site Assets") ou pelo caminho ("Documentos/Antigo").
         if (isExcluded(drive.library, drive.library)) continue;
-        await this.scanDrive(repo, connector, drive, isExcluded, specs ? this.cloudScope(specs, drive.library, reached) : null);
+        await this.scanDrive(repo, connector, drive, isExcluded, specs ? this.cloudScope(specs, drive.library, reached, drive.libraries) : null);
         this.stats.libraries++;
         this.progress(true);
       }
@@ -507,7 +529,9 @@ export class Scanner {
         if (done) return;
         if (entry.type === 'error') {
           this.error(entry.path, entry.error);
-          if (entry.path === drive.label) this.stats.gaps++; // a raiz da biblioteca não pôde ser listada
+          // A raiz da biblioteca (ou, com pastas escolhidas, uma delas ou uma pasta acima) não pôde ser listada.
+          const blocked = Boolean(scope && entry.rel !== undefined && scope.blocks(entry.rel));
+          if (entry.path === drive.label || blocked) this.stats.gaps++;
         } else if (entry.type === 'dir') {
           this.stats.directories++;
           scope?.reach(entry.path);
@@ -717,7 +741,7 @@ export class Scanner {
     if (when >= r.cutoffMs) return;
     this.stats.filesMatched++;
     this.stats.bytesExpired += Number(item.size) || 0;
-    const record = this.cloudRecord(repo, drive, entry, this.expiredFields(when, scope ? specOf(foldersOf(r, repo.id), scope.folderOf(entry.relativePath), true) : null));
+    const record = this.cloudRecord(repo, drive, entry, this.expiredFields(when, scope ? scope.specOf(scope.folderOf(entry.relativePath)) : null));
     this.finishRecords([record]);
     await this.deleteRecords([record]);
   }
@@ -1076,7 +1100,11 @@ export class Scanner {
       try {
         if (unverified) return { status: 'failed', error: unverified.error };
         if (outside) return { status: 'failed', error: OUTSIDE_FOLDERS };
-        if (cloud) return await connector.deleteItem(cloudTarget(record), method, { signal: null });
+        if (cloud) {
+          // Com pastas escolhidas, o local atual do item também é conferido (ele pode ter sido movido).
+          const scopeCheck = this.retention && foldersOf(this.retention, repo.id) ? (rel) => (this.cloudInScope(repo, { ...record, relativePath: rel }) ? null : OUTSIDE_FOLDERS) : null;
+          return await connector.deleteItem(cloudTarget(record), method, { signal: null, scopeCheck });
+        }
         return await deleteFile(record.path, {
           root: repo.path,
           expected: { size: record.size, modified: record.modified },

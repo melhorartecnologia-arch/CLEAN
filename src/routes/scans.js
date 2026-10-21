@@ -688,9 +688,12 @@ export function scansRouter({ store, manager, endpoints = {} }) {
       // Protegido (e não uma falha ao conferir as proteções no Microsoft 365).
       if (kept && skipProtected && kept !== entry.kept?.unresolved) return { result: null, method, protected: kept.error };
       if (kept) return { result: { status: 'failed', error: kept.error }, method };
-      // Política com pastas escolhidas: só dentro delas (vale também com "excluir mesmo assim").
+      // Política com pastas escolhidas: só dentro delas (vale também com "excluir mesmo assim"), pelo
+      // caminho da análise e pelo local atual do item (o id acompanha o arquivo movido de pasta).
       if (scan.retention && !recordInScope(scan.retention, record)) return { result: { status: 'failed', error: OUTSIDE_FOLDERS }, method };
-      return { result: await entry.connector.deleteItem(cloudTarget(record), method, { force }), method };
+      const scopeCheck =
+        scan.retention && foldersOf(scan.retention, record.repositoryId) ? (rel) => (recordInScope(scan.retention, { ...record, relativePath: rel }) ? null : OUTSIDE_FOLDERS) : null;
+      return { result: await entry.connector.deleteItem(cloudTarget(record), method, { force, scopeCheck }), method };
     }
     // Política com pastas escolhidas: as da análise, no caminho atual do repositório (deleteFile confere
     // pelo caminho e pelo caminho real, também com "excluir mesmo assim").
@@ -789,7 +792,15 @@ export function scansRouter({ store, manager, endpoints = {} }) {
     }
     // O que foi excluído, para o registro geral (que não depende do relatório).
     const target = mail
-      ? { type: 'mail', sourceId: record.sourceId, sourceName: record.sourceName, mailbox: record.mailbox, folder: record.folder, size: Number(record.size) || 0 }
+      ? {
+          type: 'mail',
+          sourceId: record.sourceId,
+          sourceName: record.sourceName,
+          mailbox: record.mailbox,
+          folder: record.folder,
+          size: Number(record.size) || 0,
+          ...(record.retention?.date ? { criterionDate: record.retention.date } : {}),
+        }
       : scan.kind === 'teams'
         ? { type: 'teams', sourceId: record.sourceId, sourceName: record.sourceName, folder: record.folder }
         : fileTarget(record);

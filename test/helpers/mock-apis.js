@@ -33,7 +33,7 @@ function itemJson(item, drive, trail = [], parentId = `${drive.id}-root`) {
     webUrl: `${drive.webUrl}/${encodeURI([...trail, item.name].join('/'))}`,
     eTag: `"{${item.id}},${item.version || 1}${item.renamed ? `,${item.name}` : ''}"`,
     cTag: `"c:{${item.id}},${item.version || 1}"`,
-    parentReference: { driveId: drive.id, id: parentId },
+    parentReference: { driveId: drive.id, id: parentId, path: `/drives/${drive.id}/root:${trail.map((t) => `/${encodeURIComponent(t)}`).join('')}` },
   };
 }
 

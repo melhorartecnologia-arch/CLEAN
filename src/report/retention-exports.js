@@ -31,6 +31,13 @@ function sortItems(scan, records) {
   return records.slice().sort((a, b) => a.repositoryName.localeCompare(b.repositoryName, 'pt-BR') || a.path.localeCompare(b.path, 'pt-BR'));
 }
 
+/** O que a data fixa quer dizer, pelo critério: "sem abertura nem modificação desde", "criados antes de"... */
+function sinceLabel(r, mail) {
+  if (mail) return 'recebidas antes de';
+  if (r.criterion === 'created') return 'criados antes de';
+  return `${FILE_CRITERIA[r.criterion]?.phrase || 'sem uso'} desde`;
+}
+
 /** Regra da política gravada na análise (com a data de corte do momento em que ela foi criada). */
 function policyRows(scan) {
   const r = scan.retention;
@@ -42,7 +49,7 @@ function policyRows(scan) {
   return [
     ['Regra', describeRetention(r, mail ? 'mail' : 'files')],
     ['Critério de data', criterion?.label || r.criterion],
-    r.since ? [mail ? 'Data fixa (recebidas antes de)' : 'Data fixa (sem uso desde)', dateBr(r.since)] : ['Idade máxima', amountText(r)],
+    r.since ? [`Data fixa (${sinceLabel(r, mail)})`, dateBr(r.since)] : ['Idade máxima', amountText(r)],
     ['Data de corte (expiram os anteriores)', toDate(r.cutoff)],
     mail
       ? ['Lixeira / Lixo eletrônico', `${r.includeTrash ? 'inclui' : 'ignora'} a lixeira; ${r.includeJunk ? 'inclui' : 'ignora'} o lixo eletrônico`]

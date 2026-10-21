@@ -10,7 +10,8 @@ import path from 'node:path';
 import { sanitizeRetention, cutoffDate, fileDate, cloudDate, describeRetention, sanitizeFolders, RetentionError, recordInScope } from '../src/retention/policy.js';
 import { cutoffPreview, describeRetention as describeClient } from '../public/js/retention.js';
 import { Scanner } from '../src/scan/scanner.js';
-import { deleteFile } from '../src/scan/delete.js';
+import { deleteFile, OUTSIDE_FOLDERS } from '../src/scan/delete.js';
+import { DrivesConnector, itemPath } from '../src/cloud/drives.js';
 import { Store } from '../src/store.js';
 import { ScanManager } from '../src/scan/manager.js';
 import { Scheduler, deletionPins, deletionCriteria } from '../src/schedule/scheduler.js';
@@ -52,11 +53,12 @@ const policyFor = (input, repos = [{ id: 'r1', name: 'Dados', type: 'local' }]) 
   return { ...r, cutoff: cutoffDate(r).toISOString() };
 };
 
-async function runFiles(dir, retention, { deleteMatches = true, exclude = [], ownerResolver = null } = {}) {
+async function runFiles(dir, retention, { deleteMatches = true, exclude = [], ownerResolver = null, protect = [] } = {}) {
   const messages = [];
   const scanner = new Scanner(
     {
       repositories: [{ id: 'r1', name: 'Dados', path: dir, exclude, allowDelete: true, keep: [] }],
+      protect,
       terms: [],
       options: { deleteMatches, resolveOwner: Boolean(ownerResolver), checkContent: false, concurrency: 1 },
       retention,
@@ -493,4 +495,178 @@ test('API: política "sem abertura nem modificação desde" numa pasta, exclusã
     await scheduler.stop();
     await manager.shutdown?.();
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Reconferência: atalhos no lugar da pasta escolhida, itens movidos na nuvem e validações
+
+test('a própria pasta escolhida (ou uma pasta acima) trocada por um atalho: nada fora dela é excluído', async () => {
+  const { dir, put, exists } = repoDir();
+  put('Fin/b.tmp');
+  put('Outro/b.tmp');
+  const repos = [{ id: 'r1', name: 'Dados', type: 'local', path: dir }];
+  // Depois da listagem, "Fin" vira um atalho para "Outro": o caminho real de "Fin" passa a ser o de
+  // "Outro" e a exclusão iria para lá.
+  const ownerResolver = {
+    async resolve(paths) {
+      fs.renameSync(path.join(dir, 'Fin'), path.join(dir, 'Fin-original'));
+      fs.symlinkSync(path.join(dir, 'Outro'), path.join(dir, 'Fin'), 'dir');
+      return new Map(paths.map((p) => [p, null]));
+    },
+  };
+  const run = await runFiles(dir, policyFor({ since: '2020-01-01', criterion: 'modified', folders: [{ repositoryId: 'r1', path: 'Fin' }] }, repos), { ownerResolver });
+  assert.deepEqual(run.events.map((e) => e.status), ['failed']);
+  assert.match(run.events[0].error, /pastas escolhidas/);
+  assert.ok(exists('Outro/b.tmp'));
+
+  // Exclusão pelo relatório, com "excluir mesmo assim": uma pasta acima da escolhida virou atalho.
+  const t = repoDir();
+  t.put('A/Fin/x.tmp');
+  t.put('B/Fin/x.tmp');
+  fs.renameSync(path.join(t.dir, 'A'), path.join(t.dir, 'A-original'));
+  fs.symlinkSync(path.join(t.dir, 'B'), path.join(t.dir, 'A'), 'dir');
+  const forced = await deleteFile(path.join(t.dir, 'A/Fin/x.tmp'), { root: t.dir, within: [path.join(t.dir, 'A/Fin')], force: true });
+  assert.equal(forced.status, 'failed');
+  assert.equal(forced.error, OUTSIDE_FOLDERS);
+  assert.ok(t.exists('B/Fin/x.tmp'));
+  // Sem atalhos, continua excluindo.
+  const ok = repoDir();
+  const target = ok.put('A/Fin/y.tmp');
+  assert.equal((await deleteFile(target, { root: ok.dir, within: [path.join(ok.dir, 'A/Fin')] })).status, 'deleted');
+});
+
+test('validação: pastas fora de uma lista e nomes com espaço no início são recusados', () => {
+  const targets = [{ id: 'r1', name: 'Dados', type: 'local', path: 'D:\\Dados' }];
+  fails(() => sanitizeRetention({ since: '2020-01-01', folders: { repositoryId: 'r1', path: 'Fin' } }, 'files', { targets }), /lista/);
+  fails(() => sanitizeRetention({ since: '2020-01-01', folders: 'Fin' }, 'files', { targets }), /lista/);
+  fails(() => sanitizeRetention({ since: '2020-01-01', folders: 'Fin' }, 'mail'), /lista/);
+  fails(() => sanitizeFolders([{ repositoryId: 'r1', path: 'D:\\Dados\\ Fin\\2019' }], { targets }), /espaço no início/);
+  fails(() => sanitizeFolders([{ repositoryId: 'r1', path: 'Fin\\ 2019' }], { targets }), /espaço no início/);
+  // Sem pastas (ausente ou nulo): o repositório inteiro, como antes.
+  assert.equal(sanitizeRetention({ since: '2020-01-01', folders: null }, 'files', { targets }).folders, undefined);
+  // Idempotente: validar de novo o que foi salvo dá o mesmo JSON.
+  const once = sanitizeRetention({ since: '2020-01-01', folders: [{ repositoryId: 'r1', path: 'D:\\Dados\\Fin X\\2019' }] }, 'files', { targets });
+  assert.deepEqual(sanitizeRetention(once, 'files', { targets }), once);
+});
+
+test('pasta registrada no item: a escolhida exata, mesmo quando outra termina com o mesmo nome', async () => {
+  const { dir, put } = repoDir();
+  put('b/dois.tmp');
+  put('a/b/um.tmp');
+  const repos = [{ id: 'r1', name: 'Dados', type: 'local', path: dir }];
+  const run = await runFiles(dir, policyFor({ since: '2020-01-01', criterion: 'modified', folders: [{ repositoryId: 'r1', path: 'b' }, { repositoryId: 'r1', path: 'a/b' }] }, repos), { deleteMatches: false });
+  const byName = Object.fromEntries(run.records.map((r) => [r.name, r.retention.folder]));
+  assert.deepEqual(byName, { 'dois.tmp': 'b', 'um.tmp': 'a/b' });
+});
+
+test('pasta escolhida dentro da pasta de dados do CLEAN: avisada como problema, não fica em silêncio', async () => {
+  const { dir, put } = repoDir();
+  put('dados-clean/scans/x.tmp');
+  put('Fin/a.tmp');
+  const repos = [{ id: 'r1', name: 'Dados', type: 'local', path: dir }];
+  const run = await runFiles(dir, policyFor({ since: '2020-01-01', criterion: 'modified', folders: [{ repositoryId: 'r1', path: 'dados-clean/scans' }, { repositoryId: 'r1', path: 'Fin' }] }, repos), {
+    deleteMatches: false,
+    protect: [{ path: path.join(dir, 'dados-clean'), data: true, error: 'dados' }],
+  });
+  assert.deepEqual(run.names, ['a.tmp']);
+  assert.equal(run.stats.gaps, 1);
+  assert.ok(run.errors.some((e) => /pasta de dados do CLEAN/.test(e.message)));
+});
+
+test('nuvem: pasta escolhida que não pôde ser listada conta como lacuna (e não como "não encontrada")', async () => {
+  const data = world();
+  const old = { modified: '2015-01-01T00:00:00Z', created: '2015-01-01T00:00:00Z' };
+  data.drives['d-fin'].items = [folder('f-fin', 'Fin', [file('i-a', 'a.txt', 'x', old)])];
+  data.failFolders = new Set(['f-fin']);
+  const mock = await startMockApis({ graph: data });
+  try {
+    const repository = cloudRepo('sharepoint', { exclude: [], cloud: { scope: 'list', accounts: [], sites: ['https://contoso.sharepoint.com/sites/Financeiro'], exclude: [] } });
+    const r = sanitizeRetention({ criterion: 'modified', since: '2020-01-01', folders: [{ repositoryId: repository.id, path: 'Fin' }] }, 'files', { cloud: true, targets: [repository] });
+    const messages = [];
+    const stats = await new Scanner({ repositories: [repository], terms: [], options: { deleteMatches: false, checkContent: false }, retention: { ...r, cutoff: cutoffDate(r).toISOString() }, endpoints: mock.endpoints }, (m) =>
+      messages.push(m),
+    ).run();
+    const errors = messages.filter((m) => m.type === 'errors').flatMap((m) => m.items);
+    assert.equal(stats.gaps, 1);
+    assert.ok(!errors.some((e) => /não foi encontrada/.test(e.message)), 'o erro real fica registrado, sem o aviso de pasta inexistente');
+  } finally {
+    await mock.close();
+  }
+});
+
+test('nuvem: o nome de uma biblioteca na frente vale só nela (e não como pasta nas outras bibliotecas)', async () => {
+  const data = world();
+  const old = { modified: '2015-01-01T00:00:00Z', created: '2015-01-01T00:00:00Z' };
+  data.drives['d-fin'].items = [folder('f-fin', 'Fin', [file('i-a', 'a.txt', 'x', old)])];
+  // Em outra biblioteca do mesmo site, uma cópia arquivada com o mesmo caminho.
+  data.drives['d-fin-assets'].items = [folder('f-dc', 'Documentos Compartilhados', [folder('f-dc-fin', 'Fin', [file('i-copia', 'copia.txt', 'x', old)])])];
+  const mock = await startMockApis({ graph: data });
+  try {
+    const repository = cloudRepo('sharepoint', { exclude: [], cloud: { scope: 'list', accounts: [], sites: ['https://contoso.sharepoint.com/sites/Financeiro'], exclude: [] } });
+    const r = sanitizeRetention({ criterion: 'modified', since: '2020-01-01', folders: [{ repositoryId: repository.id, path: 'Documentos Compartilhados/Fin' }] }, 'files', {
+      cloud: true,
+      targets: [repository],
+    });
+    const messages = [];
+    await new Scanner({ repositories: [repository], terms: [], options: { deleteMatches: false, checkContent: false }, retention: { ...r, cutoff: cutoffDate(r).toISOString() }, endpoints: mock.endpoints }, (m) =>
+      messages.push(m),
+    ).run();
+    const records = messages.filter((m) => m.type === 'results').flatMap((m) => m.records);
+    assert.deepEqual(records.map((x) => x.name), ['a.txt']);
+    assert.equal(records[0].retention.folder, 'Documentos Compartilhados/Fin');
+    assert.ok(recordInScope(r, records[0]));
+  } finally {
+    await mock.close();
+  }
+});
+
+test('nuvem: arquivo movido para fora das pastas (ou a pasta dele movida) não é excluído, nem com "excluir mesmo assim"', async () => {
+  const data = world();
+  const old = { modified: '2015-01-01T00:00:00Z', created: '2015-01-01T00:00:00Z' };
+  const reset = () => {
+    data.drives['d-fin'].items = [folder('f-fin', 'Fin', [folder('f-sub', 'sub', [file('i-a', 'a.txt', 'x', old)])]), folder('f-out', 'Contratos', [])];
+  };
+  const mock = await startMockApis({ graph: data });
+  try {
+    const repository = cloudRepo('sharepoint', { allowDelete: true, exclude: [], cloud: { scope: 'list', accounts: [], sites: ['https://contoso.sharepoint.com/sites/Financeiro'], exclude: [] } });
+    const retention = { folders: [{ repositoryId: repository.id, path: 'Fin' }] };
+    const record = { repositoryId: repository.id, relativePath: 'Fin/sub/a.txt', cloud: { library: 'Documentos Compartilhados' }, retention: { folder: 'Fin' } };
+    const scopeCheck = (rel) => (recordInScope(retention, { ...record, relativePath: rel }) ? null : OUTSIDE_FOLDERS);
+    const connector = new DrivesConnector(repository, { endpoints: mock.endpoints });
+    const target = { driveId: 'd-fin', itemId: 'i-a', cTag: '"c:{i-a},1"', name: 'a.txt', parentId: 'f-sub' };
+    const moveInto = (id, from, to) => {
+      const tree = data.drives['d-fin'].items;
+      const find = (list, wanted) => list.map((x) => (x.id === wanted ? x : x.children ? find(x.children, wanted) : null)).find(Boolean);
+      const parent = find(tree, from);
+      const item = parent.children.find((x) => x.id === id);
+      parent.children.splice(parent.children.indexOf(item), 1);
+      find(tree, to).children.push(item);
+    };
+
+    // O próprio arquivo movido para "Contratos": "excluir mesmo assim" (force) não passa.
+    reset();
+    data.driveDeleted = [];
+    moveInto('i-a', 'f-sub', 'f-out');
+    const forced = await connector.deleteItem(target, 'permanent', { force: true, scopeCheck });
+    assert.deepEqual(forced, { status: 'failed', error: OUTSIDE_FOLDERS });
+    assert.deepEqual(data.driveDeleted, []);
+
+    // A pasta "sub" movida para "Contratos": o arquivo continua na mesma pasta (mesmo id), sem mudanças.
+    reset();
+    moveInto('f-sub', 'f-fin', 'f-out');
+    const moved = await connector.deleteItem(target, 'permanent', { scopeCheck });
+    assert.deepEqual(moved, { status: 'failed', error: OUTSIDE_FOLDERS });
+    assert.deepEqual(data.driveDeleted, []);
+
+    // No lugar: excluído.
+    reset();
+    assert.deepEqual(await connector.deleteItem(target, 'permanent', { scopeCheck }), { status: 'deleted' });
+    assert.deepEqual(data.driveDeleted.map((d) => d.id), ['i-a']);
+  } finally {
+    await mock.close();
+  }
+  // Caminho do Graph com codificação de URL; sem o caminho da pasta, a raiz da biblioteca.
+  assert.equal(itemPath({ name: 'a b.txt', parentReference: { path: '/drives/x/root:/Pasta%20A/Sub' } }), 'Pasta A/Sub/a b.txt');
+  assert.equal(itemPath({ name: 'r.txt', parentReference: { path: '/drive/root:' } }), 'r.txt');
+  assert.equal(itemPath({ name: 'r.txt', parentReference: {} }), 'r.txt');
 });

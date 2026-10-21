@@ -16,6 +16,15 @@ function sourceDetail(s) {
   return `${TYPE_LABELS[s.type] || s.type} · ${plural(s.mailboxes.length, 'caixa', 'caixas')}`;
 }
 
+/** O que a data fixa quer dizer, pelo critério: "sem uso desde", "criados antes de", "recebidas antes de". */
+function sinceWords(criterion) {
+  if (criterion === 'received') return 'recebidas antes de';
+  if (criterion === 'created') return 'criados antes de';
+  return `${FILE_CRITERIA[criterion]?.short || 'sem uso'} desde`;
+}
+
+const capitalize = (text) => `${text[0].toUpperCase()}${text.slice(1)}`;
+
 /** Hoje ("AAAA-MM-DD", hora local): o limite do campo de data (o servidor recusa datas futuras). */
 function todayIso() {
   const d = new Date();
@@ -133,7 +142,7 @@ export async function render(root, { params, query, ctx }) {
               <span id="cut-label">Corte</span>
               <div class="option-row" role="radiogroup" aria-labelledby="cut-label">
                 <label class="check"><input type="radio" name="cutMode" value="age" ${chk(!byDate)} /><span>Idade máxima</span></label>
-                <label class="check"><input type="radio" name="cutMode" value="date" ${chk(byDate)} /><span>${mail ? 'Data fixa (recebidas antes de)' : 'Data fixa (sem uso desde)'}</span></label>
+                <label class="check"><input type="radio" name="cutMode" value="date" ${chk(byDate)} /><span>Data fixa (<span data-since-word>${sinceWords(criterion)}</span>)</span></label>
               </div>
             </div>
             <div class="field" data-cut="age" ${byDate ? 'hidden' : ''}>
@@ -147,7 +156,7 @@ export async function render(root, { params, query, ctx }) {
               <small>${mail ? 'Mensagens' : 'Arquivos'} com a data do critério mais antiga que isso expiram. O corte anda a cada execução.</small>
             </div>
             <label class="field" data-cut="date" ${byDate ? '' : 'hidden'}>
-              <span>${mail ? 'Recebidas antes de' : 'Sem uso desde'}</span>
+              <span data-since-label>${capitalize(sinceWords(criterion))}</span>
               <input type="date" name="since" min="1980-01-02" max="${todayIso()}" value="${r.since || ''}" />
               <small>${mail ? 'Mensagens recebidas antes desse dia expiram' : 'Arquivos com a data do critério anterior a esse dia (00:00, hora do servidor) expiram: com "Sem abertura nem modificação", os que não foram abertos nem alterados desde então'}. A data não anda: todas as execuções usam o mesmo corte.</small>
             </label>
@@ -299,6 +308,8 @@ export async function render(root, { params, query, ctx }) {
     const byDateNow = retention.mode === 'date';
     form.querySelector('[data-delete-options]').hidden = !deletingNow;
     form.querySelectorAll('[data-cut]').forEach((el) => (el.hidden = el.dataset.cut !== retention.mode));
+    form.querySelector('[data-since-word]').textContent = sinceWords(c);
+    form.querySelector('[data-since-label]').textContent = capitalize(sinceWords(c));
     if (!mail) {
       form.querySelector('[data-criterion-hint]').textContent = FILE_CRITERIA[c]?.hint || '';
       form.querySelector('[data-access-warning]').hidden = !ACCESS_CRITERIA.has(c);

@@ -141,9 +141,19 @@ async function checkLocation(root, filePath, guards, within = null) {
   }
   if (!isWithin(realRoot, realDir)) return { status: 'failed', error: OUTSIDE };
   if (within) {
-    // Também pelo caminho real: a pasta do arquivo continua dentro de uma das pastas escolhidas.
-    const real = await Promise.all(within.map((w) => fs.realpath(w).catch(() => null)));
-    if (!real.some((w) => w && isWithin(realRoot, w) && isWithin(w, realDir))) return { status: 'failed', error: OUTSIDE_FOLDERS };
+    // Também pelo caminho real: a pasta do arquivo continua dentro de uma das pastas escolhidas (a mesma
+    // do caminho), e essa pasta continua onde o caminho diz — se ela (ou uma pasta acima) foi trocada
+    // por um atalho, o caminho real dela é outro, e a exclusão iria para outro lugar.
+    const inside = await Promise.all(
+      within
+        .filter((w) => isInside(w, filePath))
+        .map(async (w) => {
+          const realW = await fs.realpath(w).catch(() => null);
+          const expected = path.join(realRoot, path.relative(root, w));
+          return Boolean(realW) && path.relative(expected, realW) === '' && isWithin(realW, realDir);
+        }),
+    );
+    if (!inside.some(Boolean)) return { status: 'failed', error: OUTSIDE_FOLDERS };
   }
   const realFile = path.join(realDir, path.basename(filePath));
   for (const g of guards) {

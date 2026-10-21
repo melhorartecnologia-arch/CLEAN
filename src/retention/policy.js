@@ -102,6 +102,11 @@ export function sanitizeRetention(input, kind, { cloud = false, targets = null, 
     throw new RetentionError('Informe o limite de exclusões por execução (0 = sem limite).');
   }
   const out = { criterion, ...cut, maxDeletions, deleteMode: r.deleteMode === 'trash' ? 'trash' : 'permanent' };
+  // Pastas num formato inesperado (um objeto, um texto) são recusadas: ignorá-las faria a política
+  // valer para o repositório inteiro.
+  if (r.folders !== undefined && r.folders !== null && !Array.isArray(r.folders)) {
+    throw new RetentionError('Informe as pastas da política como uma lista de { repositoryId, path }.');
+  }
   if (mail) {
     if (Array.isArray(r.folders) && r.folders.length) throw new RetentionError('A escolha de pastas vale para arquivos (repositórios), e não para e-mails.');
     out.includeTrash = r.includeTrash !== false;
@@ -181,8 +186,10 @@ export function folderRelative(repo, value) {
   if (!segments.length) return '';
   for (const s of segments) {
     if (s === '.' || s === '..') throw new RetentionError(`Caminho de pasta inválido: "${text}" (sem "." nem "..").`);
-    if (BAD_SEGMENT.test(s) || /[. ]$/.test(s) || s.length > 255) {
-      throw new RetentionError(`Caminho de pasta inválido: "${text}". Informe a pasta sem curingas (* ?), sem os caracteres : " < > | e sem ponto ou espaço no fim dos nomes.`);
+    // Espaço no início de um nome também é recusado: a validação seguinte (a cada execução) tiraria o
+    // espaço com o trim e a política passaria a valer para outra pasta.
+    if (BAD_SEGMENT.test(s) || /[. ]$/.test(s) || /^\s/.test(s) || s.length > 255) {
+      throw new RetentionError(`Caminho de pasta inválido: "${text}". Informe a pasta sem curingas (* ?), sem os caracteres : " < > |, sem espaço no início e sem ponto ou espaço no fim dos nomes.`);
     }
   }
   return segments.join('/');
@@ -205,7 +212,8 @@ export const foldersInsensitive = (repo) => isCloudType(repo?.type) || winStyle(
  * O resultado é ordenado: validar de novo devolve o mesmo JSON.
  */
 export function sanitizeFolders(input, { targets = null } = {}) {
-  const items = Array.isArray(input) ? input : [];
+  if (input !== undefined && input !== null && !Array.isArray(input)) throw new RetentionError('Informe as pastas da política como uma lista de { repositoryId, path }.');
+  const items = input || [];
   if (!items.length) return [];
   if (!Array.isArray(targets)) throw new RetentionError('Não foi possível conferir as pastas da política: os repositórios não foram informados.');
   if (items.length > MAX_FOLDERS) throw new RetentionError(`Informe no máximo ${MAX_FOLDERS} pastas.`);
@@ -270,19 +278,28 @@ export function folderScope(paths, { insensitive = false } = {}) {
 
 /**
  * Pastas escolhidas numa biblioteca do OneDrive/SharePoint: cada uma vale pelo caminho dentro da
- * biblioteca ou com o nome dela na frente (Documentos/Projetos); o nome da própria biblioteca vale a
- * biblioteca inteira (null). Devolve { rels: [{ spec, rel }], scope } (sem diferenciar maiúsculas).
+ * biblioteca ou com o nome de uma biblioteca na frente (Documentos/Projetos), que vale só nela; o
+ * nome da própria biblioteca vale a biblioteca inteira (null). libraries: nomes das bibliotecas do
+ * mesmo site ou conta (a pasta que começa pelo nome de outra delas é daquela biblioteca, e não um
+ * caminho nesta); sem a lista, só o nome desta biblioteca é reconhecido.
+ * Devolve { rels: [{ spec, rel }], scope, specOf(key) } (sem diferenciar maiúsculas).
  */
-export function cloudFolderScope(specs, library) {
+export function cloudFolderScope(specs, library, libraries = null) {
   const lib = folderKey(library, true);
+  const names = new Set([lib, ...(libraries || []).map((n) => folderKey(n, true))]);
   const rels = [];
   for (const spec of specs) {
     const key = folderKey(spec, true);
     if (key === lib) return null;
-    if (key.startsWith(`${lib}/`)) rels.push({ spec, rel: key.slice(lib.length + 1) });
-    rels.push({ spec, rel: key });
+    const first = key.split('/')[0];
+    if (first === lib) rels.push({ spec, rel: key.slice(lib.length + 1) });
+    else if (!names.has(first)) rels.push({ spec, rel: key });
+    // Começa pelo nome de outra biblioteca: vale só nela.
   }
-  return { rels, scope: folderScope(rels.map((r) => r.rel), { insensitive: true }) };
+  const scope = folderScope(rels.map((r) => r.rel), { insensitive: true });
+  // A pasta escolhida (como foi escrita) que corresponde à chave encontrada pelo escopo.
+  const specOf = (key) => (key ? (rels.find((r) => r.rel === key)?.spec ?? key) : null);
+  return { rels, scope, specOf };
 }
 
 /**
@@ -294,7 +311,11 @@ export function recordInScope(retention, record) {
   const specs = foldersOf(retention, record.repositoryId);
   if (!specs) return true;
   if (record.cloud) {
-    const cloud = cloudFolderScope(specs, record.cloud.library || '');
+    // A análise conhecia as bibliotecas do site e gravou a pasta escolhida que valeu para o arquivo:
+    // a conferência usa só ela (sem a lista de bibliotecas, outra pasta poderia valer de outro jeito).
+    const chosen = record.retention?.folder;
+    const list = chosen && specs.some((s) => folderKey(s, true) === folderKey(chosen, true)) ? [chosen] : specs;
+    const cloud = cloudFolderScope(list, record.cloud.library || '');
     return cloud === null || cloud.scope.allowFile(record.relativePath || '');
   }
   return folderScope(specs, { insensitive: process.platform === 'win32' }).allowFile(record.relativePath || '');
