@@ -320,7 +320,8 @@ export class Scanner {
       // Uma pasta escolhida (ou uma pasta acima dela) que não pôde ser listada deixa a análise incompleta.
       scope.blocks = (dir) => {
         const rel = path.relative(repo.path, dir);
-        return !rel.startsWith('..') && valid.some((v) => {
+        if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false; // fora do repositório
+        return valid.some((v) => {
           const k = folderKey(v, process.platform === 'win32');
           const r = folderKey(rel, process.platform === 'win32');
           return r === '' || k === r || k.startsWith(`${r}/`);
@@ -435,6 +436,8 @@ export class Scanner {
       return null;
     }
     const { rels, scope, specOf: cloudSpecOf } = cloud;
+    // Nenhuma pasta escolhida vale nesta biblioteca (todas são de outras bibliotecas do site).
+    scope.empty = rels.length === 0;
     scope.specOf = cloudSpecOf;
     scope.reach = (dirRel) => {
       const d = folderKey(dirRel, true);
@@ -495,7 +498,10 @@ export class Scanner {
         }
         // Biblioteca ignorada pelo nome (ex.: "Site Assets") ou pelo caminho ("Documentos/Antigo").
         if (isExcluded(drive.library, drive.library)) continue;
-        await this.scanDrive(repo, connector, drive, isExcluded, specs ? this.cloudScope(specs, drive.library, reached, drive.libraries) : null);
+        const scope = specs ? this.cloudScope(specs, drive.library, reached, drive.libraries) : null;
+        // Biblioteca sem nenhuma pasta escolhida: nem é listada (uma falha nela não deixa a análise incompleta).
+        if (scope?.empty) continue;
+        await this.scanDrive(repo, connector, drive, isExcluded, scope);
         this.stats.libraries++;
         this.progress(true);
       }

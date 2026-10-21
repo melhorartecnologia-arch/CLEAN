@@ -346,6 +346,10 @@ export async function render(root, { query, isCurrent = () => true }) {
     busy.forEach((el) => el.classList.add('is-loading'));
     const request = Promise.all([get(`/api/deletions?${apiQuery({ page: filters.page, pageSize: PAGE_SIZE })}`), get(`/api/deletions/summary?${apiQuery()}`)]);
     loading = request;
+    // O foco no título da lista vale só para a carga pedida pela mudança de página (e não para outra
+    // carga que termine antes, ex.: a de uma busca digitada enquanto isso).
+    const wantFocus = focusResults;
+    focusResults = false;
     try {
       const [page, sum] = await request;
       // Outra tela aberta enquanto esperava: nada é desenhado nem vai para o endereço dela.
@@ -360,10 +364,7 @@ export async function render(root, { query, isCurrent = () => true }) {
       }
       drawAll();
       // Mudança de página: o foco vai para o título da lista (depois de redesenhada).
-      if (focusResults) {
-        focusResults = false;
-        $('[data-results] h2')?.focus({ preventScroll: true });
-      }
+      if (wantFocus) $('[data-results] h2')?.focus({ preventScroll: true });
       announce(`${plural(data.total, 'exclusão encontrada', 'exclusões encontradas')}.`);
     } catch (err) {
       if (stopped || !isCurrent() || loading !== request) return;
@@ -425,8 +426,9 @@ export async function render(root, { query, isCurrent = () => true }) {
   };
 
   // Datas: aplicadas depois de uma pausa e só completas (ao digitar o ano, o campo passa por valores
-  // como 0002-10-01, que não devem virar consultas nem ir para o endereço).
-  const completeDate = (value) => value === '' || (/^\d{4}-\d{2}-\d{2}$/.test(value) && Number(value.slice(0, 4)) >= 1970);
+  // como 0002-10-01, que não devem virar consultas nem ir para o endereço). Outras datas recusadas
+  // pelo servidor (ex.: antes de 1970) seguem, para o motivo aparecer na tela.
+  const completeDate = (value) => value === '' || (/^\d{4}-\d{2}-\d{2}$/.test(value) && !value.startsWith('0'));
   const onDate = Object.fromEntries(
     ['de', 'ate'].map((name) => [
       name,

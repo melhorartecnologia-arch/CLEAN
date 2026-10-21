@@ -184,11 +184,12 @@ export function folderRelative(repo, value) {
   }
   const segments = text.split(/[\\/]+/).filter(Boolean);
   if (!segments.length) return '';
-  for (const s of segments) {
+  for (const [i, s] of segments.entries()) {
     if (s === '.' || s === '..') throw new RetentionError(`Caminho de pasta inválido: "${text}" (sem "." nem "..").`);
-    // Espaço no início de um nome também é recusado: a validação seguinte (a cada execução) tiraria o
-    // espaço com o trim e a política passaria a valer para outra pasta.
-    if (BAD_SEGMENT.test(s) || /[. ]$/.test(s) || /^\s/.test(s) || s.length > 255) {
+    // Espaço no início do primeiro nome também é recusado: a validação seguinte (a cada execução)
+    // tiraria o espaço com o trim e a política passaria a valer para outra pasta. Nas pastas de
+    // dentro ("Financeiro\ Arquivo") ele é mantido.
+    if (BAD_SEGMENT.test(s) || /[. ]$/.test(s) || (i === 0 && /^\s/.test(s)) || s.length > 255) {
       throw new RetentionError(`Caminho de pasta inválido: "${text}". Informe a pasta sem curingas (* ?), sem os caracteres : " < > |, sem espaço no início e sem ponto ou espaço no fim dos nomes.`);
     }
   }

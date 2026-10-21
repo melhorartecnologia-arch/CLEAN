@@ -541,7 +541,10 @@ test('validação: pastas fora de uma lista e nomes com espaço no início são 
   fails(() => sanitizeRetention({ since: '2020-01-01', folders: 'Fin' }, 'files', { targets }), /lista/);
   fails(() => sanitizeRetention({ since: '2020-01-01', folders: 'Fin' }, 'mail'), /lista/);
   fails(() => sanitizeFolders([{ repositoryId: 'r1', path: 'D:\\Dados\\ Fin\\2019' }], { targets }), /espaço no início/);
-  fails(() => sanitizeFolders([{ repositoryId: 'r1', path: 'Fin\\ 2019' }], { targets }), /espaço no início/);
+  // Numa pasta de dentro, o espaço no início do nome é mantido (e a validação de novo dá o mesmo).
+  const inner = sanitizeFolders([{ repositoryId: 'r1', path: 'Financeiro\\ Arquivo' }], { targets });
+  assert.deepEqual(inner, [{ repositoryId: 'r1', path: 'Financeiro/ Arquivo' }]);
+  assert.deepEqual(sanitizeFolders(inner, { targets }), inner);
   // Sem pastas (ausente ou nulo): o repositório inteiro, como antes.
   assert.equal(sanitizeRetention({ since: '2020-01-01', folders: null }, 'files', { targets }).folders, undefined);
   // Idempotente: validar de novo o que foi salvo dá o mesmo JSON.
@@ -600,6 +603,8 @@ test('nuvem: o nome de uma biblioteca na frente vale só nela (e não como pasta
   data.drives['d-fin'].items = [folder('f-fin', 'Fin', [file('i-a', 'a.txt', 'x', old)])];
   // Em outra biblioteca do mesmo site, uma cópia arquivada com o mesmo caminho.
   data.drives['d-fin-assets'].items = [folder('f-dc', 'Documentos Compartilhados', [folder('f-dc-fin', 'Fin', [file('i-copia', 'copia.txt', 'x', old)])])];
+  // A outra biblioteca nem precisa ser lida: uma falha nela não deixa a análise incompleta.
+  data.failFolders = new Set(['d-fin-assets-root']);
   const mock = await startMockApis({ graph: data });
   try {
     const repository = cloudRepo('sharepoint', { exclude: [], cloud: { scope: 'list', accounts: [], sites: ['https://contoso.sharepoint.com/sites/Financeiro'], exclude: [] } });
@@ -608,11 +613,13 @@ test('nuvem: o nome de uma biblioteca na frente vale só nela (e não como pasta
       targets: [repository],
     });
     const messages = [];
-    await new Scanner({ repositories: [repository], terms: [], options: { deleteMatches: false, checkContent: false }, retention: { ...r, cutoff: cutoffDate(r).toISOString() }, endpoints: mock.endpoints }, (m) =>
+    const stats = await new Scanner({ repositories: [repository], terms: [], options: { deleteMatches: false, checkContent: false }, retention: { ...r, cutoff: cutoffDate(r).toISOString() }, endpoints: mock.endpoints }, (m) =>
       messages.push(m),
     ).run();
     const records = messages.filter((m) => m.type === 'results').flatMap((m) => m.records);
     assert.deepEqual(records.map((x) => x.name), ['a.txt']);
+    assert.equal(stats.gaps, 0);
+    assert.ok(!mock.calls.some((c) => c.includes('/drives/d-fin-assets/')), 'a biblioteca sem pastas escolhidas não é listada');
     assert.equal(records[0].retention.folder, 'Documentos Compartilhados/Fin');
     assert.ok(recordInScope(r, records[0]));
   } finally {

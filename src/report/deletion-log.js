@@ -58,7 +58,8 @@ function parseDay(value, label) {
   if (!m) throw bad(`${label} inválida: use o formato AAAA-MM-DD.`);
   const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
   const date = new Date(y, mo - 1, d);
-  if (y < 1970 || date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) throw bad(`${label} inválida: o dia ${value} não existe.`);
+  if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) throw bad(`${label} inválida: o dia ${value} não existe.`);
+  if (y < 1970) throw bad(`${label} inválida: use uma data a partir de 01/01/1970.`);
   return [y, mo, d];
 }
 
@@ -525,10 +526,10 @@ class Summary {
    * finals: a situação final de cada item pelo registro inteiro (e não só pelo recorte): um item que
    * falhou e depois foi excluído não "continua no lugar", mesmo filtrando só as falhas.
    */
-  result(finals) {
+  result(finals = null) {
     const t = this.totals;
-    for (const key of this.states.keys()) {
-      const status = finals.get(key);
+    for (const [key, own] of this.states) {
+      const status = finals ? finals.get(key) : own;
       if (status === 'missing') t.uniqueMissing++;
       else if (status === 'failed' || status === 'changed') t.uniquePending++;
     }
@@ -682,7 +683,10 @@ export class DeletionLog {
     const resolver = new DeletionResolver(this.store);
     const compiled = compileFilters(filters);
     const keys = new ItemKeys();
-    const finals = new Map(); // situação final de cada item, pelo registro inteiro
+    // Situação final de cada item pelo registro inteiro. Sem filtros, o recorte é o registro inteiro e
+    // o próprio resumo já a tem (sem um segundo mapa do mesmo tamanho).
+    const everything = Object.keys(filters).length === 0;
+    const finals = everything ? null : new Map();
     const summary = new Summary(resolver, keys, statusLabelsFor(filters));
     const options = new Options();
     const offsets = [];
@@ -692,7 +696,7 @@ export class DeletionLog {
         const n = normalizeEvent(event, resolver);
         options.add(n);
         const key = keys.of(n);
-        if (finals.get(key) !== 'deleted') finals.set(key, n.status);
+        if (finals && finals.get(key) !== 'deleted') finals.set(key, n.status);
         if (!matches(n, compiled)) continue;
         offsets.push(offset);
         lengths.push(length);
