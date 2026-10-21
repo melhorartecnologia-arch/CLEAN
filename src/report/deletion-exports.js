@@ -4,8 +4,7 @@
 // registros grandes não esgotam a memória.
 import { writeXlsx } from './xlsx.js';
 import { writeAll, csvCell, escapeHtml, REPORT_CSS, toDate, kb } from './exports.js';
-import { KIND_LABELS, PURPOSE_LABELS, ORIGIN_LABELS, NO_POLICY, localDay } from './deletion-log.js';
-import { DELETION_LABELS } from './model.js';
+import { KIND_LABELS, PURPOSE_LABELS, ORIGIN_LABELS, NO_POLICY, localDay, statusLabelsFor } from './deletion-log.js';
 
 /** Linhas da tabela do HTML (o Excel e o CSV trazem todas). */
 export const HTML_LIMIT = 10000;
@@ -71,7 +70,7 @@ export function filterRows(filters, options = {}) {
   if (filters.from || filters.to) {
     rows.push(['Período', filters.from && filters.to ? `de ${dayText(filters.from)} a ${dayText(filters.to)}` : filters.from ? `a partir de ${dayText(filters.from)}` : `até ${dayText(filters.to)}`]);
   }
-  if (filters.status) rows.push(['Situação', filters.status.split(',').map((s) => DELETION_LABELS[s] || s).join('; ')]);
+  if (filters.status) rows.push(['Situação', filters.status.split(',').map((s) => statusLabelsFor(filters)[s] || s).join('; ')]);
   if (filters.mode) rows.push(['Origem', ORIGIN_LABELS[filters.mode] || filters.mode]);
   if (filters.purpose) rows.push(['Finalidade', PURPOSE_LABELS[filters.purpose] || filters.purpose]);
   if (filters.kind) rows.push(['Tipo de local', KIND_LABELS[filters.kind] || filters.kind]);

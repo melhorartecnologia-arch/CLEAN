@@ -344,7 +344,10 @@ function focusKey(el, root) {
 export function redraw(root, draw) {
   const key = focusKey(document.activeElement, root);
   draw();
-  if (key) root.querySelector(key)?.focus({ preventScroll: true });
+  // Só devolve o foco a um elemento novo: chamar focus() no que já está com o foco desfaz a edição em
+  // andamento em alguns campos (ex.: o ano sendo digitado num campo de data, no Chrome).
+  const el = key ? root.querySelector(key) : null;
+  if (el && el !== document.activeElement) el.focus({ preventScroll: true });
 }
 
 export function formData(form) {

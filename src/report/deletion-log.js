@@ -151,7 +151,7 @@ function compileFilters(filters) {
 }
 
 /** Texto da busca livre de um evento (em minúsculas e sem acentos). */
-const haystack = (n) => foldText([n.item, n.scanName, n.scheduleName, n.by, n.error, n.note, n.repositoryName, n.relativePath, n.folder, n.mailbox].filter(Boolean).join(' | '));
+const haystack = (n) => foldText([n.item, n.scanName, n.scheduleName, n.by, n.error, n.note, n.repositoryName, n.relativePath, n.folder, n.mailbox, n.formerNames].filter(Boolean).join(' | '));
 
 function matches(n, c) {
   if (c.fromMs !== null || c.toMs !== null) {
@@ -238,8 +238,13 @@ function kindOf(e, target, scanKind, scan, item) {
   if (scanKind === 'teams' || e.method === 'teams') return 'teams';
   if (/^https?:\/\//i.test(item)) return cloudKind(item, scan);
   if (e.method === 'file' || looksLikePath(item)) return 'local';
-  // Análise excluída: "caixa › pasta › assunto" é uma mensagem; outro "a › b" é um arquivo na nuvem.
-  if (!scanKind && item.includes(SEP)) return item.split(SEP)[0].includes('@') ? 'mail' : 'cloud';
+  // Análise excluída: "caixa › pasta › assunto" (a caixa é só um endereço) é uma mensagem; outro
+  // "a › b" é um arquivo na nuvem ("OneDrive de ana@... › pasta/arquivo": OneDrive).
+  if (!scanKind && item.includes(SEP)) {
+    const parts = item.split(SEP);
+    if (parts.length >= 3 && /^[^\s@]+@[^\s@]+$/.test(parts[0])) return 'mail';
+    return /^OneDrive de /i.test(parts[0]) ? 'onedrive' : 'cloud';
+  }
   if (scanKind === 'files') return (scan?.repositories || []).every((r) => !r.type || r.type === 'local') ? 'local' : cloudKind(item, scan);
   return '';
 }
@@ -254,7 +259,12 @@ const normPath = (p) => str(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCa
  */
 function repositoryOf(target, kind, scan, resolver, item, mailbox) {
   const id = str(target.repositoryId) || str(target.sourceId);
-  if (id) return { id, name: str(target.repositoryName) || str(target.sourceName) || resolver.targetName(id, scan) || UNKNOWN_REPOSITORY };
+  if (id) {
+    // O nome atual (o cadastro pode ter sido renomeado); se não existe mais, o gravado na linha.
+    const recorded = str(target.repositoryName) || str(target.sourceName);
+    const current = resolver.repositories.get(id)?.name || resolver.sources.get(id)?.name || '';
+    return { id, name: current || recorded || resolver.targetName(id, scan) || UNKNOWN_REPOSITORY, former: current && recorded && recorded !== current ? recorded : '' };
+  }
   const unknown = { id: null, name: UNKNOWN_REPOSITORY };
   if (!scan || !kind) return unknown;
   if (kind === 'mail' || kind === 'teams') {
@@ -339,7 +349,9 @@ export function normalizeEvent(e, resolver) {
     }
   }
   const schedule = scheduleId ? resolver.schedules.get(scheduleId) : null;
-  if (!scheduleName && schedule) scheduleName = schedule.name;
+  // O nome atual do agendamento ou da política (o da linha pode ser anterior a uma renomeação).
+  const formerSchedule = schedule && scheduleName && scheduleName !== schedule.name ? scheduleName : '';
+  if (schedule) scheduleName = schedule.name;
   const policyKey = scheduleId || (scheduleName ? `nome:${scheduleName}` : null);
 
   const scanKind = SCAN_KINDS.has(e.scanKind) ? e.scanKind : scan?.kind || (method === 'teams' ? 'teams' : '');
@@ -403,12 +415,14 @@ export function normalizeEvent(e, resolver) {
     scanKind,
     scanExists: Boolean(scan),
     recordId: e.recordId ?? null,
+    // Nomes anteriores (renomeados depois da exclusão): a busca encontra também por eles.
+    formerNames: [formerSchedule, repo.former].filter(Boolean).join(' | '),
   };
 }
 
 /** O evento como vai para o navegador (sem campos internos). */
 export function publicEvent(n) {
-  const { time, ...rest } = n;
+  const { time, formerNames, ...rest } = n;
   return rest;
 }
 
@@ -428,28 +442,15 @@ function bump(stats, n, unique) {
 const byCount = (a, b) => b.uniqueDeleted - a.uniqueDeleted || b.attempts - a.attempts;
 const byText = (a, b) => a.localeCompare(b, 'pt-BR');
 
-/**
- * Resumo dos eventos que passaram nos filtros. Itens únicos (análise + item): vale a exclusão, se
- * houve uma, ou a última tentativa (a mesma regra do relatório). O espaço liberado soma o tamanho
- * dos itens excluídos (uma vez cada); os excluídos sem o tamanho registrado são contados à parte.
- */
-class Summary {
-  constructor(resolver) {
-    this.resolver = resolver;
-    this.totals = { ...newStats(), uniqueItems: 0, uniqueMissing: 0, uniquePending: 0, bytesUnknown: 0 };
-    this.first = null;
-    this.last = null;
-    this.days = new Map();
-    this.policies = new Map();
-    this.repositories = new Map();
-    this.kinds = new Map();
-    this.states = new Map(); // item único -> situação final
+/** Chaves dos itens únicos (análise + item), as mesmas no registro inteiro e no recorte. */
+class ItemKeys {
+  constructor() {
     this.scanIndex = new Map();
     this.loose = 0;
   }
 
-  /** Chave do item único (número quando possível: ocupa menos memória com milhões de itens). */
-  keyOf(n) {
+  /** Chave do item (número quando possível: ocupa menos memória com milhões de itens). */
+  of(n) {
     if (n.recordId === null || n.recordId === undefined || n.recordId === '') return `#${this.loose++}`;
     let idx = this.scanIndex.get(n.scanId);
     if (idx === undefined) {
@@ -458,6 +459,30 @@ class Summary {
     }
     const r = n.recordId;
     return Number.isSafeInteger(r) && r >= 0 && r < 2 ** 31 && idx < 2 ** 21 ? idx * 2 ** 31 + r : `${idx}:${r}`;
+  }
+}
+
+/** Rótulos das situações: no feminino só quando o recorte é de mensagens (e-mail ou Teams). */
+export const statusLabelsFor = (filters) => (filters.kind === 'mail' || filters.kind === 'teams' ? MAIL_DELETION_LABELS : DELETION_LABELS);
+
+/**
+ * Resumo dos eventos que passaram nos filtros. Itens únicos (análise + item): vale a exclusão, se
+ * houve uma, ou a última tentativa (a mesma regra do relatório). O espaço liberado soma o tamanho
+ * dos itens excluídos (uma vez cada); os excluídos sem o tamanho registrado são contados à parte.
+ */
+class Summary {
+  constructor(resolver, keys, labels = DELETION_LABELS) {
+    this.resolver = resolver;
+    this.keys = keys;
+    this.labels = labels;
+    this.totals = { ...newStats(), uniqueItems: 0, uniqueMissing: 0, uniquePending: 0, bytesUnknown: 0 };
+    this.first = null;
+    this.last = null;
+    this.days = new Map();
+    this.policies = new Map();
+    this.repositories = new Map();
+    this.kinds = new Map();
+    this.states = new Map(); // item único -> situação final (dentro do recorte)
   }
 
   group(map, key, init) {
@@ -469,8 +494,7 @@ class Summary {
     return g;
   }
 
-  add(n) {
-    const key = this.keyOf(n);
+  add(n, key) {
     const previous = this.states.get(key);
     if (previous === undefined) this.totals.uniqueItems++;
     let unique = false;
@@ -497,15 +521,20 @@ class Summary {
     bump(this.group(this.kinds, n.kind, () => ({ kind: n.kind })), n, unique);
   }
 
-  result() {
+  /**
+   * finals: a situação final de cada item pelo registro inteiro (e não só pelo recorte): um item que
+   * falhou e depois foi excluído não "continua no lugar", mesmo filtrando só as falhas.
+   */
+  result(finals) {
     const t = this.totals;
-    for (const status of this.states.values()) {
+    for (const key of this.states.keys()) {
+      const status = finals.get(key);
       if (status === 'missing') t.uniqueMissing++;
       else if (status === 'failed' || status === 'changed') t.uniquePending++;
     }
     this.states.clear();
     const { schedules } = this.resolver;
-    const byStatus = STATUSES.map((status) => ({ status, label: DELETION_LABELS[status], count: t[status] }));
+    const byStatus = STATUSES.map((status) => ({ status, label: this.labels[status], count: t[status] }));
     return {
       totals: t,
       range: { first: this.first?.at || null, last: this.last?.at || null },
@@ -514,7 +543,7 @@ class Summary {
         .map((g) => ({ ...g, name: (g.scheduleId && schedules.get(g.scheduleId)?.name) || g.name, purposeLabel: PURPOSE_LABELS[g.purpose] ?? g.purpose, exists: Boolean(g.scheduleId && schedules.has(g.scheduleId)) }))
         .sort((a, b) => (a.key === null) - (b.key === null) || byCount(a, b) || byText(a.name, b.name)),
       byRepository: [...this.repositories.values()]
-        .map((g) => ({ ...g, kindLabel: KIND_LABELS[g.kind] ?? g.kind }))
+        .map((g) => ({ ...g, name: (g.id && this.resolver.targetName(g.id)) || g.name, kindLabel: KIND_LABELS[g.kind] ?? g.kind }))
         .sort((a, b) => (a.key === null) - (b.key === null) || byCount(a, b) || byText(a.name, b.name)),
       byStatus,
       byKind: [...this.kinds.values()].map((g) => ({ ...g, label: KIND_LABELS[g.kind] ?? g.kind })).sort(byCount),
@@ -582,10 +611,26 @@ const READ_BATCH = 1000;
  * relê o arquivo inteiro.
  */
 export class DeletionLog {
-  constructor(store, { cacheSize = 6 } = {}) {
+  constructor(store, { cacheSize = 6, concurrency = 2 } = {}) {
     this.store = store;
     this.cacheSize = cacheSize;
     this.cache = new Map();
+    // Passadas pelo arquivo ao mesmo tempo (cada uma lê o registro inteiro): as demais esperam a vez.
+    this.concurrency = concurrency;
+    this.running = 0;
+    this.waiting = [];
+  }
+
+  /** Executa uma passada quando houver vaga (no máximo `concurrency` ao mesmo tempo). */
+  async #slot(fn) {
+    if (this.running >= this.concurrency) await new Promise((resolve) => this.waiting.push(resolve));
+    this.running++;
+    try {
+      return await fn();
+    } finally {
+      this.running--;
+      this.waiting.shift()?.();
+    }
   }
 
   async #stat() {
@@ -606,7 +651,7 @@ export class DeletionLog {
       s.listScans().map((x) => `${x.id}:${x.name}:${x.scheduleName || ''}`),
       s.listSchedules().map((x) => `${x.id}:${x.name}:${x.purpose || ''}`),
       s.listRepositories().map((x) => `${x.id}:${x.name}:${x.type || ''}:${x.path}`),
-      s.listMailSources().map((x) => `${x.id}:${x.name}:${(x.mailboxes || []).length}`),
+      s.listMailSources().map((x) => `${x.id}:${x.name}:${(x.mailboxes || []).map((m) => str(m?.address || m).toLowerCase()).join(',')}`),
     ];
     return crypto.createHash('sha1').update(parts.map((p) => p.join('|')).join('#')).digest('base64');
   }
@@ -614,12 +659,15 @@ export class DeletionLog {
   /** Passada pelo registro com os filtros (já validados por parseDeletionFilters). */
   query(filters = {}) {
     return this.#stat().then((st) => {
-      const key = `${st.size}|${st.mtimeMs}|${this.#catalog()}|${JSON.stringify(filters)}`;
+      // A busca entra na chave como é comparada (sem acentos nem maiúsculas): "Arquivo" e "arquivo"
+      // são o mesmo recorte e usam o mesmo cache.
+      const canonical = { ...filters, ...(filters.q ? { q: foldText(filters.q).trim() } : {}) };
+      const key = `${st.size}|${st.mtimeMs}|${this.#catalog()}|${JSON.stringify(canonical)}`;
       let entry = this.cache.get(key);
       if (entry) {
         this.cache.delete(key);
       } else {
-        entry = this.#run(filters, st);
+        entry = this.#slot(() => this.#run(filters, st));
         entry.catch(() => {
           if (this.cache.get(key) === entry) this.cache.delete(key);
         });
@@ -633,7 +681,9 @@ export class DeletionLog {
   async #run(filters, st) {
     const resolver = new DeletionResolver(this.store);
     const compiled = compileFilters(filters);
-    const summary = new Summary(resolver);
+    const keys = new ItemKeys();
+    const finals = new Map(); // situação final de cada item, pelo registro inteiro
+    const summary = new Summary(resolver, keys, statusLabelsFor(filters));
     const options = new Options();
     const offsets = [];
     const lengths = [];
@@ -641,13 +691,15 @@ export class DeletionLog {
       for await (const { offset, length, event } of this.store.readDeletionLog({ end: st.size })) {
         const n = normalizeEvent(event, resolver);
         options.add(n);
+        const key = keys.of(n);
+        if (finals.get(key) !== 'deleted') finals.set(key, n.status);
         if (!matches(n, compiled)) continue;
         offsets.push(offset);
         lengths.push(length);
-        summary.add(n);
+        summary.add(n, key);
       }
     }
-    return { filters, size: st.size, total: offsets.length, offsets, lengths, resolver, summary: summary.result(), options: options.result(resolver) };
+    return { filters, size: st.size, total: offsets.length, offsets, lengths, resolver, summary: summary.result(finals), options: options.result(resolver) };
   }
 
   /** Posições das linhas do recorte, das mais recentes para as mais antigas (start: quantas pular). */

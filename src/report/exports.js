@@ -1,7 +1,6 @@
 // Exportação dos relatórios: Excel (.xlsx), CSV (padrão Excel pt-BR), HTML para impressão e JSON.
 // Tudo é gravado em fluxo contínuo na resposta, para suportar análises com muitos resultados.
-import { once } from 'node:events';
-import { writeXlsx } from './xlsx.js';
+import { writeXlsx, waitDrain, ExportAborted } from './xlsx.js';
 import {
   summarize,
   sampleText,
@@ -212,16 +211,17 @@ export async function writeAll(out, chunks) {
   const add = (chunk) => {
     buffer += chunk;
     if (buffer.length < 64 * 1024) return false;
+    if (out.destroyed) throw new ExportAborted();
     const full = !out.write(buffer);
     buffer = '';
     return full;
   };
   if (typeof chunks?.[Symbol.asyncIterator] === 'function') {
-    for await (const chunk of chunks) if (add(chunk)) await once(out, 'drain');
+    for await (const chunk of chunks) if (add(chunk)) await waitDrain(out);
   } else {
-    for (const chunk of chunks) if (add(chunk)) await once(out, 'drain');
+    for (const chunk of chunks) if (add(chunk)) await waitDrain(out);
   }
-  if (buffer) out.write(buffer);
+  if (buffer && !out.destroyed) out.write(buffer);
 }
 
 export async function exportXlsx(scan, records, errors, out, { deletions = [], records: all = records } = {}) {

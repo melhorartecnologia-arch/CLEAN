@@ -34,6 +34,32 @@ const LOG_CHUNK = 1024 * 1024;
 const LOG_SPAN = 4 * 1024 * 1024;
 // O registro não existe (ainda) ou o caminho não é um arquivo: lido como vazio.
 const MISSING_LOG = new Set(['ENOENT', 'EISDIR', 'ENOTDIR']);
+// Começo de cada linha do registro geral (o primeiro campo é sempre o id da análise).
+const EVENT_START = Buffer.from('{"scanId"');
+
+/**
+ * "\n" se o arquivo não termina numa quebra de linha (gravação interrompida), senão "". Arquivo
+ * inexistente ou vazio: "".
+ */
+async function brokenTail(file) {
+  let fh;
+  try {
+    fh = await fs.open(file, 'r');
+  } catch {
+    return '';
+  }
+  try {
+    const { size } = await fh.stat();
+    if (!size) return '';
+    const last = Buffer.alloc(1);
+    await fh.read(last, 0, 1, size - 1);
+    return last[0] === 0x0a ? '' : '\n';
+  } catch {
+    return '';
+  } finally {
+    await fh.close();
+  }
+}
 
 /** Uma linha NDJSON (bytes de start a end): o objeto, ou null se estiver vazia ou corrompida. */
 function parseLine(buf, start, end) {
@@ -89,6 +115,7 @@ export class Store {
     this.saveChain = Promise.resolve();
     this.saveTimer = null;
     this.appendChains = new Map();
+    this.tailChecked = new Set(); // arquivos NDJSON cujo fim já foi conferido neste processo
     this.resultCache = new Map();
     this.readChains = new Map();
     this.secrets = null;
@@ -383,7 +410,12 @@ export class Store {
     const data = `${items.map((item) => JSON.stringify(item)).join('\n')}\n`;
     const run = (this.appendChains.get(target) || Promise.resolve()).then(async () => {
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await withRetry(() => fs.appendFile(target, data, 'utf8'));
+      // Na primeira gravação do processo em cada arquivo: se ele termina no meio de uma linha (o
+      // CLEAN parou no meio de uma gravação), a linha nova começa numa linha própria — senão as duas
+      // se juntariam numa linha inválida e a nova (completa) seria perdida na leitura.
+      const prefix = this.tailChecked.has(target) ? '' : await brokenTail(target);
+      await withRetry(() => fs.appendFile(target, prefix + data, 'utf8'));
+      this.tailChecked.add(target);
     });
     const settled = run.catch((err) => console.error(`[CLEAN] Falha ao gravar ${target}:`, err.message));
     this.appendChains.set(target, settled);
@@ -478,6 +510,13 @@ export class Store {
         for (let nl = data.indexOf(0x0a, start); nl !== -1; nl = data.indexOf(0x0a, start)) {
           const event = parseLine(data, start, nl);
           if (event) yield { offset: base + start, length: nl - start, event };
+          else {
+            // Linha inválida: pode ser o resto de uma gravação interrompida (ou bytes nulos deixados
+            // por uma queda de energia) seguido de um evento completo — este é aproveitado.
+            const at = data.lastIndexOf(EVENT_START, nl);
+            const glued = at > start ? parseLine(data, at, nl) : null;
+            if (glued) yield { offset: base + at, length: nl - at, event: glued };
+          }
           start = nl + 1;
         }
         if (start < data.length) {

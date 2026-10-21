@@ -111,6 +111,32 @@ function sheetName(name, used) {
   return candidate;
 }
 
+/** Exportação interrompida: quem pediu o arquivo desistiu (a conexão foi fechada). */
+export class ExportAborted extends Error {
+  constructor() {
+    super('A exportação foi interrompida: a conexão foi fechada.');
+    this.code = 'EXPORT_ABORTED';
+  }
+}
+
+/**
+ * Espera o fluxo de saída pedir mais dados ("drain"). Se a conexão foi fechada (o navegador desistiu
+ * do download), interrompe a exportação em vez de continuar lendo e gerando o arquivo para ninguém
+ * (ou de esperar para sempre um "drain" que não vem).
+ */
+export async function waitDrain(out) {
+  if (out.destroyed) throw new ExportAborted();
+  if (out.writableNeedDrain) {
+    const ac = new AbortController();
+    try {
+      await Promise.race([once(out, 'drain', { signal: ac.signal }), once(out, 'close', { signal: ac.signal })]);
+    } finally {
+      ac.abort();
+    }
+  }
+  if (out.destroyed) throw new ExportAborted();
+}
+
 /**
  * Grava um .xlsx em `out` (fluxo gravável, ex.: a resposta HTTP), respeitando o controle de fluxo.
  * sheets: [{ name, cols?: [larguras], header?: [células], rows: iterável (comum ou assíncrono) de linhas }]
@@ -133,7 +159,8 @@ export async function writeXlsx(sheets, out, { title = 'Relatório', creator = '
     if (final) finished();
   });
   const drain = async () => {
-    if (out.writableNeedDrain) await once(out, 'drain');
+    // A conexão fechada (download cancelado) interrompe a exportação: nada de ler e compactar o resto.
+    await waitDrain(out);
     if (failure) throw failure;
   };
   const addFile = (name, content) => {

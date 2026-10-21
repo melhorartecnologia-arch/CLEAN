@@ -69,7 +69,7 @@ function scanLink(n) {
   return html`${n.scanName || n.scanId} <span class="muted">(relatório excluído)</span>`;
 }
 
-export async function render(root, { query }) {
+export async function render(root, { query, isCurrent = () => true }) {
   const filters = Object.fromEntries(Object.keys(PARAMS).map((key) => [key, query.get(key) || '']));
   filters.page = query.get('page') || '';
   let data = null; // página atual
@@ -165,7 +165,7 @@ export async function render(root, { query }) {
       .map(([purpose, label]) => [label, o.schedules.filter((s) => (s.purpose || 'terms') === purpose)])
       .filter(([, list]) => list.length);
     const others = o.schedules.filter((s) => !PURPOSE_TEXT[s.purpose || 'terms']);
-    const scheduleText = (s) => `${s.name || '(sem nome)'}${s.exists ? '' : ' (excluído)'}`;
+    const scheduleText = (s) => `${s.name || '(sem nome)'}${s.exists ? '' : s.purpose === 'retention' ? ' (excluída)' : ' (excluído)'}`;
     fillSelect(
       form.elements.politica,
       html`<option value="">Todas</option>
@@ -348,7 +348,8 @@ export async function render(root, { query }) {
     loading = request;
     try {
       const [page, sum] = await request;
-      if (stopped || loading !== request) return;
+      // Outra tela aberta enquanto esperava: nada é desenhado nem vai para o endereço dela.
+      if (stopped || !isCurrent() || loading !== request) return;
       data = page;
       summary = sum;
       failure = '';
@@ -358,9 +359,14 @@ export async function render(root, { query }) {
         syncUrl();
       }
       drawAll();
+      // Mudança de página: o foco vai para o título da lista (depois de redesenhada).
+      if (focusResults) {
+        focusResults = false;
+        $('[data-results] h2')?.focus({ preventScroll: true });
+      }
       announce(`${plural(data.total, 'exclusão encontrada', 'exclusões encontradas')}.`);
     } catch (err) {
-      if (stopped || loading !== request) return;
+      if (stopped || !isCurrent() || loading !== request) return;
       // Sem números antigos na tela: eles seriam de outro recorte.
       failure = err.message;
       data = null;
@@ -376,8 +382,10 @@ export async function render(root, { query }) {
     }
   };
 
+  let focusResults = false;
+
   const applyFilters = (changes) => {
-    if (stopped) return;
+    if (stopped || !isCurrent()) return;
     Object.assign(filters, changes);
     if (!('page' in changes)) filters.page = '';
     syncUrl();
@@ -402,11 +410,13 @@ export async function render(root, { query }) {
     if (!el) return;
     const action = el.dataset.action;
     if (action === 'page') {
+      focusResults = true;
       applyFilters({ page: el.dataset.page > 1 ? el.dataset.page : '' });
       $('[data-results]').scrollIntoView({ block: 'start' });
       $('[data-results] h2')?.focus({ preventScroll: true });
     } else if (action === 'clear-filters') {
       onSearch.cancel();
+      Object.values(onDate).forEach((fn) => fn.cancel());
       for (const field of form.elements) if (field.name) field.value = '';
       applyFilters(Object.fromEntries(Object.keys(PARAMS).map((key) => [key, ''])));
     } else if (action === 'remove-filter') {
@@ -414,9 +424,21 @@ export async function render(root, { query }) {
     }
   };
 
+  // Datas: aplicadas depois de uma pausa e só completas (ao digitar o ano, o campo passa por valores
+  // como 0002-10-01, que não devem virar consultas nem ir para o endereço).
+  const completeDate = (value) => value === '' || (/^\d{4}-\d{2}-\d{2}$/.test(value) && Number(value.slice(0, 4)) >= 1970);
+  const onDate = Object.fromEntries(
+    ['de', 'ate'].map((name) => [
+      name,
+      debounce((value) => {
+        if (!stopped && completeDate(value) && value !== filters[name]) applyFilters({ [name]: value });
+      }, 600),
+    ]),
+  );
   const onChange = (event) => {
     const { name, value } = event.target;
-    if (name && name !== 'q' && Object.hasOwn(PARAMS, name)) applyFilters({ [name]: value });
+    if (onDate[name]) onDate[name](value);
+    else if (name && name !== 'q' && Object.hasOwn(PARAMS, name)) applyFilters({ [name]: value });
   };
   const onSearch = debounce((value) => {
     if (!stopped) applyFilters({ q: value.trim() });
@@ -438,6 +460,7 @@ export async function render(root, { query }) {
   return () => {
     stopped = true;
     onSearch.cancel();
+    Object.values(onDate).forEach((fn) => fn.cancel());
     root.removeEventListener('click', onClick);
   };
 }

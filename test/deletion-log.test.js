@@ -12,7 +12,9 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { Store } from '../src/store.js';
 import { ScanManager } from '../src/scan/manager.js';
 import { createApp } from '../src/app.js';
-import { DeletionLog, parseDeletionFilters, NO_POLICY, UNKNOWN_REPOSITORY } from '../src/report/deletion-log.js';
+import { DeletionLog, DeletionResolver, normalizeEvent, parseDeletionFilters, NO_POLICY, UNKNOWN_REPOSITORY } from '../src/report/deletion-log.js';
+import { waitDrain, ExportAborted } from '../src/report/xlsx.js';
+import { PassThrough } from 'node:stream';
 
 let root;
 const cleanups = [];
@@ -52,6 +54,7 @@ async function startApp(store) {
 
 /** Instante no fuso do servidor (os filtros de período valem nele). */
 const local = (y, m, d, h = 12, min = 0, s = 0) => new Date(y, m - 1, d, h, min, s).toISOString();
+const localDay = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 const appendLines = (store, lines) => fs.appendFileSync(store.deletionLog, lines.map((l) => `${typeof l === 'string' ? l : JSON.stringify(l)}\n`).join(''));
 const GONE = '99999999-9999-4999-8999-999999999999'; // análise já excluída
 const GONE_TEAMS = '88888888-8888-4888-8888-888888888888';
@@ -519,4 +522,108 @@ test('DeletionLog: o cache acompanha o arquivo e o cadastro', async () => {
   const events = [];
   for await (const n of log.events(c, { limit: 4 })) events.push(n.recordId);
   assert.deepEqual(events, [500, 77, 1, 6]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Reconferência
+
+test('gravação interrompida no fim do registro: a exclusão seguinte não se perde', async () => {
+  const store = await newStore();
+  const scan = store.createScan({ kind: 'files', name: 'Análise' });
+  const event = (recordId) => ({ recordId, status: 'deleted', error: null, note: null, mode: 'manual', method: 'file', by: 'x', item: `C:\\a\\${recordId}.txt`, at: new Date().toISOString() });
+  await store.appendDeletions(scan.id, [event(1)]);
+  await store.flushDeletionLog();
+  // O CLEAN parou no meio da gravação seguinte (um pedaço sem a quebra de linha)...
+  fs.appendFileSync(store.deletionLog, '{"scanId":"' + scan.id + '","recordId":2,"sta');
+  // ...e, ao voltar, grava outra exclusão.
+  const again = await new Store(store.dataDir).init();
+  cleanups.push(() => again.close());
+  await again.appendDeletions(scan.id, [event(3)]);
+  const log = new DeletionLog(again);
+  const result = await log.query({});
+  assert.equal(result.total, 2);
+  const ids = [];
+  for await (const n of log.events(result)) ids.push(n.recordId);
+  assert.deepEqual(ids, [3, 1]);
+  // Bytes nulos deixados por uma queda de energia, seguidos de uma linha completa (sem a correção na
+  // gravação): a leitura aproveita o evento completo.
+  const other = await newStore();
+  fs.writeFileSync(other.deletionLog, Buffer.concat([Buffer.alloc(300), Buffer.from(`${JSON.stringify({ scanId: scan.id, ...event(9) })}\n`)]));
+  const entries = [];
+  for await (const entry of other.readDeletionLog()) entries.push(entry);
+  assert.deepEqual(entries.map((e) => e.event.recordId), [9]);
+  assert.equal(entries[0].offset, 300);
+  assert.deepEqual((await other.readDeletionLines([{ offset: entries[0].offset, length: entries[0].length }]))[0].recordId, 9);
+});
+
+test('resumo: "continua no lugar" vale pela situação final no registro inteiro, mesmo com filtros', async () => {
+  const { store } = await seed();
+  const log = new DeletionLog(store);
+  // O item 2 da política falhou e depois foi excluído: não "continua no lugar" em nenhum recorte.
+  for (const filters of [{}, { status: 'failed' }, { status: 'changed,failed' }, { q: 'acesso negado' }, { to: localDay(2026, 10, 5) }]) {
+    const result = await log.query(parseDeletionFilters(filters));
+    const pendingTeams = result.summary.totals.uniquePending;
+    // Só o item do Teams (falhou e nunca foi excluído) pode continuar no lugar.
+    assert.ok(pendingTeams <= 1, JSON.stringify(filters));
+  }
+  const failedOnly = await log.query(parseDeletionFilters({ status: 'failed', mode: 'retention' }));
+  assert.equal(failedOnly.total, 1);
+  assert.equal(failedOnly.summary.totals.uniquePending, 0);
+});
+
+test('renomeações: a tela, o resumo e a busca usam o nome atual (e a busca acha também o antigo)', async () => {
+  const { store, scanA } = await seed();
+  store.updateSchedule(scanA.scheduleId, { name: 'Limpeza RH' });
+  const log = new DeletionLog(store);
+  const result = await log.query(parseDeletionFilters({ scheduleId: scanA.scheduleId }));
+  const rows = [];
+  for await (const n of log.events(result)) rows.push(n.scheduleName);
+  assert.ok(rows.length && rows.every((name) => name === 'Limpeza RH'));
+  assert.equal((await log.query(parseDeletionFilters({ q: 'limpeza rh' }))).total, 3);
+  assert.equal((await log.query(parseDeletionFilters({ q: 'Limpeza anual' }))).total, 3, 'o nome antigo continua achando');
+  // Repositório renomeado no cadastro: nas linhas e no resumo por repositório.
+  store.createRepository({ id: 'repo-local', name: 'RH (novo nome)', path: 'C:\\RH', type: 'local' });
+  const renamed = await log.query({});
+  assert.equal(renamed.summary.byRepository.find((g) => g.id === 'repo-local').name, 'RH (novo nome)');
+  const page = await log.page(renamed, 1, 50);
+  assert.ok(page.filter((n) => n.repositoryId === 'repo-local').every((n) => n.repositoryName === 'RH (novo nome)'));
+  assert.equal((await log.query(parseDeletionFilters({ q: 'arquivos rh' }))).total, 3, 'o nome gravado na linha também é achado');
+});
+
+test('cache: buscas que só diferem em maiúsculas ou acentos são o mesmo recorte; passadas limitadas', async () => {
+  const { store } = await seed();
+  const log = new DeletionLog(store, { concurrency: 1 });
+  const [a, b, c] = await Promise.all([log.query({ q: 'Relatório' }), log.query({ q: 'relatorio' }), log.query({ q: 'RELATÓRIO' })]);
+  assert.equal(a, b);
+  assert.equal(b, c);
+  assert.equal(a.total, 1);
+  // Com uma passada por vez, as consultas diferentes esperam a vez (e todas terminam).
+  const results = await Promise.all([log.query({ status: 'deleted' }), log.query({ status: 'failed' }), log.query({ mode: 'manual' })]);
+  assert.deepEqual(results.map((r) => r.total > 0), [true, true, true]);
+  assert.equal(log.running, 0);
+});
+
+test('linhas antigas: "OneDrive de conta › arquivo" é OneDrive, e não e-mail', () => {
+  const store = { getScan: () => null, listSchedules: () => [], listRepositories: () => [], listMailSources: () => [] };
+  const resolver = new DeletionResolver(store);
+  const n = normalizeEvent({ scanId: GONE, recordId: 1, status: 'deleted', mode: 'manual', method: 'trash', item: 'OneDrive de ana@contoso.com › Documentos/x.docx', at: local(2026, 10, 1) }, resolver);
+  assert.equal(n.kind, 'onedrive');
+  const mail = normalizeEvent({ scanId: GONE, recordId: 2, status: 'deleted', mode: 'manual', method: 'permanent', item: 'ana@contoso.com › Caixa de Entrada › Olá', at: local(2026, 10, 1) }, resolver);
+  assert.equal(mail.kind, 'mail');
+  assert.equal(mail.statusLabel, 'Excluída');
+});
+
+test('exportação: a conexão fechada interrompe a geração (sem ler o resto nem esperar para sempre)', async () => {
+  const out = new PassThrough({ highWaterMark: 16 });
+  out.write('x'.repeat(64)); // cheio: precisa esperar o "drain"
+  const waiting = waitDrain(out);
+  out.destroy();
+  await assert.rejects(waiting, ExportAborted);
+  await assert.rejects(waitDrain(out), ExportAborted);
+  // Situações no feminino quando o recorte é de mensagens.
+  const { store } = await seed();
+  const { get } = await startApp(store);
+  const html = (await get('/api/deletions/export.html?kind=mail&status=deleted')).data.toString('utf8');
+  assert.match(html, /Excluída/);
+  assert.doesNotMatch(html, /<td>Excluído<\/td>/);
 });

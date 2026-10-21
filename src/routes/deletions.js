@@ -18,6 +18,8 @@ async function stream(res, filename, type, write) {
     await write(res);
     res.end();
   } catch (err) {
+    // Download cancelado no navegador: não é uma falha.
+    if (err?.code === 'EXPORT_ABORTED') return res.destroy();
     if (!res.headersSent) throw err;
     console.error('[CLEAN] Falha ao gerar a exportação do registro de exclusões:', err);
     res.destroy(err);
