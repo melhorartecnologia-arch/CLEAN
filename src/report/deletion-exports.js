@@ -55,7 +55,13 @@ function eventRow(n) {
     n.folder,
     n.size === null ? '' : kb(n.size),
     dateOf(n.criterionDate),
-    n.periodFrom && n.periodTo ? `${dayText(n.periodFrom)} a ${dayText(n.periodTo)}` : dateOf(n.cutoff || n.since),
+    n.periodFrom || n.periodTo
+      ? n.periodFrom && n.periodTo
+        ? `${dayText(n.periodFrom)} a ${dayText(n.periodTo)}`
+        : n.periodFrom
+          ? `a partir de ${dayText(n.periodFrom)}`
+          : `até ${dayText(n.periodTo)}`
+      : dateOf(n.cutoff || n.since),
     n.methodLabel,
     n.by,
     n.detail,

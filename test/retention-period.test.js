@@ -98,13 +98,12 @@ test('período: validação, limites (os dois dias inteiros), idempotência e de
   // Prévia da tela: o mesmo corte; período inválido não tem prévia.
   assert.equal(+cutoffPreview({ mode: 'period', from: '2015-01-01', to: '2018-12-31' }), +new Date(2018, 11, 31));
   assert.equal(periodPreview({ from: '2019-01-01', to: '2018-12-31' }), null);
-  assert.equal(cutoffPreview({ mode: 'period', from: '2015-01-01', to: '' }), null);
+  assert.equal(cutoffPreview({ mode: 'period', from: '', to: '' }), null, 'sem nenhuma das datas: inválido');
   assert.equal(cutoffPreview({ mode: 'period', from: '2015-01-01', to: '2999-01-01' }), null);
   // Um dia só (inicial = final) vale.
   assert.equal(sanitizeRetention({ mode: 'period', from: '2020-05-10', to: '2020-05-10' }, 'files').to, '2020-05-10');
 
-  fails(() => sanitizeRetention({ mode: 'period', from: '2015-01-01' }, 'files'), /Informe a data final do período/);
-  fails(() => sanitizeRetention({ mode: 'period', to: '2015-01-01' }, 'files'), /Informe a data inicial do período/);
+  fails(() => sanitizeRetention({ mode: 'period', from: '', to: ' ' }, 'files'), /a data "a partir de", a data "até" ou as duas/);
   fails(() => sanitizeRetention({ mode: 'period', from: '2019-01-01', to: '2018-12-31' }, 'files'), /posterior à data final/);
   fails(() => sanitizeRetention({ mode: 'period', from: '2015-02-30', to: '2018-12-31' }, 'files'), /inicial do período inválida/);
   fails(() => sanitizeRetention({ mode: 'period', from: '1975-01-01', to: '2018-12-31' }, 'files'), /02\/01\/1980/);
@@ -311,4 +310,85 @@ test('período até hoje: o fim é o início da execução — um arquivo aberto
   const byStatus = Object.fromEntries(run.events.map((e) => [run.records.find((r) => r.id === e.recordId).name, e.status]));
   assert.deepEqual(byStatus, { 'aberto-agora.docx': 'changed', 'parado.docx': 'deleted' });
   assert.ok(exists('aberto-agora.docx') && !exists('parado.docx'));
+});
+
+
+// ---------------------------------------------------------------------------------------------
+// Só "a partir de" ou só "até"
+
+test('período com uma data só: "a partir de" (até o início da execução) ou "até" (sem limite no início)', () => {
+  const now = new Date(2026, 9, 22, 15, 30);
+  const after = sanitizeRetention({ mode: 'period', from: '2020-01-01', to: '', criterion: 'modified' }, 'files', { now });
+  assert.deepEqual(after, { criterion: 'modified', from: '2020-01-01', maxDeletions: 1000, deleteMode: 'permanent', patterns: [] });
+  assert.deepEqual(sanitizeRetention(after, 'files', { now }), after, 'idempotente (sem "mode", "from" sozinho continua período)');
+  assert.equal(+cutoffDate(after, now), +now, 'sem "até": o fim é o início da execução');
+  assert.equal(describeRetention(after, 'files'), 'Arquivos modificados pela última vez a partir de 01/01/2020');
+  assert.equal(amountText(after), 'a partir de 01/01/2020');
+  assert.equal(describeClient(after, 'files'), describeRetention(after, 'files'));
+  assert.equal(amountClient(after), amountText(after));
+
+  const until = sanitizeRetention({ mode: 'period', from: '', to: '2018-12-31', criterion: 'modified' }, 'files', { now });
+  assert.deepEqual(until, { criterion: 'modified', to: '2018-12-31', maxDeletions: 1000, deleteMode: 'permanent', patterns: [] });
+  assert.equal(+cutoffDate(until, now), +new Date(2019, 0, 1));
+  const w = expiryWindow({ ...until, cutoff: cutoffDate(until, now).toISOString() });
+  assert.equal(w.floorMs, null, 'sem limite no início');
+  assert.equal(inWindow(+new Date(1999, 0, 1), w), true);
+  assert.equal(inWindow(+new Date(2019, 0, 1), w), false);
+  assert.equal(describeRetention(until, 'files'), 'Arquivos modificados pela última vez até 31/12/2018');
+  assert.equal(describeClient(until, 'files'), describeRetention(until, 'files'));
+  // Prévia da tela: cada lado pode ficar em branco.
+  assert.deepEqual(periodPreview({ from: '2020-01-01', to: '' }, now), { from: new Date(2020, 0, 1), to: null });
+  assert.deepEqual(periodPreview({ from: '', to: '2018-12-31' }, now), { from: null, to: new Date(2018, 11, 31) });
+  assert.equal(periodPreview({ from: 'xx', to: '2018-12-31' }, now), null, 'uma data preenchida inválida');
+});
+
+test('motor: só "até" e só "a partir de" (o arquivo usado durante a execução fica)', async () => {
+  const { dir, put, exists } = repoDir();
+  put('1999.tmp', new Date(1999, 5, 1));
+  put('2018.tmp', new Date(2018, 11, 31, 22));
+  put('2019.tmp', new Date(2019, 0, 1, 0, 0, 1));
+  const until = await runFiles(dir, policyFor({ mode: 'period', to: '2018-12-31', criterion: 'modified', maxDeletions: 0 }), { deleteMatches: false });
+  assert.deepEqual(until.names, ['1999.tmp', '2018.tmp']);
+  assert.match(until.logs[0], /até 31\/12\/2018, inclusive/);
+  const after = await runFiles(dir, policyFor({ mode: 'period', from: '2019-01-01', criterion: 'modified', maxDeletions: 0 }), { deleteMatches: false });
+  assert.deepEqual(after.names, ['2019.tmp']);
+  assert.match(after.logs[0], /a partir de 01\/01\/2019 até o início desta execução/);
+  assert.ok(exists('1999.tmp') && exists('2018.tmp') && exists('2019.tmp'));
+});
+
+test('análise de arquivos: "alterados a partir de" e "alterados até" (o dia final inteiro)', async () => {
+  const { sanitizeOptions } = await import('../src/scan/manager.js');
+  const scannerWith = (options) => new Scanner({ repositories: [], terms: [{ id: 't', type: 'text', value: 'x', listName: 'L' }], options: sanitizeOptions({ checkContent: false, ...options }) }, () => {});
+  // A tela manda "até" como 00:00 do dia seguinte (o dia escolhido conta inteiro).
+  const both = scannerWith({ modifiedAfter: '2015-01-01T00:00:00', modifiedBefore: '2019-01-01T00:00:00' });
+  assert.equal(both.outsideChangedRange(+new Date(2014, 11, 31, 23, 59)), true, 'antes do início');
+  assert.equal(both.outsideChangedRange(+new Date(2015, 0, 1)), false, '00:00 do dia inicial');
+  assert.equal(both.outsideChangedRange(+new Date(2018, 11, 31, 23, 59, 59)), false, 'o dia final inteiro');
+  assert.equal(both.outsideChangedRange(+new Date(2019, 0, 1)), true, 'o dia seguinte');
+  const onlyUntil = scannerWith({ modifiedBefore: '2015-01-01T00:00:00' });
+  assert.equal(onlyUntil.outsideChangedRange(+new Date(1999, 0, 1)), false);
+  assert.equal(onlyUntil.outsideChangedRange(+new Date(2015, 0, 1)), true);
+  assert.equal(scannerWith({}).outsideChangedRange(+new Date(1999, 0, 1)), false, 'sem filtro');
+  assert.throws(() => sanitizeOptions({ modifiedAfter: '2019-01-01T00:00:00', modifiedBefore: '2018-01-01T00:00:00' }), /anterior à data "alterados a partir de"/);
+  assert.throws(() => sanitizeOptions({ modifiedBefore: 'ontem' }), /inválida/);
+  assert.equal(Object.hasOwn(sanitizeOptions({}), 'modifiedBefore'), false, 'sem "até": as opções continuam iguais às de antes');
+
+  // Na varredura vale a data mais recente entre a modificação e a criação (como em "a partir de"): um
+  // arquivo antigo copiado agora para o repositório conta pela data da cópia.
+  const { dir, put } = repoDir();
+  put('antigo.txt', new Date(2014, 5, 1));
+  const st = fs.statSync(path.join(dir, 'antigo.txt'));
+  const run = async (options) => {
+    const messages = [];
+    await new Scanner(
+      { repositories: [{ id: 'r1', name: 'Dados', path: dir, exclude: [], allowDelete: false, keep: [] }], terms: [{ id: 't', type: 'text', value: 'antigo', listName: 'L' }], options: sanitizeOptions({ checkContent: false, ...options }) },
+      (m) => messages.push(m),
+    ).run();
+    return { names: messages.filter((m) => m.type === 'results').flatMap((m) => m.records).map((r) => r.name), stats: messages.at(-1)?.stats };
+  };
+  const tomorrow = new Date(Date.now() + 86400000);
+  const day = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T00:00:00`;
+  assert.deepEqual((await run({ modifiedBefore: day(tomorrow) })).names, ['antigo.txt'], 'até hoje: entra');
+  const copiedNow = st.birthtimeMs > Date.now() - 86400000;
+  assert.deepEqual((await run({ modifiedBefore: '2015-01-01T00:00:00' })).names, copiedNow ? [] : ['antigo.txt'], 'copiado agora: conta a data da cópia');
 });

@@ -96,7 +96,7 @@ function parseSchedule(body = {}, { store, existing = null, by }) {
     if (lists.every((l) => !(l.terms || []).length)) throw bad('As listas selecionadas não possuem termos.');
     try {
       // O período de cada execução substitui a data fixa ("a partir de").
-      options = kind === 'mail' ? sanitizeMailOptions({ ...body.options, receivedAfter: null }) : sanitizeOptions({ ...body.options, modifiedAfter: null });
+      options = kind === 'mail' ? sanitizeMailOptions({ ...body.options, receivedAfter: null }) : sanitizeOptions({ ...body.options, modifiedAfter: null, modifiedBefore: null });
     } catch (err) {
       if (err instanceof ScanError) throw bad(err.message);
       throw err;

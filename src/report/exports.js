@@ -190,6 +190,7 @@ function scanInfoRows(scan) {
     ['Listas de referência', (scan.summary?.lists || []).map((l) => `${l.name} (${l.termCount} termos)`).join('; ')],
     ['Verificações', verifications],
     ['Alterados a partir de', opts.modifiedAfter ? toDate(opts.modifiedAfter) : 'todos'],
+    ...(opts.modifiedBefore ? [['Alterados até', toDate(new Date(Date.parse(opts.modifiedBefore) - 1000).toISOString())]] : []),
     ['Arquivos verificados', s.filesSeen ?? 0],
     ['Arquivos com ocorrências', s.filesMatched ?? 0],
     ['Total de ocorrências', s.occurrences ?? 0],

@@ -158,9 +158,12 @@ de exemplo. Depois é só iniciar uma análise.
    arquivo** (veja [Busca por tipo de arquivo](#busca-por-tipo-de-arquivo)). Nos termos, escolha
    repositórios e listas e o que verificar:
    - nome do arquivo (ou o caminho completo, incluindo os nomes das pastas) e/ou conteúdo;
-   - somente arquivos alterados a partir de uma data (vale a data mais recente entre a modificação
-     e a criação: um arquivo copiado para a pasta depois da data entra na análise, mesmo mantendo a
-     data de modificação original; mudanças só de permissões ou atributos não contam);
+   - **somente arquivos alterados a partir de** uma data e/ou **somente arquivos alterados até** uma
+     data (as duas juntas formam um período; o dia do "até" conta inteiro, até 23:59 na hora do
+     servidor). Vale a data mais recente entre a modificação e a criação: um arquivo copiado para a
+     pasta depois da data conta pela data da cópia, mesmo mantendo a data de modificação original;
+     mudanças só de permissões ou atributos não contam. Nas análises agendadas, o período de cada
+     execução (todos, últimos dias ou desde a última execução) substitui essas datas;
    - tamanho máximo para ler o conteúdo (arquivos maiores têm apenas o nome verificado; textos
      longos, só o início);
    - quantidade de arquivos processados em paralelo.
@@ -1012,9 +1015,13 @@ nada expira até essa data ficar antiga.
   com *Sem abertura nem modificação* e 01/01/2020, os arquivos que não foram abertos nem modificados
   desde 01/01/2020. A data não anda: todas as execuções usam o mesmo corte (um arquivo aberto em
   2021 nunca expira por essa política). No e-mail, *recebidas antes de* a data;
-- **Período (data inicial e final)** — arquivos: expiram os arquivos cuja data do critério está
-  **dentro do período, contando os dois dias inteiros** (das 00:00 do dia inicial até o fim do dia
-  final, na hora do servidor). Os mais antigos que o início e os mais recentes que o fim ficam. Ex.:
+- **Período (a partir de / até)** — arquivos: expiram os arquivos cuja data do critério está
+  **dentro do período, contando os dias inteiros** (das 00:00 do dia "a partir de" até o fim do dia
+  "até", na hora do servidor). Com o critério *Última modificação*, os campos aparecem como
+  **Somente arquivos alterados a partir de** e **Somente arquivos alterados até**. Uma das datas pode
+  ficar em branco: só "a partir de" — vai até o momento em que cada execução começa (cuidado: entram
+  também os arquivos alterados recentemente; o formulário avisa); só "até" — todos os mais antigos
+  que o fim do dia escolhido. Os mais antigos que o início e os mais recentes que o fim ficam. Ex.:
   *Última modificação* de 01/01/2015 a 31/12/2018 — os arquivos alterados pela última vez nesses
   quatro anos; *Sem abertura nem modificação* no mesmo período — vale a mais recente das duas datas,
   então um arquivo modificado em 2016 mas aberto em 2021 fica. As datas vão de 02/01/1980 até hoje
@@ -1233,8 +1240,8 @@ imagens de disco. Não há lista de referência: vale o tipo do arquivo.
   *Encontrado por: tipo real*) para a revisão. A conferência deixa a busca mais lenta (cada arquivo é
   aberto) e, como a leitura do conteúdo nas análises por termos, pode atualizar o último acesso dos
   arquivos. No OneDrive e no SharePoint vale só a extensão (o conteúdo não é baixado);
-- somente os arquivos alterados a partir de uma data, os repositórios, os arquivos processados em
-  paralelo e o proprietário (NTFS), como numa análise por termos.
+- somente os arquivos alterados a partir de uma data e/ou até uma data, os repositórios, os arquivos
+  processados em paralelo e o proprietário (NTFS), como numa análise por termos.
 
 **O que fazer com os arquivos encontrados:**
 

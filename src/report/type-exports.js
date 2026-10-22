@@ -39,6 +39,7 @@ export function typeInfoRows(scan) {
     ['Tamanho mínimo', t.minSizeMB ? `${String(t.minSizeMB).replace('.', ',')} MB` : 'todos os tamanhos'],
     ['Tipo real pelo conteúdo', t.checkContent ? 'conferido (pastas do Windows)' : 'não conferido (só a extensão)'],
     ['Alterados a partir de', o.modifiedAfter ? toDate(o.modifiedAfter) : 'todos'],
+    ...(o.modifiedBefore ? [['Alterados até', toDate(new Date(Date.parse(o.modifiedBefore) - 1000).toISOString())]] : []),
     ['Arquivos verificados', s.filesSeen ?? 0],
     ['Arquivos encontrados', s.filesMatched ?? 0],
     ['Tamanho dos encontrados (MB)', mb(s.bytesFound)],

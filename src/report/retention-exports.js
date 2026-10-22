@@ -49,8 +49,18 @@ function policyRows(scan) {
   return [
     ['Regra', describeRetention(r, mail ? 'mail' : 'files')],
     ['Critério de data', criterion?.label || r.criterion],
-    ...(r.from && r.to
-      ? [['Período (data do critério)', `de ${dateBr(r.from)} a ${dateBr(r.to)}, os dois dias inclusive`]]
+    ...(r.from || r.to
+      ? [
+          [
+            'Período (data do critério)',
+            r.from && r.to
+              ? `de ${dateBr(r.from)} a ${dateBr(r.to)}, os dois dias inclusive`
+              : r.from
+                ? `a partir de ${dateBr(r.from)}, até o início da execução`
+                : `até ${dateBr(r.to)}, inclusive`,
+          ],
+          ...(r.from && !r.to ? [['Início da execução (fim do período)', toDate(r.cutoff)]] : []),
+        ]
       : [r.since ? [`Data fixa (${sinceLabel(r, mail)})`, dateBr(r.since)] : ['Idade máxima', amountText(r)], ['Data de corte (expiram os anteriores)', toDate(r.cutoff)]]),
     mail
       ? ['Lixeira / Lixo eletrônico', `${r.includeTrash ? 'inclui' : 'ignora'} a lixeira; ${r.includeJunk ? 'inclui' : 'ignora'} o lixo eletrônico`]

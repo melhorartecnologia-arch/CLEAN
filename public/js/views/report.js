@@ -1917,8 +1917,17 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const exportsLabel = filtered ? 'Exportar (com os filtros atuais):' : 'Exportar:';
     // Agendamento que iniciou a análise e o período analisado (incremental ou "a partir de").
     const after = scan.options?.modifiedAfter || scan.options?.receivedAfter;
+    // "Até": o limite gravado é 00:00 do dia seguinte (exclusivo); mostra o último instante incluído.
+    const before = scan.options?.modifiedBefore ? new Date(Date.parse(scan.options.modifiedBefore) - 60000).toISOString() : null;
     // No fuso do servidor, como a data informada na análise (ou o período do agendamento).
-    const period = after ? `somente ${scan.kind === 'mail' ? 'mensagens recebidas' : 'arquivos alterados'} a partir de ${fmtServerDateTime(after, { weekday: false })}` : '';
+    const what = scan.kind === 'mail' ? 'mensagens recebidas' : 'arquivos alterados';
+    const period = after && before
+      ? `somente ${what} de ${fmtServerDateTime(after, { weekday: false })} até ${fmtServerDateTime(before, { weekday: false })}`
+      : after
+        ? `somente ${what} a partir de ${fmtServerDateTime(after, { weekday: false })}`
+        : before
+          ? `somente ${what} até ${fmtServerDateTime(before, { weekday: false })}`
+          : '';
     const [scheduleNoun, scheduleBase] = P.retention ? ['Política de retenção', '#/retencao'] : ['Agendamento', '#/agendamentos'];
     const schedule = scan.scheduleExists
       ? html`${icon('clock')} ${scheduleNoun} <a href="${scheduleBase}/${scan.scheduleId}">${scan.scheduleName}</a>`
@@ -1930,11 +1939,17 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const blocked = scan.deletionBlocked ? ` · exclusão desativada nesta execução: ${scan.deletionBlocked}` : '';
     // Período: os dois dias escolhidos (inclusive); data fixa: o dia escolhido na política (00:00 no
     // servidor); idade máxima: o instante calculado.
-    const cutoffWhen = scan.retention?.from && scan.retention?.to
-      ? html`entre <b>${dateBr(scan.retention.from)}</b> e <b>${dateBr(scan.retention.to)}</b> (período, os dois dias inclusive)`
-      : scan.retention?.since
-        ? html`anterior a <b>${dateBr(scan.retention.since)}</b> (data fixa)`
-        : html`anterior a <b>${fmtServerDateTime(scan.retention?.cutoff, { weekday: false })}</b>`;
+    const sr = scan.retention || {};
+    const cutoffWhen =
+      sr.from && sr.to
+        ? html`entre <b>${dateBr(sr.from)}</b> e <b>${dateBr(sr.to)}</b> (período, os dois dias inclusive)`
+        : sr.from
+          ? html`a partir de <b>${dateBr(sr.from)}</b> até o início da execução, <b>${fmtServerDateTime(sr.cutoff, { weekday: false })}</b> (período)`
+          : sr.to
+            ? html`até <b>${dateBr(sr.to)}</b>, inclusive (período)`
+            : sr.since
+              ? html`anterior a <b>${dateBr(sr.since)}</b> (data fixa)`
+              : html`anterior a <b>${fmtServerDateTime(sr.cutoff, { weekday: false })}</b>`;
     const cutoff = P.retention
       ? html`<div class="sub">Expiram ${P.o === 'a' ? 'as mensagens' : 'os arquivos'} com a data do critério ${cutoffWhen}${scan.options?.deleteMatches
           ? ` · ${mode}${limit}${scan.deletionRevoked ? ` · exclusão interrompida: ${scan.deletionRevoked}` : ''}`

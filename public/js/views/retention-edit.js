@@ -25,14 +25,27 @@ function sinceWords(criterion) {
 
 const capitalize = (text) => `${text[0].toUpperCase()}${text.slice(1)}`;
 
-const PERIOD_ERROR = 'Informe o período: a data inicial e a final, de 02/01/1980 até hoje (datas futuras não valem), com a inicial antes ou igual à final.';
+const PERIOD_ERROR = 'Informe o período: a data "a partir de", a data "até" ou as duas, de 02/01/1980 até hoje (datas futuras não valem), com a inicial antes ou igual à final.';
 
-/** Período na prévia, por extenso, com as datas (dd/mm/aaaa) da política. */
-function periodText(criterion, r) {
+/** Período na prévia, por extenso: "arquivos modificados pela última vez entre 01/01/2015 e 31/12/2018". */
+function periodPhrase(criterion, r) {
   const p = periodPreview(r);
-  const [a, b] = [p.from, p.to].map((d) => d.toLocaleDateString('pt-BR'));
-  return (EXPIRES_BETWEEN[criterion] || EXPIRES_BETWEEN.used)(a, b);
+  const [a, b] = [p.from, p.to].map((d) => d?.toLocaleDateString('pt-BR'));
+  const range = a && b ? `entre ${a} e ${b}` : a ? `a partir de ${a} (até o início de cada execução)` : `até ${b}`;
+  return `${EXPIRES_PERIOD[criterion] || EXPIRES_PERIOD.used} ${range}`;
 }
+
+/**
+ * Rótulos dos campos do período, pelo critério: "Somente arquivos alterados a partir de" e
+ * "Somente arquivos alterados até" (última modificação)...
+ */
+const PERIOD_LABELS = {
+  used: 'Somente arquivos usados pela última vez (modificação, acesso ou criação)',
+  'opened-or-modified': 'Somente arquivos abertos ou alterados pela última vez',
+  modified: 'Somente arquivos alterados',
+  accessed: 'Somente arquivos abertos pela última vez',
+  created: 'Somente arquivos criados',
+};
 
 /** Hoje ("AAAA-MM-DD", hora local): o limite do campo de data (o servidor recusa datas futuras). */
 function todayIso() {
@@ -50,13 +63,13 @@ const EXPIRES = {
   received: (d) => `mensagens recebidas antes de ${d}`,
 };
 
-/** O que expira num período, na prévia: "arquivos modificados pela última vez entre 01/01/2015 e 31/12/2018". */
-const EXPIRES_BETWEEN = {
-  used: (a, b) => `arquivos cuja data mais recente (modificação, último acesso ou criação) está entre ${a} e ${b}`,
-  'opened-or-modified': (a, b) => `arquivos cuja última abertura (último acesso) ou modificação — a mais recente das duas — foi entre ${a} e ${b}`,
-  modified: (a, b) => `arquivos modificados pela última vez entre ${a} e ${b}`,
-  accessed: (a, b) => `arquivos abertos (acessados) pela última vez entre ${a} e ${b}`,
-  created: (a, b) => `arquivos criados entre ${a} e ${b}`,
+/** O que expira num período, na prévia (seguido de "entre ...", "a partir de ..." ou "até ..."). */
+const EXPIRES_PERIOD = {
+  used: 'arquivos cuja data mais recente (modificação, último acesso ou criação) foi',
+  'opened-or-modified': 'arquivos cuja última abertura (último acesso) ou modificação — a mais recente das duas — foi',
+  modified: 'arquivos alterados (modificados) pela última vez',
+  accessed: 'arquivos abertos (acessados) pela última vez',
+  created: 'arquivos criados',
 };
 
 export async function render(root, { params, query, ctx }) {
@@ -96,7 +109,7 @@ export async function render(root, { params, query, ctx }) {
   const sel = (a, b) => (String(a) === String(b) ? 'selected' : '');
   const isCloud = (t) => Boolean(CLOUD_LABELS[t.type]);
   // Forma do corte salva: período (arquivos), data fixa ou idade máxima.
-  const savedMode = !mail && r.from && r.to ? 'period' : r.since ? 'date' : 'age';
+  const savedMode = !mail && (r.from || r.to) ? 'period' : r.since ? 'date' : 'age';
   // Pastas salvas, por repositório (uma por linha no campo de cada um).
   const savedFolders = (tid) => (r.folders || []).filter((f) => f.repositoryId === tid).map((f) => f.path.split('/').join(isCloud(targets.find((t) => t.id === tid) || {}) ? '/' : '\\'));
 
@@ -164,7 +177,7 @@ export async function render(root, { params, query, ctx }) {
               <div class="option-row" role="radiogroup" aria-labelledby="cut-label">
                 <label class="check"><input type="radio" name="cutMode" value="age" ${chk(savedMode === 'age')} /><span>Idade máxima</span></label>
                 <label class="check"><input type="radio" name="cutMode" value="date" ${chk(savedMode === 'date')} /><span>Data fixa (<span data-since-word>${sinceWords(criterion)}</span>)</span></label>
-                ${mail ? '' : html`<label class="check"><input type="radio" name="cutMode" value="period" ${chk(savedMode === 'period')} /><span>Período (data inicial e final)</span></label>`}
+                ${mail ? '' : html`<label class="check"><input type="radio" name="cutMode" value="period" ${chk(savedMode === 'period')} /><span>Período (a partir de / até)</span></label>`}
               </div>
             </div>
             <div class="field" data-cut="age" ${savedMode === 'age' ? '' : 'hidden'}>
@@ -185,12 +198,9 @@ export async function render(root, { params, query, ctx }) {
             ${mail
               ? ''
               : html`<div class="field" data-cut="period" ${savedMode === 'period' ? '' : 'hidden'}>
-                  <span id="period-label">Data do critério entre</span>
-                  <div class="option-row" role="group" aria-labelledby="period-label">
-                    <label class="field"><span>De</span><input type="date" name="periodFrom" min="1980-01-02" max="${todayIso()}" value="${r.from || ''}" /></label>
-                    <label class="field"><span>Até</span><input type="date" name="periodTo" min="1980-01-02" max="${todayIso()}" value="${r.to || ''}" /></label>
-                  </div>
-                  <small>Expiram os arquivos cuja data do critério está dentro do período, contando os dois dias inteiros (hora do servidor). Os mais antigos que o início e os mais recentes que o fim ficam. Com "Sem abertura nem modificação", vale a mais recente das duas datas: um arquivo aberto ou modificado depois do fim do período fica. As datas não andam: todas as execuções usam o mesmo período. Com a data final hoje, o período vai até o início de cada execução.</small>
+                  <label class="field"><span data-period-label="from">${PERIOD_LABELS[criterion] || PERIOD_LABELS.used} a partir de</span><input type="date" name="periodFrom" min="1980-01-02" max="${todayIso()}" value="${r.from || ''}" /></label>
+                  <label class="field"><span data-period-label="to">${PERIOD_LABELS[criterion] || PERIOD_LABELS.used} até</span><input type="date" name="periodTo" min="1980-01-02" max="${todayIso()}" value="${r.to || ''}" /></label>
+                  <small>Preencha uma das datas ou as duas; cada dia conta inteiro (hora do servidor). Só "a partir de": entram também os arquivos usados recentemente, até o início de cada execução. Só "até": todos os mais antigos que o fim do dia escolhido. Com "Sem abertura nem modificação", vale a mais recente das duas datas: um arquivo aberto ou modificado depois do fim do período fica. As datas não andam: todas as execuções usam o mesmo período.</small>
                 </div>`}
             ${mail
               ? html`<label class="check"><input type="checkbox" name="includeTrash" ${chk(r.includeTrash !== false)} /><span>Incluir a Lixeira (Itens Excluídos)</span></label>
@@ -349,6 +359,9 @@ export async function render(root, { params, query, ctx }) {
     form.querySelector('[data-delete-options]').hidden = !deletingNow;
     form.querySelectorAll('[data-cut]').forEach((el) => (el.hidden = el.dataset.cut !== retention.mode));
     form.querySelector('[data-since-word]').textContent = sinceWords(c);
+    form.querySelectorAll('[data-period-label]').forEach((el) => {
+      el.textContent = `${PERIOD_LABELS[c] || PERIOD_LABELS.used} ${el.dataset.periodLabel === 'from' ? 'a partir de' : 'até'}`;
+    });
     form.querySelector('[data-since-label]').textContent = capitalize(sinceWords(c));
     if (!mail) {
       form.querySelector('[data-criterion-hint]').textContent = FILE_CRITERIA[c]?.hint || '';
@@ -379,7 +392,10 @@ export async function render(root, { params, query, ctx }) {
     const where = mail || !folderCount ? '' : ` Somente ${folderCount === 1 ? 'na pasta informada' : `nas ${folderCount} pastas informadas`} (e subpastas)${others}.`;
     const content = cutoff
       ? html`<div class="preview-title">${icon('clock')} <b>${describeRetention({ ...retention, folders: retention.folders?.map((f) => ({ ...f, path: shortFolder(f) })) }, kind)}</b></div>
-          <div class="muted small">${byDateNow || byPeriodNow ? 'Em cada execução' : 'Se executada hoje'}, a política ${deletingNow ? 'excluiria' : 'listaria'} os ${byPeriodNow ? periodText(c, retention) : EXPIRES[c](cutoff.toLocaleDateString('pt-BR'))}.${where}${limitText}</div>`
+          <div class="muted small">${byDateNow || byPeriodNow ? 'Em cada execução' : 'Se executada hoje'}, a política ${deletingNow ? 'excluiria' : 'listaria'} os ${byPeriodNow ? periodPhrase(c, retention) : EXPIRES[c](cutoff.toLocaleDateString('pt-BR'))}.${where}${limitText}</div>
+          ${byPeriodNow && !periodPreview(retention).to
+            ? html`<div class="danger-text small">${icon('alert')} Sem a data "até", entram também os arquivos usados recentemente${deletingNow ? ' — e eles seriam excluídos' : ''}. Confira com "Simular agora".</div>`
+            : ''}`
       : byPeriodNow
         ? html`<div class="danger-text small">${icon('alert')} ${PERIOD_ERROR}</div>`
         : byDateNow
@@ -431,7 +447,9 @@ export async function render(root, { params, query, ctx }) {
     if (!cutoffPreview(retention)) {
       if (retention.mode === 'period') {
         // O campo com o problema: a data inicial inválida (ou vazia); senão a final (inválida ou antes da inicial).
-        form.elements[sinceInstant(retention.from) ? 'periodTo' : 'periodFrom'].focus();
+        const fromBad = String(retention.from).trim() !== '' && !sinceInstant(retention.from);
+        const toBad = String(retention.to).trim() !== '' && !sinceInstant(retention.to);
+        form.elements[fromBad || (!toBad && !retention.from) ? 'periodFrom' : 'periodTo'].focus();
         return toast(PERIOD_ERROR, 'error');
       }
       if (retention.mode === 'date') {

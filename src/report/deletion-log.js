@@ -310,13 +310,8 @@ function policyRule(policy, scanKind) {
   if (!policy) return '';
   const criteria = scanKind === 'mail' ? MAIL_CRITERIA : FILE_CRITERIA;
   const label = criteria[policy.criterion]?.label || '';
-  const age = policy.from && policy.to
-    ? `entre ${dateText(policy.from)} e ${dateText(policy.to)}`
-    : policy.since
-      ? `antes de ${dateText(policy.since)}`
-      : Number.isFinite(policy.amount) && policy.unit
-        ? `mais de ${amountText(policy)}`
-        : '';
+  const period = policy.from && policy.to ? `entre ${dateText(policy.from)} e ${dateText(policy.to)}` : policy.from ? `a partir de ${dateText(policy.from)}` : policy.to ? `até ${dateText(policy.to)}` : '';
+  const age = period || (policy.since ? `antes de ${dateText(policy.since)}` : Number.isFinite(policy.amount) && policy.unit ? `mais de ${amountText(policy)}` : '');
   const rule = [label, age].filter(Boolean).join(': ');
   // Pastas escolhidas na política: [{ repositoryId, path }] (ou só os caminhos).
   const names = Array.isArray(policy.folders) ? policy.folders.map((f) => (typeof f === 'string' ? f : str(f?.path))).filter(Boolean) : [];

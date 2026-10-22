@@ -46,6 +46,7 @@ export const DEFAULT_OPTIONS = {
   checkContent: true,
   maxFileSizeMB: 50,
   modifiedAfter: null, // ISO: analisa só arquivos modificados a partir desta data
+  // modifiedBefore (ISO, só quando informado): analisa só os alterados antes deste instante
   resolveOwner: true,
   concurrency: 4,
   maxSamples: 3,
@@ -176,6 +177,8 @@ export class Scanner {
     this.fileTimeoutMs = config.fileTimeoutMs || FILE_TIMEOUT;
     this.modifiedAfter = this.options.modifiedAfter ? new Date(this.options.modifiedAfter).getTime() : null;
     if (Number.isNaN(this.modifiedAfter)) this.modifiedAfter = null;
+    this.modifiedBefore = this.options.modifiedBefore ? new Date(this.options.modifiedBefore).getTime() : null;
+    if (Number.isNaN(this.modifiedBefore)) this.modifiedBefore = null;
     // Pastas do próprio CLEAN (dados e instalação): nunca têm arquivos excluídos.
     this.protect = config.protect || [];
     // Política de retenção: arquivos mais antigos que a data de corte, pelo critério escolhido
@@ -253,9 +256,13 @@ export class Scanner {
     const started = Date.now();
     if (this.retention) {
       const cutoff = new Date(this.retention.cutoffMs).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
-      const when = this.retention.from
-        ? `entre ${dateBr(this.retention.from)} e ${dateBr(this.retention.to)} (período, os dois dias inclusive)`
-        : `anterior a ${cutoff}${this.retention.since ? ' (data fixa)' : ''}`;
+      const r = this.retention;
+      const when =
+        r.from && r.to
+          ? `entre ${dateBr(r.from)} e ${dateBr(r.to)} (período, os dois dias inclusive)`
+          : r.from
+            ? `a partir de ${dateBr(r.from)} até o início desta execução (${cutoff})`
+            : `anterior a ${cutoff}${r.to ? ` (período: até ${dateBr(r.to)}, inclusive)` : r.since ? ' (data fixa)' : ''}`;
       this.log('info', `Retenção iniciada em ${this.repositories.length} repositório(s): arquivos com a data do critério ${when}.`);
     } else if (this.typeSearch) {
       this.log('info', `Busca por tipo iniciada em ${this.repositories.length} repositório(s): ${describeFileTypes(this.typeSearch)}.`);
@@ -591,7 +598,7 @@ export class Scanner {
     const { item, relativePath } = entry;
     const label = `${drive.label} › ${relativePath}`;
     this.current = { repository: repo.name, path: label };
-    if (this.modifiedAfter && cloudChangedAt(item) < this.modifiedAfter) {
+    if (this.outsideChangedRange(cloudChangedAt(item))) {
       this.stats.filesSkippedByDate++;
       return;
     }
@@ -902,7 +909,7 @@ export class Scanner {
       this.error(entry.path, err);
       return;
     }
-    if (this.modifiedAfter && changedAt(st) < this.modifiedAfter) {
+    if (this.outsideChangedRange(changedAt(st))) {
       this.stats.filesSkippedByDate++;
       return;
     }
@@ -1145,6 +1152,11 @@ export class Scanner {
    * Retenção: o arquivo continua expirado na hora de excluir? A data do critério pode ter mudado
    * depois da listagem (ex.: o arquivo foi aberto). Devolve o motivo para mantê-lo, ou null.
    */
+  /** Fora do filtro "alterados a partir de" / "alterados até" da análise (sem filtro: false). */
+  outsideChangedRange(when) {
+    return Boolean((this.modifiedAfter && when < this.modifiedAfter) || (this.modifiedBefore && when >= this.modifiedBefore));
+  }
+
   stillExpired(st) {
     const when = fileDate(st, this.retention.criterion);
     if (inWindow(when, this.retention)) return null;

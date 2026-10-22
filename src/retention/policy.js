@@ -7,7 +7,8 @@ import path from 'node:path';
 //   { criterion,
 //     amount, unit: 'days' | 'months' | 'years'   // idade máxima (o corte anda a cada execução), ou
 //     since: 'AAAA-MM-DD',                        // data fixa: sem uso desde esse dia (00:00, hora do servidor), ou
-//     from, to: 'AAAA-MM-DD',                     // arquivos: período — a data do critério entre os dois dias (inclusive)
+//     from, to: 'AAAA-MM-DD',                     // arquivos: período — a data do critério a partir de "from" e/ou
+//                                                 // até "to" (dias inteiros; ao menos um dos dois)
 //     maxDeletions,              // limite de exclusões por execução (0: sem limite)
 //     deleteMode: 'permanent' | 'trash',
 //     patterns: ['*.tmp', ...]   // arquivos: só estes nomes (vazio: todos)
@@ -30,23 +31,23 @@ export const FILE_CRITERIA = {
   used: {
     label: 'Sem uso (nenhuma data recente)',
     phrase: 'sem uso',
-    period: 'com o uso mais recente (modificação, acesso ou criação) entre',
+    period: 'com o uso mais recente (modificação, acesso ou criação)',
     hint: 'O mais seguro: o arquivo só expira se a modificação, o último acesso e a criação forem todos mais antigos que o limite.',
   },
   'opened-or-modified': {
     label: 'Sem abertura nem modificação',
     phrase: 'sem abertura nem modificação',
-    period: 'com a última abertura ou modificação entre',
+    period: 'com a última abertura ou modificação',
     hint: 'A data mais recente entre a última abertura (último acesso) e a última modificação; a criação não conta. O último acesso só é confiável se o Windows o registrar no servidor de arquivos. Não disponível no OneDrive e no SharePoint.',
   },
-  modified: { label: 'Última modificação', phrase: 'sem modificação', period: 'modificados pela última vez entre', hint: 'Data em que o conteúdo foi alterado pela última vez (confiável em qualquer servidor).' },
+  modified: { label: 'Última modificação', phrase: 'sem modificação', period: 'modificados pela última vez', hint: 'Data em que o conteúdo foi alterado pela última vez (confiável em qualquer servidor).' },
   accessed: {
     label: 'Último acesso (abertura)',
     phrase: 'sem acesso',
-    period: 'abertos (acessados) pela última vez entre',
+    period: 'abertos (acessados) pela última vez',
     hint: 'Só é confiável se o Windows registrar o último acesso no servidor de arquivos (muitas vezes desligado). Não disponível no OneDrive e no SharePoint.',
   },
-  created: { label: 'Criação', phrase: 'criados', period: 'criados entre', hint: 'Data em que o arquivo foi criado ou copiado para o repositório.' },
+  created: { label: 'Criação', phrase: 'criados', period: 'criados', hint: 'Data em que o arquivo foi criado ou copiado para o repositório.' },
 };
 
 export const MAIL_CRITERIA = {
@@ -93,11 +94,13 @@ export function sanitizeRetention(input, kind, { cloud = false, targets = null, 
   const mode = ['age', 'date', 'period'].includes(r.mode) ? r.mode : filled(r.from) || filled(r.to) ? 'period' : filled(r.since) ? 'date' : 'age';
   let cut;
   if (mode === 'period') {
-    if (mail) throw new RetentionError('O período (data inicial e final) vale para arquivos; nas mensagens, use a idade máxima ou a data fixa.');
-    const from = dayField(r.from, now, 'inicial do período');
-    const to = dayField(r.to, now, 'final do período');
-    if (from > to) throw new RetentionError(`A data inicial do período (${dateBr(from)}) é posterior à data final (${dateBr(to)}).`);
-    cut = { from, to };
+    if (mail) throw new RetentionError('O período (a partir de / até) vale para arquivos; nas mensagens, use a idade máxima ou a data fixa.');
+    // Uma das datas pode ficar em branco: só "a partir de" (até o início de cada execução) ou só "até".
+    if (!filled(r.from) && !filled(r.to)) throw new RetentionError('Informe o período: a data "a partir de", a data "até" ou as duas.');
+    const from = filled(r.from) ? dayField(r.from, now, 'inicial do período') : null;
+    const to = filled(r.to) ? dayField(r.to, now, 'final do período') : null;
+    if (from && to && from > to) throw new RetentionError(`A data inicial do período (${dateBr(from)}) é posterior à data final (${dateBr(to)}).`);
+    cut = { ...(from ? { from } : {}), ...(to ? { to } : {}) };
   } else if (mode === 'date') {
     cut = { since: sinceField(r.since, now, mail) };
   } else {
@@ -364,6 +367,8 @@ export function cutoffDate(retention, now = new Date()) {
     const end = new Date(y, m - 1, d + 1);
     return +end > +now ? new Date(now) : end;
   }
+  // Só "a partir de": até o momento em que a execução começa.
+  if (retention.from) return new Date(now);
   if (retention.since) return sinceDate(retention.since);
   const d = new Date(now);
   if (retention.unit === 'years' || retention.unit === 'months') {
@@ -459,9 +464,21 @@ export function expiryWindow(retention) {
 /** A data do critério (ms) está na janela de expiração? */
 export const inWindow = (when, w) => when !== null && when < w.cutoffMs && (w.floorMs === null || when >= w.floorMs);
 
+/**
+ * Período por extenso: "entre 01/01/2015 e 31/12/2018", "a partir de 01/01/2015" ou "até 31/12/2018"
+ * (between: false → "de 01/01/2015 a 31/12/2018"). Vazio sem período.
+ */
+export function periodText(retention, { between = true } = {}) {
+  const { from, to } = retention || {};
+  if (from && to) return between ? `entre ${dateBr(from)} e ${dateBr(to)}` : `de ${dateBr(from)} a ${dateBr(to)}`;
+  if (from) return `a partir de ${dateBr(from)}`;
+  if (to) return `até ${dateBr(to)}`;
+  return '';
+}
+
 /** "5 anos", "1 mês", "30 dias" (na data fixa: "desde DD/MM/AAAA"; no período: "de DD/MM/AAAA a DD/MM/AAAA"). */
 export function amountText(retention) {
-  if (retention.from && retention.to) return `de ${dateBr(retention.from)} a ${dateBr(retention.to)}`;
+  if (retention.from || retention.to) return periodText(retention, { between: false });
   if (retention.since) return `desde ${dateBr(retention.since)}`;
   const u = UNITS[retention.unit] || UNITS.years;
   return `${retention.amount} ${retention.amount === 1 ? u.one : u.many}`;
@@ -486,8 +503,8 @@ export function describeRetention(retention, kind) {
   const c = FILE_CRITERIA[retention.criterion] || FILE_CRITERIA.used;
   const created = retention.criterion === 'created';
   const rule =
-    retention.from && retention.to
-      ? `${c.period} ${dateBr(retention.from)} e ${dateBr(retention.to)}`
+    retention.from || retention.to
+      ? `${c.period} ${periodText(retention)}`
       : retention.since
         ? `${created ? 'criados antes de' : `${c.phrase} desde`} ${dateBr(retention.since)}`
         : `${created ? 'criados há mais de' : `${c.phrase} há mais de`} ${amountText(retention)}`;

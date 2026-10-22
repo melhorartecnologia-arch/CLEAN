@@ -30,13 +30,29 @@ export function sanitizeOptions(input) {
   if (Number.isFinite(size) && size > 0) o.maxFileSizeMB = Math.min(size, 2048);
   const concurrency = Number(input.concurrency);
   if (Number.isInteger(concurrency) && concurrency > 0) o.concurrency = Math.min(concurrency, 16);
-  if (input.modifiedAfter) {
-    const d = new Date(input.modifiedAfter);
-    if (Number.isNaN(d.getTime())) throw new ScanError('Data "modificados a partir de" inválida.');
-    o.modifiedAfter = d.toISOString();
-  }
+  changedRange(input, o);
   if (!o.checkName && !o.checkContent) throw new ScanError('Selecione ao menos uma verificação: nome ou conteúdo.');
   return o;
+}
+
+/**
+ * Filtro de data das análises de arquivos: modifiedAfter (início, inclusive) e modifiedBefore (fim,
+ * exclusive: 00:00 do dia seguinte ao "até" escolhido), em ISO. modifiedBefore só entra quando
+ * informado (as opções salvas antes dele continuam iguais).
+ */
+function changedRange(input, o) {
+  const instant = (value, label) => {
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) throw new ScanError(`Data "${label}" inválida.`);
+    return d.toISOString();
+  };
+  if (input.modifiedAfter) o.modifiedAfter = instant(input.modifiedAfter, 'alterados a partir de');
+  if (input.modifiedBefore) {
+    o.modifiedBefore = instant(input.modifiedBefore, 'alterados até');
+    if (o.modifiedAfter && Date.parse(o.modifiedBefore) <= Date.parse(o.modifiedAfter)) {
+      throw new ScanError('A data "alterados até" é anterior à data "alterados a partir de".');
+    }
+  }
 }
 
 const MAIL_CHECKS = ['checkSubject', 'checkBody', 'checkAttachmentNames', 'checkAttachments', 'checkAddresses'];
@@ -205,11 +221,7 @@ function typeOptions(input) {
     resolveOwner: i.resolveOwner !== false,
     modifiedAfter: null,
   };
-  if (i.modifiedAfter) {
-    const d = new Date(i.modifiedAfter);
-    if (Number.isNaN(d.getTime())) throw new ScanError('Data "modificados a partir de" inválida.');
-    o.modifiedAfter = d.toISOString();
-  }
+  changedRange(i, o);
   return o;
 }
 

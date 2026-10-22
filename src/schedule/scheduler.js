@@ -242,7 +242,7 @@ export function coverageSignature(store, schedule) {
   });
   const terms = (schedule.listIds || []).flatMap((id) => (store.getList(id)?.terms || []).map(termKey)).sort();
   // eslint-disable-next-line no-unused-vars
-  const { concurrency, deleteMatches, modifiedAfter, receivedAfter, ...options } = schedule.options || {};
+  const { concurrency, deleteMatches, modifiedAfter, modifiedBefore, receivedAfter, ...options } = schedule.options || {};
   // A ação entra: ao passar a excluir, a primeira execução é completa (exclui também o que as
   // execuções anteriores, só de análise, encontraram).
   return hash([kind, schedule.action, targets, terms, Object.entries(options).sort(([a], [b]) => a.localeCompare(b)), ...(schedule.fileTypes ? [schedule.fileTypes] : [])]);
@@ -645,7 +645,7 @@ export class Scheduler {
       return problems.length ? problems[0] : null;
     }
     // eslint-disable-next-line no-unused-vars
-    const strip = ({ deleteMatches, modifiedAfter, receivedAfter, concurrency, ...rest } = {}) => JSON.stringify(Object.entries(rest).sort(([a], [b]) => a.localeCompare(b)));
+    const strip = ({ deleteMatches, modifiedAfter, modifiedBefore, receivedAfter, concurrency, ...rest } = {}) => JSON.stringify(Object.entries(rest).sort(([a], [b]) => a.localeCompare(b)));
     let current;
     try {
       current = (scan.kind === 'mail' ? sanitizeMailOptions : sanitizeOptions)({ ...schedule.options, deleteMatches: false });

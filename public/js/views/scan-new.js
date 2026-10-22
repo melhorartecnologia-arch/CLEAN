@@ -6,6 +6,13 @@ import { html, render as paint, icon, toast, fmtNum, plural, fmtServerDateTime }
 import { go } from '../nav.js';
 import { scheduleSection, bindSchedule, readSchedule, scheduling } from '../schedule-form.js';
 
+/** Dia seguinte a "AAAA-MM-DD" (pelo calendário, sem depender do fuso), no mesmo formato. */
+function nextDay(day) {
+  const [y, m, d] = String(day).split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + 1));
+  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+}
+
 const CLOUD_LABELS = { onedrive: 'OneDrive', sharepoint: 'SharePoint' };
 const SHOWN_EXTENSIONS = 6; // extensões de exemplo em cada categoria (todas em "Ver as extensões")
 const MAX_LIMIT = 10_000_000;
@@ -194,7 +201,12 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
               <label class="field" data-now-only>
                 <span>Somente arquivos alterados a partir de</span>
                 <input type="date" name="modifiedAfter" />
-                <small>Em branco: todos os arquivos. Vale a data mais recente entre a modificação e a criação (um arquivo copiado para o repositório entra pela data da cópia).</small>
+                <small>Em branco: sem limite no início. Vale a data mais recente entre a modificação e a criação (um arquivo copiado para o repositório entra pela data da cópia).</small>
+              </label>
+              <label class="field" data-now-only>
+                <span>Somente arquivos alterados até</span>
+                <input type="date" name="modifiedBefore" />
+                <small>Em branco: sem limite no fim. O dia escolhido conta inteiro (até 23:59, hora do servidor). Use as duas datas para um período.</small>
               </label>
               <label class="field" data-for-search="terms">
                 <span>Tamanho máximo para ler o conteúdo (MB)</span>
@@ -335,6 +347,8 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     const later = scheduling(form);
     const options = {
       modifiedAfter: !later && f.get('modifiedAfter') ? `${f.get('modifiedAfter')}T00:00:00` : null,
+      // "Até" conta o dia inteiro: o limite (exclusivo) é 00:00 do dia seguinte, na hora do servidor.
+      modifiedBefore: !later && f.get('modifiedBefore') ? `${nextDay(f.get('modifiedBefore'))}T00:00:00` : null,
       concurrency: Number(f.get('concurrency')),
       resolveOwner: f.get('resolveOwner') === 'on',
       deleteMatches: deleting,
@@ -377,6 +391,10 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
       return toast('Dê um nome ao agendamento.', 'error');
     }
     if (body.repositoryIds.length === 0) return toast('Selecione ao menos um repositório.', 'error');
+    if (options.modifiedAfter && options.modifiedBefore && options.modifiedBefore <= options.modifiedAfter) {
+      form.elements.modifiedBefore.focus();
+      return toast('A data "alterados até" é anterior à data "alterados a partir de".', 'error');
+    }
     if (!types && body.listIds.length === 0) return toast('Selecione ao menos uma lista de referência.', 'error');
     if (deleting) {
       const blocked = repos.filter((r) => body.repositoryIds.includes(r.id) && !r.allowDelete).map((r) => r.name);
