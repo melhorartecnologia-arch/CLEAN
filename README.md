@@ -64,9 +64,10 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
 - **Agendamentos**: análises executadas sozinhas, uma vez ou com repetição (a cada algumas horas,
   diária, semanal ou mensal), com análise incremental, histórico e retenção dos relatórios.
 - **Políticas de retenção**: eliminam os arquivos (de qualquer tipo) e as mensagens mais antigos que
-  uma idade máxima ou **sem uso desde uma data fixa** (ex.: arquivos sem uso há mais de 5 anos,
-  arquivos da pasta *Financeiro* que não foram abertos nem modificados desde 01/01/2020, e-mails
-  recebidos há mais de 10 anos), pela data da última modificação, da última abertura (último
+  uma idade máxima, **sem uso desde uma data fixa** ou, nos arquivos, com a data **dentro de um
+  período** (ex.: arquivos sem uso há mais de 5 anos, arquivos da pasta *Financeiro* que não foram
+  abertos nem modificados desde 01/01/2020, arquivos modificados pela última vez entre 2015 e 2018,
+  e-mails recebidos há mais de 10 anos), pela data da última modificação, da última abertura (último
   acesso), da criação ou do recebimento — nos repositórios inteiros ou **só em pastas escolhidas** —,
   com simulação, limite de exclusões por execução e execução manual ou agendada.
 - **Registro de exclusões**: relatório consolidado de tudo o que o CLEAN excluiu (políticas,
@@ -1001,7 +1002,7 @@ não mudam o último acesso); nos repositórios analisados com frequência, pref
 de uma migração de servidor, a data de criação costuma ser a da cópia: com *Sem uso* ou *Criação*,
 nada expira até essa data ficar antiga.
 
-**Corte — idade máxima ou data fixa:**
+**Corte — idade máxima, data fixa ou período:**
 
 - **Idade máxima**: em dias, meses ou anos (meses e anos pelo calendário). A **data de corte** é
   calculada no início de cada execução, e por isso anda junto com o calendário: numa política
@@ -1010,10 +1011,20 @@ nada expira até essa data ficar antiga.
   Expiram os itens com a data do critério **anterior a esse dia, às 00:00 na hora do servidor** —
   com *Sem abertura nem modificação* e 01/01/2020, os arquivos que não foram abertos nem modificados
   desde 01/01/2020. A data não anda: todas as execuções usam o mesmo corte (um arquivo aberto em
-  2021 nunca expira por essa política). No e-mail, *recebidas antes de* a data.
+  2021 nunca expira por essa política). No e-mail, *recebidas antes de* a data;
+- **Período (data inicial e final)** — arquivos: expiram os arquivos cuja data do critério está
+  **dentro do período, contando os dois dias inteiros** (das 00:00 do dia inicial até o fim do dia
+  final, na hora do servidor). Os mais antigos que o início e os mais recentes que o fim ficam. Ex.:
+  *Última modificação* de 01/01/2015 a 31/12/2018 — os arquivos alterados pela última vez nesses
+  quatro anos; *Sem abertura nem modificação* no mesmo período — vale a mais recente das duas datas,
+  então um arquivo modificado em 2016 mas aberto em 2021 fica. As datas vão de 02/01/1980 até hoje
+  (a final não pode estar no futuro) e não andam: todas as execuções usam o mesmo período. Na hora
+  de excluir, a data é lida de novo: um arquivo cuja data saiu do período depois da listagem (foi
+  aberto, ou teve a data restaurada de um backup) é mantido.
 
-Expiram os itens com a data do critério **anterior** ao corte, que fica registrado no relatório; o
-formulário mostra o corte se a política fosse executada hoje. Itens sem a data do critério (um
+Expiram os itens com a data do critério **anterior** ao corte (no período, também a partir do
+início dele), que fica registrado no relatório; o formulário mostra o corte se a política fosse
+executada hoje. Itens sem a data do critério (um
 sistema de arquivos sem data de criação, por exemplo) — ou com datas anteriores a 02/01/1980, que são
 valores padrão de sistemas antigos e de datas perdidas (01/01/1970, 01/01/1980) — nunca expiram e são
 contados à parte.
@@ -1079,10 +1090,10 @@ editar e excluir. As políticas agendadas aparecem no painel, em *Próximas exec
 **Relatório de cada execução:** os itens expirados com a data considerada e a idade, os mais antigos
 primeiro; gráficos por faixa de idade (clique para filtrar), espaço por extensão e por repositório,
 últimos usuários, caixas, pastas e remetentes; a regra, a data de corte (com *data fixa*, o dia
-escolhido), as pastas da política e a forma de exclusão no cabeçalho. O Excel (abas *Resumo*,
-*Arquivos expirados* ou *Mensagens expiradas*, *Exclusões* e *Erros*), o CSV e o HTML têm uma linha
-por item, com a data considerada, a idade e a faixa de idade; o *Resumo* traz o critério, a idade
-máxima ou a data fixa e as pastas da política. As execuções também aparecem em *Análises de
+escolhido; com *período*, as duas datas), as pastas da política e a forma de exclusão no cabeçalho.
+O Excel (abas *Resumo*, *Arquivos expirados* ou *Mensagens expiradas*, *Exclusões* e *Erros*), o CSV
+e o HTML têm uma linha por item, com a data considerada, a idade e a faixa de idade; o *Resumo* traz o
+critério, a idade máxima, a data fixa ou o período e as pastas da política. As execuções também aparecem em *Análises de
 arquivos* e *Análises de e-mail*, marcadas como *retenção*. O conjunto das exclusões de todas as
 execuções (por período, por política, por repositório) está no
 [Registro de exclusões](#registro-de-exclusões).

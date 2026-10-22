@@ -5,27 +5,31 @@ export const FILE_CRITERIA = {
     label: 'Sem uso (nenhuma data recente)',
     short: 'sem uso',
     date: 'Data mais recente (uso)',
+    period: 'com o uso mais recente (modificação, acesso ou criação) entre',
     hint: 'O mais seguro: o arquivo só expira se a modificação, o último acesso e a criação forem todos mais antigos que o limite.',
   },
   'opened-or-modified': {
     label: 'Sem abertura nem modificação',
     short: 'sem abertura nem modificação',
     date: 'Última abertura ou modificação',
+    period: 'com a última abertura ou modificação entre',
     hint: 'A data mais recente entre a última abertura (último acesso) e a última modificação; a criação não conta. O último acesso só é confiável se o Windows o registrar no servidor de arquivos. Não disponível no OneDrive e no SharePoint.',
   },
   modified: {
     label: 'Última modificação',
     short: 'sem modificação',
     date: 'Última modificação',
+    period: 'modificados pela última vez entre',
     hint: 'Data em que o conteúdo foi alterado pela última vez (confiável em qualquer servidor).',
   },
   accessed: {
     label: 'Último acesso (abertura)',
     short: 'sem acesso',
     date: 'Último acesso',
+    period: 'abertos (acessados) pela última vez entre',
     hint: 'Só é confiável se o Windows registrar o último acesso no servidor de arquivos (muitas vezes desligado). Não disponível no OneDrive e no SharePoint.',
   },
-  created: { label: 'Criação', short: 'criados', date: 'Criação', hint: 'Data em que o arquivo foi criado ou copiado para o repositório.' },
+  created: { label: 'Criação', short: 'criados', date: 'Criação', period: 'criados entre', hint: 'Data em que o arquivo foi criado ou copiado para o repositório.' },
 };
 
 export const MAIL_CRITERIA = {
@@ -49,8 +53,9 @@ export function dateBr(text) {
   return `${d}/${m}/${y}`;
 }
 
-/** "5 anos", "1 mês", "30 dias" (na data fixa: "desde DD/MM/AAAA"). */
+/** "5 anos", "1 mês", "30 dias" (na data fixa: "desde DD/MM/AAAA"; no período: "de DD/MM/AAAA a DD/MM/AAAA"). */
 export function amountText(r) {
+  if (r.from && r.to) return `de ${dateBr(r.from)} a ${dateBr(r.to)}`;
   if (r.since) return `desde ${dateBr(r.since)}`;
   const u = UNITS[r.unit] || UNITS.years;
   return `${r.amount} ${Number(r.amount) === 1 ? u.one : u.many}`;
@@ -73,9 +78,12 @@ export function describeRetention(r, kind) {
   }
   const c = FILE_CRITERIA[r.criterion] || FILE_CRITERIA.used;
   const created = r.criterion === 'created';
-  const rule = r.since
-    ? `${created ? 'criados antes de' : `${c.short} desde`} ${dateBr(r.since)}`
-    : `${created ? 'criados há mais de' : `${c.short} há mais de`} ${amountText(r)}`;
+  const rule =
+    r.from && r.to
+      ? `${c.period} ${dateBr(r.from)} e ${dateBr(r.to)}`
+      : r.since
+        ? `${created ? 'criados antes de' : `${c.short} desde`} ${dateBr(r.since)}`
+        : `${created ? 'criados há mais de' : `${c.short} há mais de`} ${amountText(r)}`;
   const patterns = r.patterns || [];
   const only = patterns.length ? ` (somente ${patterns.slice(0, 5).join(', ')}${patterns.length > 5 ? '…' : ''})` : '';
   return `Arquivos ${rule}${only}${foldersText(r.folders)}`;
@@ -104,10 +112,21 @@ export function sinceInstant(text, now = new Date()) {
 }
 
 /**
- * Data de corte (prévia no formulário): a data fixa ou agora menos a idade máxima, pelo calendário.
- * null quando a regra está incompleta ou é inválida.
+ * Período (prévia no formulário): { from, to } — 00:00 do dia inicial e do dia final — ou null se uma
+ * das datas for inválida (como no servidor) ou a inicial for posterior à final.
+ */
+export function periodPreview(r, now = new Date()) {
+  const from = sinceInstant(r.from, now);
+  const to = sinceInstant(r.to, now);
+  return from && to && +from <= +to ? { from, to } : null;
+}
+
+/**
+ * Data de corte (prévia no formulário): a data fixa, o dia final do período ou agora menos a idade
+ * máxima, pelo calendário. null quando a regra está incompleta ou é inválida.
  */
 export function cutoffPreview(r, now = new Date()) {
+  if (r.mode === 'period' || (!r.mode && (r.from || r.to))) return periodPreview(r, now)?.to || null;
   if (r.mode === 'date' || (r.mode !== 'age' && r.since)) return sinceInstant(r.since, now);
   const amount = Number(r.amount);
   if (!Number.isInteger(amount) || amount < 1 || !UNITS[r.unit] || amount > UNITS[r.unit].max) return null;

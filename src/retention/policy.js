@@ -6,13 +6,14 @@ import path from 'node:path';
 // Retenção (depois de validada):
 //   { criterion,
 //     amount, unit: 'days' | 'months' | 'years'   // idade máxima (o corte anda a cada execução), ou
-//     since: 'AAAA-MM-DD',                        // data fixa: sem uso desde esse dia (00:00, hora do servidor)
+//     since: 'AAAA-MM-DD',                        // data fixa: sem uso desde esse dia (00:00, hora do servidor), ou
+//     from, to: 'AAAA-MM-DD',                     // arquivos: período — a data do critério entre os dois dias (inclusive)
 //     maxDeletions,              // limite de exclusões por execução (0: sem limite)
 //     deleteMode: 'permanent' | 'trash',
 //     patterns: ['*.tmp', ...]   // arquivos: só estes nomes (vazio: todos)
 //     folders: [{ repositoryId, path }]  // arquivos: só estas pastas (relativas à raiz; ausente: tudo)
 //     includeTrash, includeJunk  // e-mail: inclui a Lixeira e o Lixo Eletrônico }
-// As chaves novas (since, folders) só aparecem quando usadas: uma política salva antes delas continua
+// As chaves novas (since, from/to, folders) só aparecem quando usadas: uma política salva antes delas continua
 // com o mesmo JSON (o agendador compara a política da execução com a salva, scheduler.js).
 // A data de corte ("cutoff") é calculada quando a análise é criada: itens com a data do critério
 // anterior a ela estão expirados.
@@ -29,20 +30,23 @@ export const FILE_CRITERIA = {
   used: {
     label: 'Sem uso (nenhuma data recente)',
     phrase: 'sem uso',
+    period: 'com o uso mais recente (modificação, acesso ou criação) entre',
     hint: 'O mais seguro: o arquivo só expira se a modificação, o último acesso e a criação forem todos mais antigos que o limite.',
   },
   'opened-or-modified': {
     label: 'Sem abertura nem modificação',
     phrase: 'sem abertura nem modificação',
+    period: 'com a última abertura ou modificação entre',
     hint: 'A data mais recente entre a última abertura (último acesso) e a última modificação; a criação não conta. O último acesso só é confiável se o Windows o registrar no servidor de arquivos. Não disponível no OneDrive e no SharePoint.',
   },
-  modified: { label: 'Última modificação', phrase: 'sem modificação', hint: 'Data em que o conteúdo foi alterado pela última vez (confiável em qualquer servidor).' },
+  modified: { label: 'Última modificação', phrase: 'sem modificação', period: 'modificados pela última vez entre', hint: 'Data em que o conteúdo foi alterado pela última vez (confiável em qualquer servidor).' },
   accessed: {
     label: 'Último acesso (abertura)',
     phrase: 'sem acesso',
+    period: 'abertos (acessados) pela última vez entre',
     hint: 'Só é confiável se o Windows registrar o último acesso no servidor de arquivos (muitas vezes desligado). Não disponível no OneDrive e no SharePoint.',
   },
-  created: { label: 'Criação', phrase: 'criados', hint: 'Data em que o arquivo foi criado ou copiado para o repositório.' },
+  created: { label: 'Criação', phrase: 'criados', period: 'criados entre', hint: 'Data em que o arquivo foi criado ou copiado para o repositório.' },
 };
 
 export const MAIL_CRITERIA = {
@@ -82,11 +86,19 @@ export function sanitizeRetention(input, kind, { cloud = false, targets = null, 
         : 'O OneDrive e o SharePoint não informam a última abertura (último acesso) de cada arquivo: use "Sem uso", "Última modificação" ou "Criação".',
     );
   }
-  // Corte: idade máxima (relativa a cada execução) ou data fixa ("sem uso desde"). Sem "mode", vale a
-  // forma salva: com "since", data fixa.
-  const byDate = r.mode === 'date' || (r.mode !== 'age' && typeof r.since === 'string' && r.since.trim() !== '');
+  // Corte: idade máxima (relativa a cada execução), data fixa ("sem uso desde") ou período (a data do
+  // critério entre dois dias). Sem "mode", vale a forma salva: com "from"/"to", período; com "since",
+  // data fixa.
+  const filled = (v) => typeof v === 'string' && v.trim() !== '';
+  const mode = ['age', 'date', 'period'].includes(r.mode) ? r.mode : filled(r.from) || filled(r.to) ? 'period' : filled(r.since) ? 'date' : 'age';
   let cut;
-  if (byDate) {
+  if (mode === 'period') {
+    if (mail) throw new RetentionError('O período (data inicial e final) vale para arquivos; nas mensagens, use a idade máxima ou a data fixa.');
+    const from = dayField(r.from, now, 'inicial do período');
+    const to = dayField(r.to, now, 'final do período');
+    if (from > to) throw new RetentionError(`A data inicial do período (${dateBr(from)}) é posterior à data final (${dateBr(to)}).`);
+    cut = { from, to };
+  } else if (mode === 'date') {
     cut = { since: sinceField(r.since, now, mail) };
   } else {
     const unit = r.unit === undefined || r.unit === null || r.unit === '' ? 'years' : r.unit;
@@ -121,6 +133,22 @@ export function sanitizeRetention(input, kind, { cloud = false, targets = null, 
     if (folders.length) out.folders = folders;
   }
   return out;
+}
+
+/**
+ * Dia do período: "AAAA-MM-DD" válido (calendário real), a partir de 02/01/1980 e não no futuro (hora
+ * do servidor). which: "inicial do período" ou "final do período".
+ */
+function dayField(value, now, which) {
+  const text = String(value ?? '').trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!m) throw new RetentionError(`Informe a data ${which} (dia, mês e ano).`);
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const date = new Date(y, mo - 1, d);
+  if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) throw new RetentionError(`Data ${which} inválida: ${text}.`);
+  if (y < 1980 || (y === 1980 && mo === 1 && d < 2)) throw new RetentionError(`A data ${which} deve ser a partir de 02/01/1980 (datas anteriores são tratadas como desconhecidas).`);
+  if (+date > +now) throw new RetentionError(`A data ${which} não pode estar no futuro.`);
+  return text;
 }
 
 /** "AAAA-MM-DD" válido (calendário real), a partir de 02/01/1980 e não no futuro (hora do servidor). */
@@ -327,6 +355,12 @@ export function recordInScope(retention, record) {
  * pelo calendário, na hora local).
  */
 export function cutoffDate(retention, now = new Date()) {
+  // Período: até o fim do dia final (expiram as datas anteriores às 00:00 do dia seguinte).
+  if (retention.to) {
+    const end = sinceDate(retention.to);
+    end.setDate(end.getDate() + 1);
+    return end;
+  }
   if (retention.since) return sinceDate(retention.since);
   const d = new Date(now);
   if (retention.unit === 'years' || retention.unit === 'months') {
@@ -411,8 +445,20 @@ export function limitWarning(
   return `${items} não foram excluíd${o}s nesta execução: as vagas do limite ficaram reservadas para exclusões que falharam. ${next}`;
 }
 
-/** "5 anos", "1 mês", "30 dias" (na data fixa: "desde DD/MM/AAAA"). */
+/**
+ * Janela da expiração de uma análise: { cutoffMs, floorMs } — expiram as datas do critério a partir
+ * de floorMs (início do período, 00:00 do dia inicial; null sem período) e anteriores a cutoffMs.
+ */
+export function expiryWindow(retention) {
+  return { cutoffMs: Date.parse(retention.cutoff), floorMs: retention.from ? sinceDate(retention.from).getTime() : null };
+}
+
+/** A data do critério (ms) está na janela de expiração? */
+export const inWindow = (when, w) => when !== null && when < w.cutoffMs && (w.floorMs === null || when >= w.floorMs);
+
+/** "5 anos", "1 mês", "30 dias" (na data fixa: "desde DD/MM/AAAA"; no período: "de DD/MM/AAAA a DD/MM/AAAA"). */
 export function amountText(retention) {
+  if (retention.from && retention.to) return `de ${dateBr(retention.from)} a ${dateBr(retention.to)}`;
   if (retention.since) return `desde ${dateBr(retention.since)}`;
   const u = UNITS[retention.unit] || UNITS.years;
   return `${retention.amount} ${retention.amount === 1 ? u.one : u.many}`;
@@ -436,9 +482,12 @@ export function describeRetention(retention, kind) {
   }
   const c = FILE_CRITERIA[retention.criterion] || FILE_CRITERIA.used;
   const created = retention.criterion === 'created';
-  const rule = retention.since
-    ? `${created ? 'criados antes de' : `${c.phrase} desde`} ${dateBr(retention.since)}`
-    : `${created ? 'criados há mais de' : `${c.phrase} há mais de`} ${amountText(retention)}`;
+  const rule =
+    retention.from && retention.to
+      ? `${c.period} ${dateBr(retention.from)} e ${dateBr(retention.to)}`
+      : retention.since
+        ? `${created ? 'criados antes de' : `${c.phrase} desde`} ${dateBr(retention.since)}`
+        : `${created ? 'criados há mais de' : `${c.phrase} há mais de`} ${amountText(retention)}`;
   const only = retention.patterns?.length ? ` (somente ${retention.patterns.slice(0, 5).join(', ')}${retention.patterns.length > 5 ? '…' : ''})` : '';
   return `Arquivos ${rule}${only}${foldersText(retention.folders)}`;
 }

@@ -99,7 +99,7 @@ export async function render(root, { ctx }) {
     html`<div class="page-head">
         <div>
           <h1>Políticas de retenção</h1>
-          <div class="sub">Eliminam os arquivos (de qualquer tipo) e as mensagens mais antigos que a idade máxima de cada política, ou sem uso desde uma data fixa, pela data da última modificação, da última abertura (último acesso), da criação ou do recebimento — nos repositórios inteiros ou só nas pastas escolhidas.</div>
+          <div class="sub">Eliminam os arquivos (de qualquer tipo) e as mensagens mais antigos que a idade máxima de cada política, sem uso desde uma data fixa ou (arquivos) com a data dentro de um período, pela data da última modificação, da última abertura (último acesso), da criação ou do recebimento — nos repositórios inteiros ou só nas pastas escolhidas.</div>
         </div>
         <div class="actions">
           <a class="btn primary" href="#/retencao/nova">${icon('plus')} Política de arquivos</a>
@@ -122,7 +122,7 @@ export async function render(root, { ctx }) {
         list,
         policies.length === 0
           ? html`<div class="empty">
-              <p>Nenhuma política ainda. Crie uma para eliminar, por exemplo, os arquivos sem uso há mais de 5 anos, os arquivos de uma pasta que não foram abertos nem modificados desde 01/01/2020 ou os e-mails com mais de 10 anos.</p>
+              <p>Nenhuma política ainda. Crie uma para eliminar, por exemplo, os arquivos sem uso há mais de 5 anos, os arquivos de uma pasta que não foram abertos nem modificados desde 01/01/2020, os arquivos com a última modificação entre 2015 e 2018 ou os e-mails com mais de 10 anos.</p>
               <div class="inline">
                 <a class="btn primary" href="#/retencao/nova" data-action="new-files">${icon('plus')} Política de arquivos</a>
                 <a class="btn" href="#/retencao/nova?tipo=email" data-action="new-mail">${icon('plus')} Política de e-mail</a>

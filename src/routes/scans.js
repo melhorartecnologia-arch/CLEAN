@@ -49,7 +49,7 @@ import { exportTeamsXlsx, exportTeamsCsv, exportTeamsHtml } from '../report/team
 import { TeamsConnector } from '../teams/connector.js';
 import { RETENTION_EXPORTS } from '../report/retention-exports.js';
 import { TYPE_EXPORTS } from '../report/type-exports.js';
-import { fileDate, foldersOf, recordInScope } from '../retention/policy.js';
+import { fileDate, foldersOf, recordInScope, expiryWindow, inWindow } from '../retention/policy.js';
 
 const byName = (a, b) => a.localeCompare(b, 'pt-BR');
 
@@ -168,7 +168,7 @@ const modelOf = (scan) => {
 /** Retenção, na exclusão manual: o motivo para não excluir um arquivo que deixou de estar expirado. */
 function expiredCheck(retention, st) {
   const when = fileDate(st, retention.criterion);
-  if (when !== null && when < Date.parse(retention.cutoff)) return null;
+  if (inWindow(when, expiryWindow(retention))) return null;
   return 'O arquivo não está mais expirado pela política: a data do critério mudou depois da análise (por exemplo, ele foi aberto).';
 }
 

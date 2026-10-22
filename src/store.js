@@ -93,7 +93,10 @@ function deletionContext(scan) {
     };
     copy('criterion');
     copy('cutoff');
-    if (r.since) copy('since');
+    if (r.from && r.to) {
+      copy('from');
+      copy('to');
+    } else if (r.since) copy('since');
     else {
       copy('amount');
       copy('unit');

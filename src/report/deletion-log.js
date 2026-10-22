@@ -310,7 +310,13 @@ function policyRule(policy, scanKind) {
   if (!policy) return '';
   const criteria = scanKind === 'mail' ? MAIL_CRITERIA : FILE_CRITERIA;
   const label = criteria[policy.criterion]?.label || '';
-  const age = policy.since ? `antes de ${dateText(policy.since)}` : Number.isFinite(policy.amount) && policy.unit ? `mais de ${amountText(policy)}` : '';
+  const age = policy.from && policy.to
+    ? `entre ${dateText(policy.from)} e ${dateText(policy.to)}`
+    : policy.since
+      ? `antes de ${dateText(policy.since)}`
+      : Number.isFinite(policy.amount) && policy.unit
+        ? `mais de ${amountText(policy)}`
+        : '';
   const rule = [label, age].filter(Boolean).join(': ');
   // Pastas escolhidas na política: [{ repositoryId, path }] (ou só os caminhos).
   const names = Array.isArray(policy.folders) ? policy.folders.map((f) => (typeof f === 'string' ? f : str(f?.path))).filter(Boolean) : [];
@@ -323,7 +329,8 @@ function policyRule(policy, scanKind) {
  *   at, time (ms), status, statusLabel, kind, kindLabel, item, relativePath, folder, size,
  *   criterionDate, repositoryId, repositoryName, mailbox, scheduleId, scheduleName, policyKey
  *   (agendamento: o id, ou "nome:..." quando só o nome é conhecido; null sem agendamento), purpose,
- *   purposeLabel, policyRule, criterion, cutoff, since, mode, originLabel, method, methodLabel, how,
+ *   purposeLabel, policyRule, criterion, cutoff, since, periodFrom, periodTo, mode, originLabel, method,
+ *   methodLabel, how,
  *   by, error, note, detail, scanId, scanName, scanKind, scanExists, recordId
  */
 export function normalizeEvent(e, resolver) {
@@ -402,6 +409,9 @@ export function normalizeEvent(e, resolver) {
     criterion: str(policy?.criterion) || null,
     cutoff: str(policy?.cutoff) || null,
     since: str(policy?.since) || null,
+    // Período da política (a data do critério entre os dois dias), quando ela usa um.
+    periodFrom: str(policy?.from) || null,
+    periodTo: str(policy?.to) || null,
     mode,
     originLabel: ORIGIN_LABELS[mode],
     method,

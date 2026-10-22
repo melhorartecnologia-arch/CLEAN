@@ -1928,12 +1928,15 @@ export async function render(root, { params, query, isCurrent = () => true }) {
     const mode = P.retention ? deletionModeText(scan.kind, scan.retention, (scan.summary?.repositories || []).map((r) => r.type || 'local')) : '';
     const limit = scan.retention?.maxDeletions ? `, até ${deletionsText(scan.retention.maxDeletions)} por execução` : '';
     const blocked = scan.deletionBlocked ? ` · exclusão desativada nesta execução: ${scan.deletionBlocked}` : '';
-    // Data fixa: o dia escolhido na política (00:00 no servidor); idade máxima: o instante calculado.
-    const cutoffWhen = scan.retention?.since
-      ? html`<b>${dateBr(scan.retention.since)}</b> (data fixa)`
-      : html`<b>${fmtServerDateTime(scan.retention?.cutoff, { weekday: false })}</b>`;
+    // Período: os dois dias escolhidos (inclusive); data fixa: o dia escolhido na política (00:00 no
+    // servidor); idade máxima: o instante calculado.
+    const cutoffWhen = scan.retention?.from && scan.retention?.to
+      ? html`entre <b>${dateBr(scan.retention.from)}</b> e <b>${dateBr(scan.retention.to)}</b> (período, os dois dias inclusive)`
+      : scan.retention?.since
+        ? html`anterior a <b>${dateBr(scan.retention.since)}</b> (data fixa)`
+        : html`anterior a <b>${fmtServerDateTime(scan.retention?.cutoff, { weekday: false })}</b>`;
     const cutoff = P.retention
-      ? html`<div class="sub">Expiram ${P.o === 'a' ? 'as mensagens' : 'os arquivos'} com a data do critério anterior a ${cutoffWhen}${scan.options?.deleteMatches
+      ? html`<div class="sub">Expiram ${P.o === 'a' ? 'as mensagens' : 'os arquivos'} com a data do critério ${cutoffWhen}${scan.options?.deleteMatches
           ? ` · ${mode}${limit}${scan.deletionRevoked ? ` · exclusão interrompida: ${scan.deletionRevoked}` : ''}`
           : blocked || ' · simulação: nada é excluído'}</div>`
       : '';

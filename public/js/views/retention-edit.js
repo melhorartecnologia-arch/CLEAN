@@ -6,7 +6,7 @@ import { get, post, put } from '../api.js';
 import { html, render as paint, icon, toast, fmtServerDateTime, plural } from '../ui.js';
 import { go } from '../nav.js';
 import { scheduleSection, bindSchedule, readSchedule, scheduling, keepField } from '../schedule-form.js';
-import { FILE_CRITERIA, MAIL_CRITERIA, UNITS, DEFAULT_MAX_DELETIONS, ACCESS_CRITERIA, describeRetention, cutoffPreview, deletionsText } from '../retention.js';
+import { FILE_CRITERIA, MAIL_CRITERIA, UNITS, DEFAULT_MAX_DELETIONS, ACCESS_CRITERIA, describeRetention, cutoffPreview, periodPreview, deletionsText } from '../retention.js';
 
 const CLOUD_LABELS = { onedrive: 'OneDrive', sharepoint: 'SharePoint' };
 const TYPE_LABELS = { graph: 'Microsoft 365', gmail: 'Google Workspace', imap: 'IMAP' };
@@ -25,6 +25,15 @@ function sinceWords(criterion) {
 
 const capitalize = (text) => `${text[0].toUpperCase()}${text.slice(1)}`;
 
+const PERIOD_ERROR = 'Informe o período: a data inicial e a final, de 02/01/1980 até hoje (datas futuras não valem), com a inicial antes ou igual à final.';
+
+/** Período na prévia, por extenso, com as datas (dd/mm/aaaa) da política. */
+function periodText(criterion, r) {
+  const p = periodPreview(r);
+  const [a, b] = [p.from, p.to].map((d) => d.toLocaleDateString('pt-BR'));
+  return (EXPIRES_BETWEEN[criterion] || EXPIRES_BETWEEN.used)(a, b);
+}
+
 /** Hoje ("AAAA-MM-DD", hora local): o limite do campo de data (o servidor recusa datas futuras). */
 function todayIso() {
   const d = new Date();
@@ -39,6 +48,15 @@ const EXPIRES = {
   accessed: (d) => `arquivos acessados pela última vez antes de ${d}`,
   created: (d) => `arquivos criados antes de ${d}`,
   received: (d) => `mensagens recebidas antes de ${d}`,
+};
+
+/** O que expira num período, na prévia: "arquivos modificados pela última vez entre 01/01/2015 e 31/12/2018". */
+const EXPIRES_BETWEEN = {
+  used: (a, b) => `arquivos cuja data mais recente (modificação, último acesso ou criação) está entre ${a} e ${b}`,
+  'opened-or-modified': (a, b) => `arquivos cuja última abertura (último acesso) ou modificação — a mais recente das duas — foi entre ${a} e ${b}`,
+  modified: (a, b) => `arquivos modificados pela última vez entre ${a} e ${b}`,
+  accessed: (a, b) => `arquivos abertos (acessados) pela última vez entre ${a} e ${b}`,
+  created: (a, b) => `arquivos criados entre ${a} e ${b}`,
 };
 
 export async function render(root, { params, query, ctx }) {
@@ -77,7 +95,8 @@ export async function render(root, { params, query, ctx }) {
   const chk = (value) => (value ? 'checked' : '');
   const sel = (a, b) => (String(a) === String(b) ? 'selected' : '');
   const isCloud = (t) => Boolean(CLOUD_LABELS[t.type]);
-  const byDate = Boolean(r.since);
+  // Forma do corte salva: período (arquivos), data fixa ou idade máxima.
+  const savedMode = !mail && r.from && r.to ? 'period' : r.since ? 'date' : 'age';
   // Pastas salvas, por repositório (uma por linha no campo de cada um).
   const savedFolders = (tid) => (r.folders || []).filter((f) => f.repositoryId === tid).map((f) => f.path.split('/').join(isCloud(targets.find((t) => t.id === tid) || {}) ? '/' : '\\'));
 
@@ -86,7 +105,7 @@ export async function render(root, { params, query, ctx }) {
     html`<div class="page-head">
         <div>
           <h1>${title}</h1>
-          <div class="sub">${mail ? 'Mensagens' : 'Arquivos (de qualquer tipo)'} mais antig${o}s que a idade máxima, ou sem uso desde uma data, são listad${o}s no relatório e, se a política excluir, eliminad${o}s — cada exclusão fica no Registro de exclusões.</div>
+          <div class="sub">${mail ? 'Mensagens' : 'Arquivos (de qualquer tipo)'} mais antig${o}s que a idade máxima, sem uso desde uma data${mail ? '' : ' ou com a data do critério dentro de um período'} são listad${o}s no relatório e, se a política excluir, eliminad${o}s — cada exclusão fica no Registro de exclusões.</div>
         </div>
       </div>
       <form class="card" data-form novalidate>
@@ -141,11 +160,12 @@ export async function render(root, { params, query, ctx }) {
             <div class="field">
               <span id="cut-label">Corte</span>
               <div class="option-row" role="radiogroup" aria-labelledby="cut-label">
-                <label class="check"><input type="radio" name="cutMode" value="age" ${chk(!byDate)} /><span>Idade máxima</span></label>
-                <label class="check"><input type="radio" name="cutMode" value="date" ${chk(byDate)} /><span>Data fixa (<span data-since-word>${sinceWords(criterion)}</span>)</span></label>
+                <label class="check"><input type="radio" name="cutMode" value="age" ${chk(savedMode === 'age')} /><span>Idade máxima</span></label>
+                <label class="check"><input type="radio" name="cutMode" value="date" ${chk(savedMode === 'date')} /><span>Data fixa (<span data-since-word>${sinceWords(criterion)}</span>)</span></label>
+                ${mail ? '' : html`<label class="check"><input type="radio" name="cutMode" value="period" ${chk(savedMode === 'period')} /><span>Período (data inicial e final)</span></label>`}
               </div>
             </div>
-            <div class="field" data-cut="age" ${byDate ? 'hidden' : ''}>
+            <div class="field" data-cut="age" ${savedMode === 'age' ? '' : 'hidden'}>
               <span id="age-label">Idade máxima</span>
               <div class="option-row" role="group" aria-labelledby="age-label">
                 <input type="number" name="amount" min="1" max="${UNITS[r.unit || 'years'].max}" value="${r.amount || 5}" aria-label="Idade máxima (quantidade)" />
@@ -155,11 +175,21 @@ export async function render(root, { params, query, ctx }) {
               </div>
               <small>${mail ? 'Mensagens' : 'Arquivos'} com a data do critério mais antiga que isso expiram. O corte anda a cada execução.</small>
             </div>
-            <label class="field" data-cut="date" ${byDate ? '' : 'hidden'}>
+            <label class="field" data-cut="date" ${savedMode === 'date' ? '' : 'hidden'}>
               <span data-since-label>${capitalize(sinceWords(criterion))}</span>
               <input type="date" name="since" min="1980-01-02" max="${todayIso()}" value="${r.since || ''}" />
               <small>${mail ? 'Mensagens recebidas antes desse dia expiram' : 'Arquivos com a data do critério anterior a esse dia (00:00, hora do servidor) expiram: com "Sem abertura nem modificação", os que não foram abertos nem alterados desde então'}. A data não anda: todas as execuções usam o mesmo corte.</small>
             </label>
+            ${mail
+              ? ''
+              : html`<div class="field" data-cut="period" ${savedMode === 'period' ? '' : 'hidden'}>
+                  <span id="period-label">Data do critério entre</span>
+                  <div class="option-row" role="group" aria-labelledby="period-label">
+                    <label class="field"><span>De</span><input type="date" name="periodFrom" min="1980-01-02" max="${todayIso()}" value="${r.from || ''}" /></label>
+                    <label class="field"><span>Até</span><input type="date" name="periodTo" min="1980-01-02" max="${todayIso()}" value="${r.to || ''}" /></label>
+                  </div>
+                  <small>Expiram os arquivos cuja data do critério está dentro do período, contando os dois dias inteiros (hora do servidor). Os mais antigos que o início e os mais recentes que o fim ficam. Com "Sem abertura nem modificação", vale a mais recente das duas datas: um arquivo aberto ou modificado depois do fim do período fica. As datas não andam: todas as execuções usam o mesmo período.</small>
+                </div>`}
             ${mail
               ? html`<label class="check"><input type="checkbox" name="includeTrash" ${chk(r.includeTrash !== false)} /><span>Incluir a Lixeira (Itens Excluídos)</span></label>
                   <label class="check"><input type="checkbox" name="includeJunk" ${chk(r.includeJunk !== false)} /><span>Incluir o Lixo Eletrônico (spam)</span></label>`
@@ -254,7 +284,10 @@ export async function render(root, { params, query, ctx }) {
   const currentCriterion = () => (mail ? 'received' : form.elements.criterion.value);
   const checkedTargets = () => [...form.querySelectorAll('[name="targetIds"]:checked')];
   const cloudChosen = () => checkedTargets().some((el) => el.dataset.cloud);
-  const cutMode = () => (form.querySelector('[name="cutMode"]:checked')?.value === 'date' ? 'date' : 'age');
+  const cutMode = () => {
+    const value = form.querySelector('[name="cutMode"]:checked')?.value;
+    return value === 'date' || value === 'period' ? value : 'age';
+  };
 
   /** Pastas escolhidas, só dos repositórios marcados: [{ repositoryId, path }] (o servidor valida). */
   const readFolders = () =>
@@ -283,7 +316,11 @@ export async function render(root, { params, query, ctx }) {
     return {
       criterion: currentCriterion(),
       // Idade máxima (o corte anda a cada execução) ou data fixa (o mesmo corte sempre).
-      ...(cutMode() === 'date' ? { mode: 'date', since: String(f.get('since') || '') } : { mode: 'age', amount: Number(f.get('amount')), unit: f.get('unit') }),
+      ...(cutMode() === 'period'
+        ? { mode: 'period', from: String(f.get('periodFrom') || ''), to: String(f.get('periodTo') || '') }
+        : cutMode() === 'date'
+          ? { mode: 'date', since: String(f.get('since') || '') }
+          : { mode: 'age', amount: Number(f.get('amount')), unit: f.get('unit') }),
       ...(mail
         ? { includeTrash: f.get('includeTrash') === 'on', includeJunk: f.get('includeJunk') === 'on' }
         : { patterns: String(f.get('patterns') || '').split(/\r?\n/).map((p) => p.trim()).filter(Boolean), ...(folders.length ? { folders } : {}) }),
@@ -306,6 +343,7 @@ export async function render(root, { params, query, ctx }) {
     const retention = readRetention();
     const c = currentCriterion();
     const byDateNow = retention.mode === 'date';
+    const byPeriodNow = retention.mode === 'period';
     form.querySelector('[data-delete-options]').hidden = !deletingNow;
     form.querySelectorAll('[data-cut]').forEach((el) => (el.hidden = el.dataset.cut !== retention.mode));
     form.querySelector('[data-since-word]').textContent = sinceWords(c);
@@ -329,7 +367,7 @@ export async function render(root, { params, query, ctx }) {
         ? 'Só para o OneDrive e o SharePoint. Nos repositórios escolhidos (pastas do Windows) a exclusão é sempre definitiva: arquivos excluídos pela rede não vão para a Lixeira.'
         : 'Vale no OneDrive e no SharePoint (Lixeira do site). Nas pastas do Windows a exclusão é sempre definitiva: arquivos excluídos pela rede não vão para a Lixeira.';
     }
-    if (!byDateNow) form.elements.amount.max = String(UNITS[retention.unit]?.max || 100);
+    if (retention.mode === 'age') form.elements.amount.max = String(UNITS[retention.unit]?.max || 100);
     const cutoff = cutoffPreview(retention);
     const limit = retention.maxDeletions;
     const limitText = !deletingNow ? '' : limit === null ? ' Informe um limite de exclusões válido (0 = sem limite).' : limit ? ` No máximo ${deletionsText(limit)} por execução.` : ' Sem limite de exclusões por execução.';
@@ -339,10 +377,12 @@ export async function render(root, { params, query, ctx }) {
     const where = mail || !folderCount ? '' : ` Somente ${folderCount === 1 ? 'na pasta informada' : `nas ${folderCount} pastas informadas`} (e subpastas)${others}.`;
     const content = cutoff
       ? html`<div class="preview-title">${icon('clock')} <b>${describeRetention({ ...retention, folders: retention.folders?.map((f) => ({ ...f, path: shortFolder(f) })) }, kind)}</b></div>
-          <div class="muted small">${byDateNow ? 'Em cada execução' : 'Se executada hoje'}, a política ${deletingNow ? 'excluiria' : 'listaria'} os ${EXPIRES[c](cutoff.toLocaleDateString('pt-BR'))}.${where}${limitText}</div>`
-      : byDateNow
-        ? html`<div class="danger-text small">${icon('alert')} Informe a data de corte: de 02/01/1980 até hoje (datas futuras não valem).</div>`
-        : html`<div class="danger-text small">${icon('alert')} Informe a idade máxima: de 1 a ${UNITS[retention.unit]?.max || 100} ${UNITS[retention.unit]?.many || 'anos'}.</div>`;
+          <div class="muted small">${byDateNow || byPeriodNow ? 'Em cada execução' : 'Se executada hoje'}, a política ${deletingNow ? 'excluiria' : 'listaria'} os ${byPeriodNow ? periodText(c, retention) : EXPIRES[c](cutoff.toLocaleDateString('pt-BR'))}.${where}${limitText}</div>`
+      : byPeriodNow
+        ? html`<div class="danger-text small">${icon('alert')} ${PERIOD_ERROR}</div>`
+        : byDateNow
+          ? html`<div class="danger-text small">${icon('alert')} Informe a data de corte: de 02/01/1980 até hoje (datas futuras não valem).</div>`
+          : html`<div class="danger-text small">${icon('alert')} Informe a idade máxima: de 1 a ${UNITS[retention.unit]?.max || 100} ${UNITS[retention.unit]?.many || 'anos'}.</div>`;
     // A prévia é uma região "aria-live": só é redesenhada quando o texto muda.
     if (content.value !== lastPreview) {
       lastPreview = content.value;
@@ -387,6 +427,10 @@ export async function render(root, { params, query, ctx }) {
     }
     if (targetIds.length === 0) return toast(mail ? 'Selecione ao menos uma conexão de e-mail.' : 'Selecione ao menos um repositório.', 'error');
     if (!cutoffPreview(retention)) {
+      if (retention.mode === 'period') {
+        form.elements[retention.from ? 'periodTo' : 'periodFrom'].focus();
+        return toast(PERIOD_ERROR, 'error');
+      }
       if (retention.mode === 'date') {
         form.elements.since.focus();
         return toast('Informe a data de corte: de 02/01/1980 até hoje (datas futuras não valem).', 'error');

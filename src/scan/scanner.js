@@ -11,7 +11,7 @@ import { AuditIndex, queryAuditEvents, pickLastUser } from './audit.js';
 import { friendlyError, withTimeout } from './errors.js';
 import { deleteFile, deletionEvent, fileTarget, isWithin, isCloudRepo, guardFor, OUTSIDE_FOLDERS } from './delete.js';
 import { DrivesConnector, person, keptCloudTarget, cloudTarget } from '../cloud/drives.js';
-import { fileDate, cloudDate, ageDays, patternMatcher, limitWarning, foldersOf, folderScope, folderKey, cloudFolderScope, recordInScope } from '../retention/policy.js';
+import { fileDate, cloudDate, ageDays, patternMatcher, limitWarning, foldersOf, folderScope, folderKey, cloudFolderScope, recordInScope, expiryWindow, inWindow, dateBr } from '../retention/policy.js';
 import { typeMatcher, describeFileTypes, categoryOfExtension } from '../types/catalog.js';
 import { detectType, sameContainer, HEADER_BYTES } from '../types/signature.js';
 
@@ -181,7 +181,8 @@ export class Scanner {
     // Política de retenção: arquivos mais antigos que a data de corte, pelo critério escolhido
     // (sem termos: o conteúdo não é lido).
     const r = config.retention || null;
-    this.retention = r ? { ...r, cutoffMs: Date.parse(r.cutoff), matchName: patternMatcher(r.patterns || []) } : null;
+    // Janela da expiração: datas do critério anteriores ao corte (e, num período, a partir do início dele).
+    this.retention = r ? { ...r, ...expiryWindow(r), matchName: patternMatcher(r.patterns || []) } : null;
     // Pastas escolhidas na política: escopo de cada repositório (local) ou biblioteca (nuvem) e, nas
     // pastas do Windows, os caminhos completos que a exclusão confere de novo (deleteFile within).
     this.folderScopes = new Map();
@@ -252,8 +253,10 @@ export class Scanner {
     const started = Date.now();
     if (this.retention) {
       const cutoff = new Date(this.retention.cutoffMs).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
-      const fixed = this.retention.since ? ' (data fixa)' : '';
-      this.log('info', `Retenção iniciada em ${this.repositories.length} repositório(s): arquivos com a data do critério anterior a ${cutoff}${fixed}.`);
+      const when = this.retention.from
+        ? `entre ${dateBr(this.retention.from)} e ${dateBr(this.retention.to)} (período, os dois dias inclusive)`
+        : `anterior a ${cutoff}${this.retention.since ? ' (data fixa)' : ''}`;
+      this.log('info', `Retenção iniciada em ${this.repositories.length} repositório(s): arquivos com a data do critério ${when}.`);
     } else if (this.typeSearch) {
       this.log('info', `Busca por tipo iniciada em ${this.repositories.length} repositório(s): ${describeFileTypes(this.typeSearch)}.`);
       if (this.typeSearch.checkContent && this.repositories.some(isCloudRepo)) {
@@ -701,7 +704,8 @@ export class Scanner {
       this.stats.retentionUnknown++; // sem a data do critério: nunca é excluído
       return;
     }
-    if (when >= r.cutoffMs) return;
+    // Fora da janela: mais recente que o corte (ou, num período, anterior ao início dele).
+    if (!inWindow(when, r)) return;
     this.stats.filesMatched++;
     this.stats.bytesExpired += st.size;
     const record = {
@@ -744,7 +748,8 @@ export class Scanner {
       this.stats.retentionUnknown++;
       return;
     }
-    if (when >= r.cutoffMs) return;
+    // Fora da janela: mais recente que o corte (ou, num período, anterior ao início dele).
+    if (!inWindow(when, r)) return;
     this.stats.filesMatched++;
     this.stats.bytesExpired += Number(item.size) || 0;
     const record = this.cloudRecord(repo, drive, entry, this.expiredFields(when, scope ? scope.specOf(scope.folderOf(entry.relativePath)) : null));
@@ -1142,7 +1147,7 @@ export class Scanner {
    */
   stillExpired(st) {
     const when = fileDate(st, this.retention.criterion);
-    if (when !== null && when < this.retention.cutoffMs) return null;
+    if (inWindow(when, this.retention)) return null;
     return 'O arquivo deixou de estar expirado depois da listagem: a data do critério da política mudou (por exemplo, ele foi aberto ou recriado).';
   }
 
