@@ -35,15 +35,21 @@ export function sanitizeOptions(input) {
   return o;
 }
 
+const DATE_TEXT = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+
 /**
  * Filtro de data das análises de arquivos: modifiedAfter (início, inclusive) e modifiedBefore (fim,
  * exclusive: 00:00 do dia seguinte ao "até" escolhido), em ISO. modifiedBefore só entra quando
  * informado (as opções salvas antes dele continuam iguais).
  */
 function changedRange(input, o) {
+  // Só texto no formato de data (AAAA-MM-DD, com ou sem a hora), a partir de 1980: um ano digitado
+  // com dois dígitos (0024) ou um valor qualquer (true, 1) nunca vira um filtro que não filtra nada.
   const instant = (value, label) => {
-    const d = new Date(value);
+    const text = typeof value === 'string' ? value.trim() : '';
+    const d = DATE_TEXT.test(text) ? new Date(text) : new Date(NaN);
     if (Number.isNaN(d.getTime())) throw new ScanError(`Data "${label}" inválida.`);
+    if (d.getFullYear() < 1980) throw new ScanError(`Data "${label}" inválida: use um ano a partir de 1980, com os quatro dígitos (ex.: 01/01/2024).`);
     return d.toISOString();
   };
   if (input.modifiedAfter) o.modifiedAfter = instant(input.modifiedAfter, 'alterados a partir de');

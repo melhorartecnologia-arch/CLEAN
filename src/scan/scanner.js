@@ -775,7 +775,7 @@ export class Scanner {
       occurrences: 0,
       terms: [],
       matches: [],
-      typeMatch: { category: found.category, extension: found.extension, by: detected ? 'content' : 'extension', format: detected?.format || null },
+      typeMatch: { category: found.category, extension: found.extension, by: detected ? 'content' : this.typeSearch?.all ? 'date' : 'extension', format: detected?.format || null },
     };
   }
 

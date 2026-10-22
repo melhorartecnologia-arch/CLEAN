@@ -127,6 +127,12 @@ test('API: busca só pela data — exige uma data, não pode ser agendada, lista
     // Exportação: a busca descrita, o período e o tipo "Outros arquivos".
     const html = await (await fetch(`${base}/api/scans/${scan.id}/export.html`)).text();
     assert.match(html, /Todos os arquivos \(somente pela data de alteração\)/);
+    assert.match(html, /Relatório CLEAN – busca por data de alteração/);
+    assert.match(html, /Somente listar \(revisão no relatório\)/);
+    const csv = await (await fetch(`${base}/api/scans/${scan.id}/export.csv`)).text();
+    assert.match(csv, /Data de alteração/, 'encontrado pela data');
+    const noneHtml = await (await fetch(`${base}/api/scans/${none.id}/export.html`)).text();
+    assert.match(noneHtml, /Fora do período \(não listados\)<\/td><td>4/);
     assert.match(html, /Outros arquivos/);
     assert.doesNotMatch(html, /undefined|NaN/);
     const xlsx = await fetch(`${base}/api/scans/${scan.id}/export.xlsx`);
@@ -136,4 +142,14 @@ test('API: busca só pela data — exige uma data, não pode ser agendada, lista
     await scheduler.stop();
     await manager.shutdown?.();
   }
+});
+
+test('datas do filtro: só texto de data, ano a partir de 1980 (24 digitado vira 0024 e é recusado)', async () => {
+  const { sanitizeOptions } = await import('../src/scan/manager.js');
+  for (const bad of ['0024-01-01T00:00:00', '1975-06-01T00:00:00', true, 1, '1', 'ontem', ['2024-01-01']]) {
+    assert.throws(() => sanitizeOptions({ modifiedAfter: bad }), /inválida/, JSON.stringify(bad));
+    assert.throws(() => sanitizeOptions({ modifiedBefore: bad }), /inválida/, JSON.stringify(bad));
+  }
+  assert.equal(sanitizeOptions({ modifiedAfter: '2024-01-01T00:00:00' }).modifiedAfter, new Date(2024, 0, 1).toISOString());
+  assert.equal(sanitizeOptions({ modifiedAfter: '2026-10-15T12:34:56.789Z' }).modifiedAfter, '2026-10-15T12:34:56.789Z', 'o formato do agendador');
 });

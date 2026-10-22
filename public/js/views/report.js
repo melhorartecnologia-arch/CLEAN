@@ -869,7 +869,7 @@ const RETENTION_FILES = {
 // ---------------------------------------------------------------------------------------------
 // Buscas por tipo de arquivo: os arquivos das categorias e extensões escolhidas (sem termos)
 
-const FOUND_BY = { extension: 'Extensão', content: 'Tipo real (conteúdo)' };
+const FOUND_BY = { extension: 'Extensão', content: 'Tipo real (conteúdo)', date: 'Data de alteração' };
 
 const TYPES_FILES = {
   ...FILES,
@@ -1001,7 +1001,9 @@ const TYPES_FILES = {
           <dt>Encontrado por</dt>
           <dd>${m.by === 'content'
             ? html`tipo real no conteúdo: <b>${m.format}</b><br /><span class="muted small">${r.extension ? `A extensão ${r.extension} é de outro tipo: o arquivo pode ter sido renomeado.` : 'O arquivo não tem extensão: o tipo foi reconhecido pelo conteúdo.'}</span>`
-            : html`extensão <b>${m.extension || r.extension}</b>`}</dd>
+            : m.by === 'date'
+              ? html`data de alteração, dentro do período da busca${m.extension || r.extension ? html` <span class="muted small">(extensão ${m.extension || r.extension})</span>` : ''}`
+              : html`extensão <b>${m.extension || r.extension}</b>`}</dd>
         </dl>
         <h4 class="spaced">Quem interagiu com o arquivo</h4>
         ${peopleFacts(r)}
@@ -1971,7 +1973,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
           ? `Exclusão automática dos arquivos encontrados${scan.fileTypes?.maxDeletions ? `, até ${deletionsText(scan.fileTypes.maxDeletions)} por execução` : ', sem limite por execução'}${scan.deletionRevoked ? ` · exclusão interrompida: ${scan.deletionRevoked}` : ''}`
           : scan.deletionBlocked
             ? `Exclusão automática desativada nesta execução: ${scan.deletionBlocked}`
-            : 'Somente procurar: revise e exclua pelo relatório (item a item, os selecionados ou todos os filtrados).'}</div>`
+            : `${scan.fileTypes?.all ? 'Somente listar' : 'Somente procurar'}: revise e exclua pelo relatório (item a item, os selecionados ou todos os filtrados).`}</div>`
       : '';
     const badge = scan.options?.deleteMatches
       ? html`<span class="badge deleting">${P.retention ? `exclui ${P.o === 'a' ? 'as expiradas' : 'os expirados'}` : 'com exclusão automática'}</span>`

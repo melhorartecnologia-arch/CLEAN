@@ -20,7 +20,7 @@ function folderOf(record) {
 }
 
 const sortItems = (records) => records.slice().sort((a, b) => a.repositoryName.localeCompare(b.repositoryName, 'pt-BR') || a.path.localeCompare(b.path, 'pt-BR'));
-const foundBy = (r) => (r.typeMatch?.by === 'content' ? 'Conteúdo (tipo real)' : 'Extensão');
+const foundBy = (r) => (r.typeMatch?.by === 'content' ? 'Conteúdo (tipo real)' : r.typeMatch?.by === 'date' ? 'Data de alteração' : 'Extensão');
 
 export function typeInfoRows(scan) {
   const s = scan.stats || {};
@@ -47,15 +47,19 @@ export function typeInfoRows(scan) {
     ['Arquivos verificados', s.filesSeen ?? 0],
     ['Arquivos encontrados', s.filesMatched ?? 0],
     ['Tamanho dos encontrados (MB)', mb(s.bytesFound)],
-    ['Encontrados pelo conteúdo (outra extensão)', s.typesByContent ?? 0],
-    ['Abaixo do tamanho mínimo', s.filesSkippedBySize ?? 0],
+    ...(t.all
+      ? [['Fora do período (não listados)', s.filesSkippedByDate ?? 0]]
+      : [
+          ['Encontrados pelo conteúdo (outra extensão)', s.typesByContent ?? 0],
+          ['Abaixo do tamanho mínimo', s.filesSkippedBySize ?? 0],
+        ]),
     ['Erros de acesso/leitura', s.errors ?? 0],
     ...deletionInfoRows(o, s, {
       blocked: scan.deletionBlocked,
       revoked: scan.deletionRevoked,
       labels: {
-        action: `Procurar e excluir automaticamente${t.maxDeletions ? ` (até ${t.maxDeletions} por execução)` : ''}`,
-        listOnly: 'Somente procurar (revisão no relatório)',
+        action: `${t.all ? 'Listar' : 'Procurar'} e excluir automaticamente${t.maxDeletions ? ` (até ${t.maxDeletions} por execução)` : ''}`,
+        listOnly: t.all ? 'Somente listar (revisão no relatório)' : 'Somente procurar (revisão no relatório)',
         extra: [
           ['Não excluídos (limite da execução)', s.deleteSkipped ?? 0],
           ['Em locais protegidos (não excluídos)', s.deleteProtected ?? 0],
@@ -185,7 +189,7 @@ export async function exportTypesHtml(scan, records, out) {
     out,
     (function* () {
       yield `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(`Relatório CLEAN – ${scan.name}`)}</title><style>${REPORT_CSS}</style></head><body>
-<h1>Relatório CLEAN – busca por tipo</h1><div class="muted">${escapeHtml(scan.name)} · gerado em ${escapeHtml(new Date().toLocaleString('pt-BR'))}</div>
+<h1>Relatório CLEAN – ${scan.fileTypes?.all ? 'busca por data de alteração' : 'busca por tipo'}</h1><div class="muted">${escapeHtml(scan.name)} · gerado em ${escapeHtml(new Date().toLocaleString('pt-BR'))}</div>
 <h2>Resumo</h2><table class="info">${info}</table>
 ${tables}
 <h2>Arquivos encontrados (${sorted.length})</h2><table><thead><tr><th>Arquivo</th><th>Tipo</th><th>Último usuário</th><th>Modificado em</th><th class="num">Tamanho (KB)</th></tr></thead><tbody>`;

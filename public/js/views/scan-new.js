@@ -9,9 +9,13 @@ import { scheduleSection, bindSchedule, readSchedule, scheduling } from '../sche
 /** Dia seguinte a "AAAA-MM-DD" (pelo calendário, sem depender do fuso), no mesmo formato. */
 function nextDay(day) {
   const [y, m, d] = String(day).split('-').map(Number);
-  const t = new Date(Date.UTC(y, m - 1, d + 1));
-  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+  const t = new Date(0);
+  t.setUTCFullYear(y, m - 1, d + 1); // setUTCFullYear não troca os anos 0 a 99 por 1900 a 1999
+  return `${String(t.getUTCFullYear()).padStart(4, '0')}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
 }
+
+/** "AAAA-MM-DD" → "DD/MM/AAAA". */
+const dayBr = (day) => String(day).split('-').reverse().join('/');
 
 const CLOUD_LABELS = { onedrive: 'OneDrive', sharepoint: 'SharePoint' };
 const SHOWN_EXTENSIONS = 6; // extensões de exemplo em cada categoria (todas em "Ver as extensões")
@@ -81,7 +85,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     ? schedule.purpose === 'types'
       ? 'types'
       : 'terms'
-    : query.get('busca') === 'data'
+    : !fixed && query.get('busca') === 'data'
       ? 'date'
       : query.get('busca') === 'tipos' || usable.length === 0
         ? 'types'
@@ -228,12 +232,12 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
             <div class="form-grid">
               <label class="field" data-now-only>
                 <span>Somente arquivos alterados a partir de</span>
-                <input type="date" name="modifiedAfter" />
+                <input type="date" name="modifiedAfter" min="1980-01-01" />
                 <small>Em branco: sem limite no início. Vale a data mais recente entre a modificação e a criação (um arquivo copiado para o repositório entra pela data da cópia).</small>
               </label>
               <label class="field" data-now-only>
                 <span>Somente arquivos alterados até</span>
-                <input type="date" name="modifiedBefore" />
+                <input type="date" name="modifiedBefore" min="1980-01-01" />
                 <small>Em branco: sem limite no fim. O dia escolhido conta inteiro (até 23:59, hora do servidor). Use as duas datas para um período.</small>
               </label>
               <label class="field" data-for-search="terms">
@@ -273,6 +277,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
                 <b>Exclusão sem volta nas pastas do Windows:</b> arquivos excluídos pela rede não vão para a Lixeira. No OneDrive e no SharePoint, vale a forma definida em cada repositório (para a lixeira ou definitiva). <span data-text="check"></span>
                 <p data-path-warning hidden><b>Atenção:</b> com "Caminho completo", um termo no nome de uma pasta faz todos os arquivos dela (e das subpastas) serem encontrados — e excluídos.</p>
                 <p data-work-warning hidden><b>Atenção:</b> você marcou arquivos de trabalho (<span data-work-names></span>): todos os arquivos desses tipos nos repositórios escolhidos serão excluídos.</p>
+                <p data-date-period hidden></p>
                 <p data-date-warning hidden><b>Atenção:</b> sem a data "alterados até", entram também os arquivos alterados recentemente (até o início da busca) — documentos em uso serão excluídos.</p>
                 <p data-schedule-only hidden><b>Agendamento:</b> a exclusão vale para todas as execuções, sem nova confirmação. Ela é conferida em cada execução: se um repositório deixar de permitir a exclusão, mudar de caminho (ou de contas e sites) ou passar a excluir de forma definitiva, as execuções falham até o agendamento ser salvo e confirmado de novo.</p>
                 <label class="field"><span>Digite EXCLUIR para confirmar${schedule?.action === 'delete' ? ' (de novo, a cada vez que o agendamento é salvo)' : ''}</span><input type="text" name="confirmDelete" autocomplete="off" spellcheck="false" /></label>
@@ -339,6 +344,11 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     form.querySelector('[data-limit]').hidden = !((types || byDate) && deleting);
     form.querySelector('[data-date-later]').hidden = !(byDate && later);
     form.querySelector('[data-date-warning]').hidden = !(byDate && deleting && !form.elements.modifiedBefore.value && !form.elements.modifiedBefore.validity.badInput);
+    // O período como será usado, na confirmação da exclusão (para conferir o ano digitado).
+    const [fromDay, toDay] = [form.elements.modifiedAfter.value, form.elements.modifiedBefore.value];
+    const periodBox = form.querySelector('[data-date-period]');
+    periodBox.hidden = !(byDate && deleting && (fromDay || toDay));
+    periodBox.textContent = fromDay && toDay ? `Período: de ${dayBr(fromDay)} a ${dayBr(toDay)}.` : fromDay ? `Período: a partir de ${dayBr(fromDay)}.` : toDay ? `Período: até ${dayBr(toDay)}.` : '';
     form.querySelector('[data-path-warning]').hidden = types || byDate || !(form.elements.checkName.checked && form.elements.nameTarget.value === 'path');
     // Arquivos de trabalho: as categorias marcadas e as extensões digitadas que são desses tipos.
     const workNames = types
@@ -362,7 +372,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     paint(submit, html`${icon(later ? 'clock' : 'play')} ${label}`);
   };
   const onChange = (event) => {
-    if (['search', 'action', 'nameTarget', 'checkName', 'categories', 'extensions', 'modifiedBefore'].includes(event.target.name)) sync();
+    if (['search', 'action', 'nameTarget', 'checkName', 'categories', 'extensions', 'modifiedAfter', 'modifiedBefore'].includes(event.target.name)) sync();
   };
   const onInput = (event) => {
     if (event.target.name === 'extensions') sync();
@@ -386,6 +396,12 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
         if (form.elements[name]?.validity?.badInput) {
           form.elements[name].focus();
           return toast(`Complete a data "${label}" (dia, mês e ano) ou apague-a.`, 'error');
+        }
+        // Ano com dois dígitos (24 vira 0024) ou anterior a 1980: recusado, para o filtro valer.
+        const value = form.elements[name]?.value;
+        if (value && Number(value.slice(0, 4)) < 1980) {
+          form.elements[name].focus();
+          return toast(`Data "${label}" inválida: use um ano a partir de 1980, com os quatro dígitos (ex.: 01/01/2024).`, 'error');
         }
       }
     }
