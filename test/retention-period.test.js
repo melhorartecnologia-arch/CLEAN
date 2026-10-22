@@ -352,7 +352,7 @@ test('motor: só "até" e só "a partir de" (o arquivo usado durante a execuçã
   assert.match(until.logs[0], /até 31\/12\/2018, inclusive/);
   const after = await runFiles(dir, policyFor({ mode: 'period', from: '2019-01-01', criterion: 'modified', maxDeletions: 0 }), { deleteMatches: false });
   assert.deepEqual(after.names, ['2019.tmp']);
-  assert.match(after.logs[0], /a partir de 01\/01\/2019 até o início desta execução/);
+  assert.match(after.logs[0], /a partir de 01\/01\/2019 até a criação desta execução/);
   assert.ok(exists('1999.tmp') && exists('2018.tmp') && exists('2019.tmp'));
 });
 
@@ -391,4 +391,14 @@ test('análise de arquivos: "alterados a partir de" e "alterados até" (o dia fi
   assert.deepEqual((await run({ modifiedBefore: day(tomorrow) })).names, ['antigo.txt'], 'até hoje: entra');
   const copiedNow = st.birthtimeMs > Date.now() - 86400000;
   assert.deepEqual((await run({ modifiedBefore: '2015-01-01T00:00:00' })).names, copiedNow ? [] : ['antigo.txt'], 'copiado agora: conta a data da cópia');
+});
+
+test('período: data que não é texto (número, objeto, lista) é recusada — nunca vira um período aberto', () => {
+  for (const bad of [20181231, true, { d: 1 }, ['2018-12-31']]) {
+    fails(() => sanitizeRetention({ mode: 'period', from: '2015-01-01', to: bad, criterion: 'modified' }, 'files'), /data final do período/);
+    fails(() => sanitizeRetention({ from: bad, to: '2018-12-31', criterion: 'modified' }, 'files'), /data inicial do período/);
+  }
+  // null ou em branco: ausente (período de um lado só).
+  assert.equal(sanitizeRetention({ mode: 'period', from: '2015-01-01', to: null }, 'files').to, undefined);
+  fails(() => sanitizeRetention({ mode: 'period', from: '2015-01-01', to: 'incompleta' }, 'files'), /data final do período/);
 });

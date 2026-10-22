@@ -1019,14 +1019,14 @@ nada expira até essa data ficar antiga.
   **dentro do período, contando os dias inteiros** (das 00:00 do dia "a partir de" até o fim do dia
   "até", na hora do servidor). Com o critério *Última modificação*, os campos aparecem como
   **Somente arquivos alterados a partir de** e **Somente arquivos alterados até**. Uma das datas pode
-  ficar em branco: só "a partir de" — vai até o momento em que cada execução começa (cuidado: entram
+  ficar em branco: só "a partir de" — vai até o momento em que cada execução é criada (cuidado: entram
   também os arquivos alterados recentemente; o formulário avisa); só "até" — todos os mais antigos
   que o fim do dia escolhido. Os mais antigos que o início e os mais recentes que o fim ficam. Ex.:
   *Última modificação* de 01/01/2015 a 31/12/2018 — os arquivos alterados pela última vez nesses
   quatro anos; *Sem abertura nem modificação* no mesmo período — vale a mais recente das duas datas,
   então um arquivo modificado em 2016 mas aberto em 2021 fica. As datas vão de 02/01/1980 até hoje
   (a final não pode estar no futuro; se for hoje, o período vai até o momento em que a execução
-  começa) e não andam: todas as execuções usam o mesmo período. Na hora
+  é criada) e não andam: todas as execuções usam o mesmo período. Na hora
   de excluir, a data é lida de novo: um arquivo cuja data saiu do período depois da listagem (foi
   aberto, ou teve a data restaurada de um backup) é mantido.
 
@@ -1098,7 +1098,8 @@ editar e excluir. As políticas agendadas aparecem no painel, em *Próximas exec
 **Relatório de cada execução:** os itens expirados com a data considerada e a idade, os mais antigos
 primeiro; gráficos por faixa de idade (clique para filtrar), espaço por extensão e por repositório,
 últimos usuários, caixas, pastas e remetentes; a regra, a data de corte (com *data fixa*, o dia
-escolhido; com *período*, as duas datas), as pastas da política e a forma de exclusão no cabeçalho.
+escolhido; com *período*, as datas preenchidas — e, só com "a partir de", o momento em que a execução
+foi criada, que fecha o período), as pastas da política e a forma de exclusão no cabeçalho.
 O Excel (abas *Resumo*, *Arquivos expirados* ou *Mensagens expiradas*, *Exclusões* e *Erros*), o CSV
 e o HTML têm uma linha por item, com a data considerada, a idade e a faixa de idade; o *Resumo* traz o
 critério, a idade máxima, a data fixa ou o período e as pastas da política. As execuções também aparecem em *Análises de

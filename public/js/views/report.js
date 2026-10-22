@@ -1944,7 +1944,7 @@ export async function render(root, { params, query, isCurrent = () => true }) {
       sr.from && sr.to
         ? html`entre <b>${dateBr(sr.from)}</b> e <b>${dateBr(sr.to)}</b> (período, os dois dias inclusive)`
         : sr.from
-          ? html`a partir de <b>${dateBr(sr.from)}</b> até o início da execução, <b>${fmtServerDateTime(sr.cutoff, { weekday: false })}</b> (período)`
+          ? html`a partir de <b>${dateBr(sr.from)}</b> até <b>${fmtServerDateTime(sr.cutoff, { weekday: false })}</b>, quando a execução foi criada (período)`
           : sr.to
             ? html`até <b>${dateBr(sr.to)}</b>, inclusive (período)`
             : sr.since

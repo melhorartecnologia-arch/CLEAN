@@ -90,12 +90,14 @@ export function sanitizeRetention(input, kind, { cloud = false, targets = null, 
   // Corte: idade máxima (relativa a cada execução), data fixa ("sem uso desde") ou período (a data do
   // critério entre dois dias). Sem "mode", vale a forma salva: com "from"/"to", período; com "since",
   // data fixa.
-  const filled = (v) => typeof v === 'string' && v.trim() !== '';
+  // Ausente: só undefined, null ou texto em branco. Qualquer outro valor (número, objeto...) é validado
+  // como data — e recusado —, para nunca transformar um período fechado em aberto.
+  const filled = (v) => !(v === undefined || v === null || (typeof v === 'string' && v.trim() === ''));
   const mode = ['age', 'date', 'period'].includes(r.mode) ? r.mode : filled(r.from) || filled(r.to) ? 'period' : filled(r.since) ? 'date' : 'age';
   let cut;
   if (mode === 'period') {
     if (mail) throw new RetentionError('O período (a partir de / até) vale para arquivos; nas mensagens, use a idade máxima ou a data fixa.');
-    // Uma das datas pode ficar em branco: só "a partir de" (até o início de cada execução) ou só "até".
+    // Uma das datas pode ficar em branco: só "a partir de" (até a criação de cada execução) ou só "até".
     if (!filled(r.from) && !filled(r.to)) throw new RetentionError('Informe o período: a data "a partir de", a data "até" ou as duas.');
     const from = filled(r.from) ? dayField(r.from, now, 'inicial do período') : null;
     const to = filled(r.to) ? dayField(r.to, now, 'final do período') : null;
@@ -143,7 +145,8 @@ export function sanitizeRetention(input, kind, { cloud = false, targets = null, 
  * do servidor). which: "inicial do período" ou "final do período".
  */
 function dayField(value, now, which) {
-  const text = String(value ?? '').trim();
+  // Só texto: uma lista ou um número com cara de data não passam.
+  const text = typeof value === 'string' ? value.trim() : '';
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
   if (!m) throw new RetentionError(`Informe a data ${which} (dia, mês e ano).`);
   const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
@@ -360,14 +363,14 @@ export function recordInScope(retention, record) {
 export function cutoffDate(retention, now = new Date()) {
   // Período: até o fim do dia final (expiram as datas anteriores às 00:00 do dia seguinte, montado
   // pelo calendário: num dia sem 00:00, no início do horário de verão, a hora não escorrega). Com o dia
-  // final hoje, o fim é o momento em que a execução começa: um arquivo aberto ou modificado durante a
+  // final hoje, o fim é o momento em que a execução é criada: um arquivo aberto ou modificado durante a
   // execução não entra no período (e a conferência na hora de excluir o mantém).
   if (retention.to) {
     const [y, m, d] = String(retention.to).split('-').map(Number);
     const end = new Date(y, m - 1, d + 1);
     return +end > +now ? new Date(now) : end;
   }
-  // Só "a partir de": até o momento em que a execução começa.
+  // Só "a partir de": até o momento em que a execução é criada.
   if (retention.from) return new Date(now);
   if (retention.since) return sinceDate(retention.since);
   const d = new Date(now);

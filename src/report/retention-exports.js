@@ -56,10 +56,10 @@ function policyRows(scan) {
             r.from && r.to
               ? `de ${dateBr(r.from)} a ${dateBr(r.to)}, os dois dias inclusive`
               : r.from
-                ? `a partir de ${dateBr(r.from)}, até o início da execução`
+                ? `a partir de ${dateBr(r.from)}, até a criação da execução`
                 : `até ${dateBr(r.to)}, inclusive`,
           ],
-          ...(r.from && !r.to ? [['Início da execução (fim do período)', toDate(r.cutoff)]] : []),
+          ...(r.from && !r.to ? [['Criação da execução (fim do período)', toDate(r.cutoff)]] : []),
         ]
       : [r.since ? [`Data fixa (${sinceLabel(r, mail)})`, dateBr(r.since)] : ['Idade máxima', amountText(r)], ['Data de corte (expiram os anteriores)', toDate(r.cutoff)]]),
     mail

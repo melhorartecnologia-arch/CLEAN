@@ -261,7 +261,7 @@ export class Scanner {
         r.from && r.to
           ? `entre ${dateBr(r.from)} e ${dateBr(r.to)} (período, os dois dias inclusive)`
           : r.from
-            ? `a partir de ${dateBr(r.from)} até o início desta execução (${cutoff})`
+            ? `a partir de ${dateBr(r.from)} até a criação desta execução (${cutoff})`
             : `anterior a ${cutoff}${r.to ? ` (período: até ${dateBr(r.to)}, inclusive)` : r.since ? ' (data fixa)' : ''}`;
       this.log('info', `Retenção iniciada em ${this.repositories.length} repositório(s): arquivos com a data do critério ${when}.`);
     } else if (this.typeSearch) {

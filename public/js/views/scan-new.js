@@ -345,6 +345,16 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     const types = mode() === 'types';
     const deleting = f.get('action') === 'delete';
     const later = scheduling(form);
+    // Data digitada pela metade (sem o ano, por exemplo): o navegador a entrega vazia, e a análise
+    // rodaria sem o filtro. É recusada.
+    if (!later) {
+      for (const [name, label] of [['modifiedAfter', 'alterados a partir de'], ['modifiedBefore', 'alterados até']]) {
+        if (form.elements[name]?.validity?.badInput) {
+          form.elements[name].focus();
+          return toast(`Complete a data "${label}" (dia, mês e ano) ou apague-a.`, 'error');
+        }
+      }
+    }
     const options = {
       modifiedAfter: !later && f.get('modifiedAfter') ? `${f.get('modifiedAfter')}T00:00:00` : null,
       // "Até" conta o dia inteiro: o limite (exclusivo) é 00:00 do dia seguinte, na hora do servidor.

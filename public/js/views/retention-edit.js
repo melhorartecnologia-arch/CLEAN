@@ -31,7 +31,7 @@ const PERIOD_ERROR = 'Informe o período: a data "a partir de", a data "até" ou
 function periodPhrase(criterion, r) {
   const p = periodPreview(r);
   const [a, b] = [p.from, p.to].map((d) => d?.toLocaleDateString('pt-BR'));
-  const range = a && b ? `entre ${a} e ${b}` : a ? `a partir de ${a} (até o início de cada execução)` : `até ${b}`;
+  const range = a && b ? `entre ${a} e ${b}` : a ? `a partir de ${a} (até o momento em que cada execução é criada)` : `até ${b}`;
   return `${EXPIRES_PERIOD[criterion] || EXPIRES_PERIOD.used} ${range}`;
 }
 
@@ -39,6 +39,9 @@ function periodPhrase(criterion, r) {
  * Rótulos dos campos do período, pelo critério: "Somente arquivos alterados a partir de" e
  * "Somente arquivos alterados até" (última modificação)...
  */
+/** Quem entra sem a data "até", pelo critério: "os arquivos alterados recentemente"... */
+const RECENT_VERB = { used: 'usados', 'opened-or-modified': 'abertos ou alterados', modified: 'alterados', accessed: 'abertos', created: 'criados' };
+
 const PERIOD_LABELS = {
   used: 'Somente arquivos usados pela última vez (modificação, acesso ou criação)',
   'opened-or-modified': 'Somente arquivos abertos ou alterados pela última vez',
@@ -200,7 +203,7 @@ export async function render(root, { params, query, ctx }) {
               : html`<div class="field" data-cut="period" ${savedMode === 'period' ? '' : 'hidden'}>
                   <label class="field"><span data-period-label="from">${PERIOD_LABELS[criterion] || PERIOD_LABELS.used} a partir de</span><input type="date" name="periodFrom" min="1980-01-02" max="${todayIso()}" value="${r.from || ''}" /></label>
                   <label class="field"><span data-period-label="to">${PERIOD_LABELS[criterion] || PERIOD_LABELS.used} até</span><input type="date" name="periodTo" min="1980-01-02" max="${todayIso()}" value="${r.to || ''}" /></label>
-                  <small>Preencha uma das datas ou as duas; cada dia conta inteiro (hora do servidor). Só "a partir de": entram também os arquivos usados recentemente, até o início de cada execução. Só "até": todos os mais antigos que o fim do dia escolhido. Com "Sem abertura nem modificação", vale a mais recente das duas datas: um arquivo aberto ou modificado depois do fim do período fica. As datas não andam: todas as execuções usam o mesmo período.</small>
+                  <small>Preencha uma das datas ou as duas; cada dia conta inteiro (hora do servidor). Só "a partir de": entram também os arquivos mais recentes, até o momento em que cada execução é criada. Só "até": todos os mais antigos que o fim do dia escolhido. Com "Sem abertura nem modificação", vale a mais recente das duas datas: um arquivo aberto ou modificado depois do fim do período fica. As datas não andam: todas as execuções usam o mesmo período.</small>
                 </div>`}
             ${mail
               ? html`<label class="check"><input type="checkbox" name="includeTrash" ${chk(r.includeTrash !== false)} /><span>Incluir a Lixeira (Itens Excluídos)</span></label>
@@ -325,13 +328,16 @@ export async function render(root, { params, query, ctx }) {
   const readRetention = () => {
     const f = new FormData(form);
     const folders = mail ? [] : readFolders();
+    // Data digitada pela metade (sem o ano, por exemplo): o navegador a entrega vazia. Ela vai como
+    // inválida, e não em branco — senão o período viraria só "a partir de" ou só "até" sem aviso.
+    const day = (name) => (form.elements[name]?.validity?.badInput ? 'incompleta' : String(f.get(name) || ''));
     return {
       criterion: currentCriterion(),
       // Idade máxima (o corte anda a cada execução) ou data fixa (o mesmo corte sempre).
       ...(cutMode() === 'period'
-        ? { mode: 'period', from: String(f.get('periodFrom') || ''), to: String(f.get('periodTo') || '') }
+        ? { mode: 'period', from: day('periodFrom'), to: day('periodTo') }
         : cutMode() === 'date'
-          ? { mode: 'date', since: String(f.get('since') || '') }
+          ? { mode: 'date', since: day('since') }
           : { mode: 'age', amount: Number(f.get('amount')), unit: f.get('unit') }),
       ...(mail
         ? { includeTrash: f.get('includeTrash') === 'on', includeJunk: f.get('includeJunk') === 'on' }
@@ -394,7 +400,7 @@ export async function render(root, { params, query, ctx }) {
       ? html`<div class="preview-title">${icon('clock')} <b>${describeRetention({ ...retention, folders: retention.folders?.map((f) => ({ ...f, path: shortFolder(f) })) }, kind)}</b></div>
           <div class="muted small">${byDateNow || byPeriodNow ? 'Em cada execução' : 'Se executada hoje'}, a política ${deletingNow ? 'excluiria' : 'listaria'} os ${byPeriodNow ? periodPhrase(c, retention) : EXPIRES[c](cutoff.toLocaleDateString('pt-BR'))}.${where}${limitText}</div>
           ${byPeriodNow && !periodPreview(retention).to
-            ? html`<div class="danger-text small">${icon('alert')} Sem a data "até", entram também os arquivos usados recentemente${deletingNow ? ' — e eles seriam excluídos' : ''}. Confira com "Simular agora".</div>`
+            ? html`<div class="danger-text small">${icon('alert')} Sem a data "até", entram também os arquivos ${RECENT_VERB[c] || 'usados'} recentemente${deletingNow ? ' — e eles seriam excluídos' : ''}. Confira com "Simular agora".</div>`
             : ''}`
       : byPeriodNow
         ? html`<div class="danger-text small">${icon('alert')} ${PERIOD_ERROR}</div>`
@@ -416,6 +422,11 @@ export async function render(root, { params, query, ctx }) {
   };
   form.addEventListener('change', onChange);
   form.addEventListener('input', onChange);
+  // Data digitada pela metade não gera "input" nem "change": a prévia é refeita ao sair do campo.
+  const onLeave = (event) => {
+    if (event.target.type === 'date') sync();
+  };
+  form.addEventListener('focusout', onLeave);
   const unbind = bindSchedule(form, { onModeChange: sync, scheduleId: policy?.id || null });
 
   const onSubmit = async (event) => {
@@ -498,5 +509,6 @@ export async function render(root, { params, query, ctx }) {
     form.removeEventListener('submit', onSubmit);
     form.removeEventListener('change', onChange);
     form.removeEventListener('input', onChange);
+    form.removeEventListener('focusout', onLeave);
   };
 }
