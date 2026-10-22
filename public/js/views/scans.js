@@ -81,7 +81,7 @@ export async function render(root, { props = {} }) {
                         <td>
                           <a href="${K.base}/${s.id}"><b>${s.name}</b></a>${s.retention
                             ? html` <span class="chip" title="${s.scheduleId ? `Execução da política de retenção "${s.scheduleName}"` : 'Execução de uma política de retenção'}">${icon('clock')} retenção</span>`
-                            : html`${s.fileTypes ? html` <span class="chip">busca por tipo</span>` : ''}${s.scheduleId
+                            : html`${s.fileTypes ? html` <span class="chip">${s.fileTypes.all ? 'busca por data' : 'busca por tipo'}</span>` : ''}${s.scheduleId
                                 ? html` <span class="chip" title="Iniciada pelo agendamento &quot;${s.scheduleName}&quot;">${icon('clock')} agendada</span>`
                                 : ''}`}
                           <div class="muted small">${K.where(s)} · ${s.retention ? describeRetention(s.retention, kind) : s.fileTypes ? describeFileTypes(s.fileTypes) : (s.summary?.lists || []).map((l) => l.name).join(', ')}</div>

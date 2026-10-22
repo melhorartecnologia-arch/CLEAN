@@ -77,6 +77,11 @@ function parseSchedule(body = {}, { store, existing = null, by }) {
       if (err instanceof FileTypesError) throw bad(err.message);
       throw err;
     }
+    // Nas execuções agendadas o período de cada execução substitui as datas: a busca só pela data viraria
+    // "todos os arquivos alterados nos últimos dias". Para repetir, uma política de retenção.
+    if (fileTypes.all) {
+      throw bad('A busca só pela data de alteração não pode ser agendada. Para repetir a limpeza, crie uma política de retenção (Automação › Retenção) com o critério "Última modificação" e o período.');
+    }
     const concurrency = Number(body.options?.concurrency);
     options = { resolveOwner: body.options?.resolveOwner !== false, concurrency: Number.isInteger(concurrency) && concurrency > 0 ? Math.min(concurrency, 16) : 4 };
     deleting = body.options?.deleteMatches === true;

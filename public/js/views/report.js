@@ -25,7 +25,7 @@ import {
 } from '../ui.js';
 import { replaceQuery, setActiveNav } from '../nav.js';
 import { FILE_CRITERIA, MAIL_CRITERIA, describeRetention, ageText, deletionModeText, deletionsText, dateBr } from '../retention.js';
-import { categoryLabel, describeFileTypes } from '../file-types.js';
+import { categoryLabel, describeFileTypes, fileTypesCatalog } from '../file-types.js';
 
 const CONTENT_STATUS = {
   ok: 'Analisado',
@@ -909,7 +909,9 @@ const TYPES_FILES = {
   fillOptions: (form, options, filters, fill, scan) => {
     const o = options || { users: [], extensions: [] };
     const t = scan.fileTypes || {};
-    fill(form.elements.type, [...(t.categories || []), ...(t.extensions?.length ? ['custom'] : [])], filters.type, categoryLabel);
+    // Busca só pela data: todos os tipos do catálogo e os demais arquivos.
+    const kinds = t.all ? [...fileTypesCatalog().categories.map((c) => c.key), 'other'] : [...(t.categories || []), ...(t.extensions?.length ? ['custom'] : [])];
+    fill(form.elements.type, kinds, filters.type, categoryLabel);
     fill(form.elements.user, o.users, filters.user);
     fill(form.elements.extension, o.extensions, filters.extension);
     const repos = new Map((scan.summary?.repositories || []).map((r) => [r.id, r.name]));
@@ -1009,8 +1011,8 @@ const TYPES_FILES = {
 
   empty: {
     filtered: 'Nenhum arquivo corresponde aos filtros.',
-    running: 'Nenhum arquivo dos tipos procurados encontrado até agora.',
-    none: 'Nenhum arquivo dos tipos procurados foi encontrado nos repositórios.',
+    running: 'Nenhum arquivo encontrado até agora.',
+    none: 'Nenhum arquivo dos tipos (ou do período) procurados foi encontrado nos repositórios.',
   },
 };
 

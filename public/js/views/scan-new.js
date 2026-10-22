@@ -49,6 +49,16 @@ const MODE_TEXT = {
     namePlaceholder: ['Ex.: Vídeos e músicas nos compartilhamentos', 'Ex.: Limpeza semanal de vídeos e músicas'],
     start: ['Iniciar busca', 'Iniciar busca e exclusão'],
   },
+  date: {
+    analyze: ['Somente listar', 'Gera o relatório com os arquivos alterados no período, para revisão. Depois, exclua pelo relatório: item a item, os selecionados ou todos os filtrados.'],
+    delete: [
+      'Listar e excluir automaticamente',
+      'Todo arquivo alterado no período é excluído durante a busca, sem confirmação item a item, até o limite da execução (arquivos alterados depois de listados são mantidos). Só para repositórios com "Permitir exclusão".',
+    ],
+    check: 'Confira as datas e os repositórios antes de continuar: todo arquivo, de qualquer tipo, alterado no período será excluído.',
+    namePlaceholder: ['Ex.: Arquivos alterados até 2018', ''],
+    start: ['Iniciar busca', 'Iniciar busca e exclusão'],
+  },
 };
 
 /**
@@ -67,7 +77,15 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
   const back = fixed ? '#/agendamentos' : '#/analises';
   // O que procurar: o do agendamento em edição; numa nova análise, os tipos de arquivo se pedido
   // (?busca=tipos) ou enquanto não houver lista de referência com termos.
-  const search = schedule ? (schedule.purpose === 'types' ? 'types' : 'terms') : query.get('busca') === 'tipos' || usable.length === 0 ? 'types' : 'terms';
+  const search = schedule
+    ? schedule.purpose === 'types'
+      ? 'types'
+      : 'terms'
+    : query.get('busca') === 'data'
+      ? 'date'
+      : query.get('busca') === 'tipos' || usable.length === 0
+        ? 'types'
+        : 'terms';
 
   if (repos.length === 0) {
     paint(
@@ -121,6 +139,12 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
                 <input type="radio" name="search" value="types" ${chk(search === 'types')} />
                 <span><b>Tipos de arquivo</b><small>Vídeos, músicas, executáveis, compactados ou as extensões que você informar — por exemplo, para liberar espaço.</small></span>
               </label>
+              ${fixed
+                ? ''
+                : html`<label>
+                    <input type="radio" name="search" value="date" ${chk(search === 'date')} />
+                    <span><b>Somente pela data de alteração</b><small>Todos os arquivos, de qualquer tipo, alterados no período escolhido em "Somente arquivos alterados a partir de" e "até" — sem listas de referência nem tipos.</small></span>
+                  </label>`}
             </div>
           </fieldset>
 
@@ -197,6 +221,10 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
 
           <fieldset class="full">
             <legend>Filtros e desempenho</legend>
+            <div class="alert info" data-for-search="date">${icon('info')}<div>
+              <b>Busca só pela data:</b> informe "Somente arquivos alterados a partir de", "Somente arquivos alterados até" ou as duas — todos os arquivos alterados nesse período entram no resultado.
+              <p data-date-later hidden><b>Não pode ser agendada:</b> nas execuções agendadas, o período de cada execução substitui as datas. Para repetir a limpeza, crie uma política de retenção (Automação › Retenção) com o critério "Última modificação" e o período.</p>
+            </div></div>
             <div class="form-grid">
               <label class="field" data-now-only>
                 <span>Somente arquivos alterados a partir de</span>
@@ -245,6 +273,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
                 <b>Exclusão sem volta nas pastas do Windows:</b> arquivos excluídos pela rede não vão para a Lixeira. No OneDrive e no SharePoint, vale a forma definida em cada repositório (para a lixeira ou definitiva). <span data-text="check"></span>
                 <p data-path-warning hidden><b>Atenção:</b> com "Caminho completo", um termo no nome de uma pasta faz todos os arquivos dela (e das subpastas) serem encontrados — e excluídos.</p>
                 <p data-work-warning hidden><b>Atenção:</b> você marcou arquivos de trabalho (<span data-work-names></span>): todos os arquivos desses tipos nos repositórios escolhidos serão excluídos.</p>
+                <p data-date-warning hidden><b>Atenção:</b> sem a data "alterados até", entram também os arquivos alterados recentemente (até o início da busca) — documentos em uso serão excluídos.</p>
                 <p data-schedule-only hidden><b>Agendamento:</b> a exclusão vale para todas as execuções, sem nova confirmação. Ela é conferida em cada execução: se um repositório deixar de permitir a exclusão, mudar de caminho (ou de contas e sites) ou passar a excluir de forma definitiva, as execuções falham até o agendamento ser salvo e confirmado de novo.</p>
                 <label class="field"><span>Digite EXCLUIR para confirmar${schedule?.action === 'delete' ? ' (de novo, a cada vez que o agendamento é salvo)' : ''}</span><input type="text" name="confirmDelete" autocomplete="off" spellcheck="false" /></label>
               </div>
@@ -261,7 +290,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
 
   const form = root.querySelector('[data-form]');
   const submit = form.querySelector('[data-submit]');
-  const mode = () => (form.elements.search.value === 'types' ? 'types' : 'terms');
+  const mode = () => (form.elements.search.value === 'types' ? 'types' : form.elements.search.value === 'date' ? 'date' : 'terms');
   const setText = (key, value) => {
     form.querySelector(`[data-text="${key}"]`).textContent = value;
   };
@@ -292,6 +321,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
 
   const sync = () => {
     const types = mode() === 'types';
+    const byDate = mode() === 'date';
     const T = MODE_TEXT[mode()];
     const deleting = form.elements.action.value === 'delete';
     const later = scheduling(form);
@@ -299,15 +329,17 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
       el.hidden = el.dataset.forSearch !== mode();
     });
     // Sem as listas ao lado, os repositórios ocupam a linha inteira.
-    form.querySelector('[data-repositories]').classList.toggle('full', types);
+    form.querySelector('[data-repositories]').classList.toggle('full', types || byDate);
     setText('analyze-label', T.analyze[0]);
     setText('analyze-hint', T.analyze[1]);
     setText('delete-label', T.delete[0]);
     setText('delete-hint', T.delete[1]);
     setText('check', T.check);
     form.querySelector('[data-delete-confirm]').hidden = !deleting;
-    form.querySelector('[data-limit]').hidden = !(types && deleting);
-    form.querySelector('[data-path-warning]').hidden = types || !(form.elements.checkName.checked && form.elements.nameTarget.value === 'path');
+    form.querySelector('[data-limit]').hidden = !((types || byDate) && deleting);
+    form.querySelector('[data-date-later]').hidden = !(byDate && later);
+    form.querySelector('[data-date-warning]').hidden = !(byDate && deleting && !form.elements.modifiedBefore.value && !form.elements.modifiedBefore.validity.badInput);
+    form.querySelector('[data-path-warning]').hidden = types || byDate || !(form.elements.checkName.checked && form.elements.nameTarget.value === 'path');
     // Arquivos de trabalho: as categorias marcadas e as extensões digitadas que são desses tipos.
     const workNames = types
       ? [
@@ -321,8 +353,8 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     form.querySelectorAll('[data-now-only]').forEach((el) => {
       el.hidden = later;
     });
-    form.querySelector('[data-name-label]').textContent = later ? 'Nome do agendamento' : types ? 'Nome da busca (opcional)' : 'Nome da análise (opcional)';
-    if (!fixed) root.querySelector('[data-title]').textContent = types ? 'Nova busca por tipo de arquivo' : 'Nova análise';
+    form.querySelector('[data-name-label]').textContent = later ? 'Nome do agendamento' : types || byDate ? 'Nome da busca (opcional)' : 'Nome da análise (opcional)';
+    if (!fixed) root.querySelector('[data-title]').textContent = types ? 'Nova busca por tipo de arquivo' : byDate ? 'Nova busca por data de alteração' : 'Nova análise';
     form.elements.name.maxLength = later ? 120 : 200;
     form.elements.name.placeholder = T.namePlaceholder[later ? 1 : 0];
     submit.className = `btn ${deleting ? 'danger' : 'primary'}`;
@@ -330,7 +362,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     paint(submit, html`${icon(later ? 'clock' : 'play')} ${label}`);
   };
   const onChange = (event) => {
-    if (['search', 'action', 'nameTarget', 'checkName', 'categories', 'extensions'].includes(event.target.name)) sync();
+    if (['search', 'action', 'nameTarget', 'checkName', 'categories', 'extensions', 'modifiedBefore'].includes(event.target.name)) sync();
   };
   const onInput = (event) => {
     if (event.target.name === 'extensions') sync();
@@ -343,8 +375,10 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     event.preventDefault();
     const f = new FormData(form);
     const types = mode() === 'types';
+    const byDate = mode() === 'date';
     const deleting = f.get('action') === 'delete';
     const later = scheduling(form);
+    if (byDate && later) return toast('A busca só pela data de alteração não pode ser agendada: para repetir a limpeza, crie uma política de retenção (Automação › Retenção).', 'error');
     // Data digitada pela metade (sem o ano, por exemplo): o navegador a entrega vazia, e a análise
     // rodaria sem o filtro. É recusada.
     if (!later) {
@@ -365,12 +399,26 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
     };
     const body = {
       kind: 'files',
-      purpose: types ? 'types' : 'terms',
+      purpose: types || byDate ? 'types' : 'terms',
       name: String(f.get('name') || '').trim(),
       repositoryIds: f.getAll('repositoryIds'),
       confirmDelete: deleting ? String(f.get('confirmDelete') || '') : '',
     };
-    if (types) {
+    if (byDate) {
+      let maxDeletions = limitValue();
+      if (maxDeletions === null && !deleting) maxDeletions = catalog.defaultMaxDeletions;
+      // Todos os arquivos: as datas escolhem quais (ao menos uma é exigida).
+      body.fileTypes = { all: true, maxDeletions };
+      body.options = options;
+      if (!options.modifiedAfter && !options.modifiedBefore) {
+        form.elements.modifiedAfter.focus();
+        return toast('Informe "Somente arquivos alterados a partir de", "Somente arquivos alterados até" ou as duas.', 'error');
+      }
+      if (maxDeletions === null) {
+        form.elements.maxDeletions.focus();
+        return toast('Informe o limite de exclusões por execução: um número inteiro (0 = sem limite).', 'error');
+      }
+    } else if (types) {
       const minSizeMB = minSizeValue();
       let maxDeletions = limitValue();
       // O limite só vale com a exclusão (o campo fica escondido em "Somente procurar"): o salvo é mantido.
@@ -405,7 +453,7 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
       form.elements.modifiedBefore.focus();
       return toast('A data "alterados até" é anterior à data "alterados a partir de".', 'error');
     }
-    if (!types && body.listIds.length === 0) return toast('Selecione ao menos uma lista de referência.', 'error');
+    if (!types && !byDate && body.listIds.length === 0) return toast('Selecione ao menos uma lista de referência.', 'error');
     if (deleting) {
       const blocked = repos.filter((r) => body.repositoryIds.includes(r.id) && !r.allowDelete).map((r) => r.name);
       if (blocked.length) return toast(`A exclusão não está permitida em: ${blocked.join(', ')}. Ative em Repositórios ou escolha "${MODE_TEXT[mode()].analyze[0]}".`, 'error');
@@ -424,14 +472,14 @@ export async function render(root, { ctx, props = {}, query = new URLSearchParam
         return;
       }
       const scan = await post('/api/scans', body);
-      toast(types ? 'Busca por tipo iniciada.' : `Análise iniciada (${fmtNum(scan.summary.termCount)} termos).`, 'success');
+      toast(byDate ? 'Busca por data iniciada.' : types ? 'Busca por tipo iniciada.' : `Análise iniciada (${fmtNum(scan.summary.termCount)} termos).`, 'success');
       go(`/analises/${scan.id}`);
     } catch (err) {
       toast(err.message, 'error');
       submit.disabled = false;
       // O campo do erro, quando o servidor recusa uma das opções da busca por tipo.
       const field = /Extensão inválida|extensões/.test(err.message) ? 'extensions' : /tamanho mínimo/.test(err.message) ? 'minSizeMB' : /limite de exclusões/.test(err.message) ? 'maxDeletions' : null;
-      if (types && field && !form.elements[field].closest('[hidden]')) form.elements[field].focus();
+      if ((types || byDate) && field && !form.elements[field].closest('[hidden]')) form.elements[field].focus();
     }
   };
   form.addEventListener('submit', onSubmit);

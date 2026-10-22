@@ -34,10 +34,14 @@ export function typeInfoRows(scan) {
     ['Fim', toDate(scan.finishedAt)],
     ['Repositórios', (scan.summary?.repositories || []).map((r) => `${r.name} (${r.path})`).join('; ')],
     ['Tipos procurados', describeFileTypes(t)],
-    ['Categorias', (t.categories || []).map((c) => CATEGORIES[c]?.label || c).join('; ') || 'nenhuma'],
-    ['Outras extensões', (t.extensions || []).join('; ') || 'nenhuma'],
-    ['Tamanho mínimo', t.minSizeMB ? `${String(t.minSizeMB).replace('.', ',')} MB` : 'todos os tamanhos'],
-    ['Tipo real pelo conteúdo', t.checkContent ? 'conferido (pastas do Windows)' : 'não conferido (só a extensão)'],
+    ...(t.all
+      ? []
+      : [
+          ['Categorias', (t.categories || []).map((c) => CATEGORIES[c]?.label || c).join('; ') || 'nenhuma'],
+          ['Outras extensões', (t.extensions || []).join('; ') || 'nenhuma'],
+          ['Tamanho mínimo', t.minSizeMB ? `${String(t.minSizeMB).replace('.', ',')} MB` : 'todos os tamanhos'],
+          ['Tipo real pelo conteúdo', t.checkContent ? 'conferido (pastas do Windows)' : 'não conferido (só a extensão)'],
+        ]),
     ['Alterados a partir de', o.modifiedAfter ? toDate(o.modifiedAfter) : 'todos'],
     ...(o.modifiedBefore ? [['Alterados até', toDate(new Date(Date.parse(o.modifiedBefore) - 1000).toISOString())]] : []),
     ['Arquivos verificados', s.filesSeen ?? 0],

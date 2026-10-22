@@ -129,7 +129,7 @@ export async function render(root, { ctx }) {
                   ${scans.slice(0, 8).map(
                     (s) => html`<tr>
                       <td><a href="${link(s)}">${s.name}</a></td>
-                      <td><span class="kind-badge">${isMail(s) ? 'E-mail' : 'Arquivos'}</span>${s.retention ? html` <span class="chip">retenção</span>` : s.fileTypes ? html` <span class="chip">busca por tipo</span>` : ''}</td>
+                      <td><span class="kind-badge">${isMail(s) ? 'E-mail' : 'Arquivos'}</span>${s.retention ? html` <span class="chip">retenção</span>` : s.fileTypes ? html` <span class="chip">${s.fileTypes.all ? 'busca por data' : 'busca por tipo'}</span>` : ''}</td>
                       <td>${statusBadge(s.status)}</td>
                       <td class="nowrap">${fmtDateTime(s.startedAt || s.createdAt)}</td>
                       <td class="num">${fmtNum(isMail(s) ? s.stats?.messagesSeen : s.stats?.filesSeen)}</td>

@@ -15,14 +15,14 @@ import { FILE_CRITERIA, MAIL_CRITERIA, amountText } from '../retention/policy.js
 
 export const STATUSES = ['deleted', 'missing', 'changed', 'failed'];
 export const MODES = ['auto', 'manual', 'retention'];
-export const PURPOSES = ['retention', 'types', 'terms'];
+export const PURPOSES = ['retention', 'types', 'date', 'terms'];
 /** Tipos de local do item ('cloud': OneDrive ou SharePoint, quando a linha não permite distinguir). */
 export const KINDS = ['local', 'onedrive', 'sharepoint', 'cloud', 'mail', 'teams'];
 const TARGET_TYPES = new Set(['local', 'onedrive', 'sharepoint', 'mail', 'teams']);
 const SCAN_KINDS = new Set(['files', 'mail', 'teams']);
 
 export const KIND_LABELS = { local: 'Pasta do Windows', onedrive: 'OneDrive', sharepoint: 'SharePoint', cloud: 'OneDrive/SharePoint', mail: 'E-mail', teams: 'Teams', '': '—' };
-export const PURPOSE_LABELS = { retention: 'Política de retenção', types: 'Busca por tipo', terms: 'Análise por termos', '': '—' };
+export const PURPOSE_LABELS = { retention: 'Política de retenção', types: 'Busca por tipo', date: 'Busca por data de alteração', terms: 'Análise por termos', '': '—' };
 export const ORIGIN_LABELS = { retention: 'Automática (política)', auto: 'Automática', manual: 'Manual', '': '—' };
 export const METHOD_LABELS = { file: 'Definitiva', permanent: 'Definitiva', trash: 'Para a lixeira', teams: 'Removida do Teams (recuperável)' };
 export const NO_POLICY = 'Sem política (análise avulsa ou manual)';
@@ -81,7 +81,7 @@ export function localDay(ms) {
  * na chave do cache). Chaves desconhecidas são ignoradas; valores inválidos lançam DeletionFilterError.
  *   from, to: "AAAA-MM-DD" no fuso do servidor (from inclusive; to inclui o dia inteiro)
  *   status: lista separada por vírgulas (deleted, missing, changed, failed)
- *   mode: auto | manual | retention · purpose: retention | types | terms
+ *   mode: auto | manual | retention · purpose: retention | types | date | terms
  *   kind: local | onedrive | sharepoint | cloud (OneDrive ou SharePoint) | mail | teams
  *   scheduleId: agendamento ou política ("none": sem agendamento) · repository: repositório ou conexão
  *   scanId: análise · q: busca livre (sem diferenciar acentos e maiúsculas)
@@ -198,7 +198,7 @@ export class DeletionResolver {
           ? {
               name: scan.name || '',
               kind: SCAN_KINDS.has(scan.kind) ? scan.kind : 'files',
-              purpose: scan.retention ? 'retention' : scan.fileTypes ? 'types' : 'terms',
+              purpose: scan.retention ? 'retention' : scan.fileTypes?.all ? 'date' : scan.fileTypes ? 'types' : 'terms',
               scheduleId: scan.scheduleId || null,
               scheduleName: scan.scheduleName || null,
               retention: scan.retention || null,

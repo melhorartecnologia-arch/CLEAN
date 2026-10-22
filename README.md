@@ -58,6 +58,9 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
   disco, temporários ou as extensões que você informar — com tamanho mínimo e a conferência do tipo
   real pelo conteúdo (acha um vídeo renomeado para .pdf), para revisão no relatório ou exclusão
   automática, agora ou agendada.
+- **Busca só pela data de alteração**: todos os arquivos, de qualquer tipo, alterados a partir de
+  e/ou até uma data — sem listas de referência nem tipos —, para revisão no relatório ou exclusão
+  automática.
 - **Exclusão** opcional dos arquivos e mensagens encontrados: automática durante a análise
   ("analisar e excluir"), item a item pelo relatório ou, nos relatórios de arquivos, **em lote** (os
   selecionados ou todos os filtrados), com registro de cada exclusão.
@@ -106,6 +109,7 @@ pastas e procura os termos no assunto, no **corpo** e nos **anexos** de cada men
 11. [Políticas de retenção](#políticas-de-retenção)
 12. [Reinício de iPhones (Intune)](#reinício-de-iphones-intune)
 13. [Busca por tipo de arquivo](#busca-por-tipo-de-arquivo)
+   - [Busca só pela data de alteração](#busca-só-pela-data-de-alteração)
 14. [Executando como serviço](#executando-como-serviço)
 15. [Configuração](#configuração)
 16. [Segurança](#segurança)
@@ -1277,6 +1281,30 @@ ou conteúdo), usuário, repositório, extensão e exclusão, com os maiores arq
 (abas *Resumo*, *Arquivos encontrados*, *Exclusões* e *Erros*), o CSV e o HTML têm uma linha por
 arquivo, com o tipo, a extensão, como ele foi encontrado e o formato real. As buscas aparecem em
 *Análises de arquivos* marcadas como *busca por tipo*.
+
+
+### Busca só pela data de alteração
+
+Em **Nova análise › O que procurar › Somente pela data de alteração**, o CLEAN lista **todos os
+arquivos, de qualquer tipo**, alterados no período escolhido — sem listas de referência e sem
+escolher tipos. As datas ficam em *Filtros e desempenho*:
+
+- **Somente arquivos alterados a partir de** e/ou **Somente arquivos alterados até** (ao menos uma é
+  obrigatória; o dia do "até" conta inteiro, até 23:59 na hora do servidor). Vale a data mais recente
+  entre a modificação e a criação: um arquivo copiado para a pasta conta pela data da cópia;
+- **o que fazer**: *Somente listar* (relatório para revisão; depois, exclua pelo relatório — item a
+  item, os selecionados ou todos os filtrados) ou *Listar e excluir automaticamente*, com o
+  **limite de exclusões por execução** (1.000 por padrão; 0 = sem limite) e a confirmação
+  **EXCLUIR**, só em repositórios com *Permitir exclusão*. Só com "a partir de", entram também os
+  arquivos alterados recentemente (até o início da busca) — o formulário avisa;
+- o relatório é o mesmo da busca por tipo, com o tipo de cada arquivo pela extensão (os fora do
+  catálogo aparecem como *Outros arquivos*), e as exclusões ficam no
+  [Registro de exclusões](#registro-de-exclusões) como *Busca por data de alteração*.
+
+A busca só pela data **não pode ser agendada** (nas execuções agendadas, o período de cada execução
+substitui as datas). Para repetir a limpeza, crie uma [política de retenção](#políticas-de-retenção)
+com o critério *Última modificação* e o corte *Período* — com a simulação, as pastas escolhidas e a
+conferência da data na hora de excluir.
 
 ## Executando como serviço
 

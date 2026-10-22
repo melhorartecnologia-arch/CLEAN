@@ -82,7 +82,7 @@ function deletionContext(scan) {
   const r = scan?.retention;
   const context = {
     scanKind: scan?.kind || 'files',
-    purpose: r ? 'retention' : scan?.fileTypes ? 'types' : 'terms',
+    purpose: r ? 'retention' : scan?.fileTypes?.all ? 'date' : scan?.fileTypes ? 'types' : 'terms',
     scheduleId: scan?.scheduleId || null,
     scheduleName: scan?.scheduleName || null,
   };

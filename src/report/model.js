@@ -912,7 +912,7 @@ export function summarizeTypes(records) {
     add(groups.byRepository, r.repositoryId, { name: r.repositoryName }, size);
   }
   // Os tipos na ordem do catálogo; os demais grupos, os maiores primeiro.
-  const order = [...Object.keys(CATEGORIES), 'custom'];
+  const order = [...Object.keys(CATEGORIES), 'custom', 'other'];
   const top = (map, by = 'count') => [...map.values()].sort((a, b) => b[by] - a[by] || b.count - a.count).slice(0, 500);
   return {
     count,

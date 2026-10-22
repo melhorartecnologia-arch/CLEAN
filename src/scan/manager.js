@@ -486,10 +486,14 @@ export class ScanManager {
       throw new ScanError(err.message);
     }
     const opts = typeOptions(body.options);
-    checkDeletion(opts, body, targets, 'do repositório', { only: 'Somente procurar', action: 'procurar e excluir' });
+    // Só pela data: sem nenhuma das datas, seriam todos os arquivos dos repositórios.
+    if (fileTypes.all && !opts.modifiedAfter && !opts.modifiedBefore) {
+      throw new ScanError('Na busca só pela data de alteração, informe "Somente arquivos alterados a partir de", "Somente arquivos alterados até" ou as duas.');
+    }
+    checkDeletion(opts, body, targets, 'do repositório', fileTypes.all ? { only: 'Somente listar', action: 'listar e excluir' } : { only: 'Somente procurar', action: 'procurar e excluir' });
     const scan = this.store.createScan({
       kind: 'files',
-      name: this.#scanName(body.name, 'Busca por tipo'),
+      name: this.#scanName(body.name, fileTypes.all ? 'Busca por data' : 'Busca por tipo'),
       status: 'queued',
       repositoryIds: targets.map((t) => t.id),
       listIds: [],

@@ -43,7 +43,7 @@ const KIND_OPTIONS = [
   ['mail', 'E-mail'],
   ['teams', 'Teams'],
 ];
-const PURPOSE_TEXT = { retention: 'Políticas de retenção', types: 'Buscas por tipo', terms: 'Análises por termos' };
+const PURPOSE_TEXT = { retention: 'Políticas de retenção', types: 'Buscas por tipo', date: 'Buscas por data de alteração', terms: 'Análises por termos' };
 const NO_POLICY = 'Sem política (análise avulsa ou manual)';
 
 /** Situação em poucas palavras (o texto completo fica na dica): [classe, arquivo, mensagem]. */

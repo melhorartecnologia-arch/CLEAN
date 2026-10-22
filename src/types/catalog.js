@@ -78,6 +78,9 @@ export const CATEGORIES = {
 /** Extensões escolhidas pela pessoa (fora das categorias). */
 export const CUSTOM = { label: 'Extensão escolhida' };
 
+/** Busca só pela data de alteração (todos os arquivos): os de extensão fora do catálogo. */
+export const OTHER = { label: 'Outros arquivos' };
+
 export const DEFAULT_MAX_DELETIONS = 1000;
 const MAX_EXTENSIONS = 200;
 const EXTENSION_RE = /^\.[a-z0-9][a-z0-9._~-]{0,30}$/;
@@ -93,9 +96,14 @@ export function normalizeExtension(value) {
   return EXTENSION_RE.test(e) && !e.endsWith('.') ? e : null;
 }
 
-/** Valida a busca por tipo recebida da interface (ou da API). */
+/**
+ * Valida a busca por tipo recebida da interface (ou da API). all: true — busca só pela data de
+ * alteração: todos os arquivos, de qualquer tipo (os filtros "alterados a partir de" e "até" da
+ * análise escolhem quais; ao menos um deles é exigido ao iniciar).
+ */
 export function sanitizeFileTypes(input) {
   const t = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  if (t.all === true) return { all: true, categories: [], extensions: [], checkContent: false, minSizeMB: 0, maxDeletions: maxDeletionsOf(t) };
   const categories = [...new Set((Array.isArray(t.categories) ? t.categories : []).filter((c) => typeof c === 'string'))];
   const unknown = categories.filter((c) => !Object.hasOwn(CATEGORIES, c));
   if (unknown.length) throw new FileTypesError(`Tipo de arquivo desconhecido: ${unknown.join(', ')}.`);
@@ -110,10 +118,7 @@ export function sanitizeFileTypes(input) {
   if (!categories.length && !extensions.length) throw new FileTypesError('Escolha ao menos um tipo de arquivo ou informe uma extensão.');
   const minSizeMB = t.minSizeMB === undefined || t.minSizeMB === null || t.minSizeMB === '' ? 0 : toNumber(t.minSizeMB);
   if (!Number.isFinite(minSizeMB) || minSizeMB < 0 || minSizeMB > 1_048_576) throw new FileTypesError('Informe o tamanho mínimo em MB (0 = todos os tamanhos).');
-  const maxDeletions = t.maxDeletions === undefined || t.maxDeletions === null || t.maxDeletions === '' ? DEFAULT_MAX_DELETIONS : toNumber(t.maxDeletions);
-  if (!Number.isInteger(maxDeletions) || maxDeletions < 0 || maxDeletions > 10_000_000) {
-    throw new FileTypesError('Informe o limite de exclusões automáticas por execução (0 = sem limite).');
-  }
+  const maxDeletions = maxDeletionsOf(t);
   return {
     // Na ordem do catálogo (o resultado não depende da ordem dos cliques).
     categories: Object.keys(CATEGORIES).filter((c) => categories.includes(c)),
@@ -124,11 +129,29 @@ export function sanitizeFileTypes(input) {
   };
 }
 
+/** Limite de exclusões automáticas por execução (0 = sem limite); em branco, o padrão. */
+function maxDeletionsOf(t) {
+  const maxDeletions = t.maxDeletions === undefined || t.maxDeletions === null || t.maxDeletions === '' ? DEFAULT_MAX_DELETIONS : toNumber(t.maxDeletions);
+  if (!Number.isInteger(maxDeletions) || maxDeletions < 0 || maxDeletions > 10_000_000) {
+    throw new FileTypesError('Informe o limite de exclusões automáticas por execução (0 = sem limite).');
+  }
+  return maxDeletions;
+}
+
 /**
  * Tipo do arquivo pela extensão (a mais longa que combina: ".tar.gz" antes de ".gz"), ou null.
- * Devolve { category, extension }; category 'custom' para as extensões escolhidas.
+ * Devolve { category, extension }; category 'custom' para as extensões escolhidas. Na busca só pela
+ * data (all), todo arquivo combina: a categoria do catálogo pela extensão, ou 'other'.
  */
 export function typeMatcher(fileTypes) {
+  if (fileTypes.all) {
+    return (name) => {
+      const lower = String(name).toLowerCase();
+      const dot = lower.lastIndexOf('.');
+      const extension = dot > 0 ? lower.slice(dot) : '';
+      return { category: (extension && categoryOfExtension(extension)) || 'other', extension };
+    };
+  }
   const byExtension = new Map();
   for (const c of fileTypes.categories || []) for (const e of CATEGORIES[c].extensions) if (!byExtension.has(e)) byExtension.set(e, c);
   for (const e of fileTypes.extensions || []) if (!byExtension.has(e)) byExtension.set(e, 'custom');
@@ -143,7 +166,7 @@ export function typeMatcher(fileTypes) {
   };
 }
 
-export const categoryLabel = (key) => (key === 'custom' ? CUSTOM.label : CATEGORIES[key]?.label || key);
+export const categoryLabel = (key) => (key === 'custom' ? CUSTOM.label : key === 'other' ? OTHER.label : CATEGORIES[key]?.label || key);
 
 const BY_EXTENSION = new Map(Object.entries(CATEGORIES).flatMap(([key, c]) => c.extensions.map((e) => [e, key])));
 
@@ -153,6 +176,7 @@ export const categoryOfExtension = (extension) => BY_EXTENSION.get(extension) ||
 /** Descrição em português, ex.: "Vídeos, Músicas e áudio e .xyz (a partir de 100 MB)". */
 export function describeFileTypes(fileTypes) {
   if (!fileTypes) return '';
+  if (fileTypes.all) return 'Todos os arquivos (somente pela data de alteração)';
   const parts = [...(fileTypes.categories || []).map((c) => CATEGORIES[c]?.label || c), ...(fileTypes.extensions || [])];
   const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} e ${parts.at(-1)}` : parts[0] || '';
   const extras = [fileTypes.minSizeMB ? `a partir de ${String(fileTypes.minSizeMB).replace('.', ',')} MB` : '', fileTypes.checkContent ? 'conferindo o tipo real' : ''].filter(Boolean);

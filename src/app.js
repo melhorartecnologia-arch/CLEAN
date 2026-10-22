@@ -22,7 +22,7 @@ import { DEFAULT_EXCLUDES } from './scan/walker.js';
 import { MAIL_DEFAULT_OPTIONS } from './mail/scanner.js';
 import { TEAMS_DEFAULT_OPTIONS } from './teams/scanner.js';
 import { MAIL_TYPES } from './mail/connectors.js';
-import { CATEGORIES, CUSTOM, DEFAULT_MAX_DELETIONS } from './types/catalog.js';
+import { CATEGORIES, CUSTOM, OTHER, DEFAULT_MAX_DELETIONS } from './types/catalog.js';
 
 // Versão exibida na interface (lida do package.json).
 const VERSION = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')).version;
@@ -162,6 +162,7 @@ export function createApp({ store, manager, config, scheduler = new Scheduler({ 
       fileTypes: {
         categories: Object.entries(CATEGORIES).map(([key, c]) => ({ key, label: c.label, extensions: c.extensions, work: Boolean(c.work) })),
         customLabel: CUSTOM.label,
+        otherLabel: OTHER.label,
         defaultMaxDeletions: DEFAULT_MAX_DELETIONS,
       },
     });
