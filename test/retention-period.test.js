@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { sanitizeRetention, cutoffDate, describeRetention, amountText, expiryWindow, inWindow, RetentionError, FILE_CRITERIA } from '../src/retention/policy.js';
 import { cutoffPreview, periodPreview, describeRetention as describeClient, amountText as amountClient } from '../public/js/retention.js';
 import { Scanner } from '../src/scan/scanner.js';
@@ -269,4 +270,45 @@ test('API: política por período, simulação, exclusão manual com reconferên
     await scheduler.stop();
     await manager.shutdown?.();
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Reconferência
+
+test('fim do período num dia sem 00:00 (horário de verão à meia-noite): o corte não escorrega', () => {
+  // Em São Paulo, o horário de verão de 2018 começou em 04/11 às 00:00 (que não existiu).
+  const code = `
+    import { sanitizeRetention, cutoffDate, expiryWindow, inWindow } from ${JSON.stringify(new URL('../src/retention/policy.js', import.meta.url).href)};
+    const r = sanitizeRetention({ mode: 'period', from: '2018-11-01', to: '2018-11-04', criterion: 'modified' }, 'files');
+    const cutoff = cutoffDate(r);
+    const w = expiryWindow({ ...r, cutoff: cutoff.toISOString() });
+    console.log(JSON.stringify({ cutoff: cutoff.toString(), next: inWindow(+new Date(2018, 10, 5, 0, 30), w), last: inWindow(+new Date(2018, 10, 4, 23, 30), w), first: inWindow(+new Date(2018, 10, 1, 0, 0), w) }));
+  `;
+  const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, TZ: 'America/Sao_Paulo' } }).toString());
+  assert.match(out.cutoff, /Nov 05 2018 00:00:00/);
+  assert.deepEqual([out.next, out.last, out.first], [false, true, true]);
+});
+
+test('período até hoje: o fim é o início da execução — um arquivo aberto durante a execução fica', async () => {
+  const { dir, put, exists } = repoDir();
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const yesterday = new Date(Date.now() - 86400000);
+  put('aberto-agora.docx', yesterday, yesterday);
+  put('parado.docx', yesterday, yesterday);
+  const retention = policyFor({ mode: 'period', from: '2020-01-01', to: today, criterion: 'opened-or-modified', maxDeletions: 0 });
+  assert.ok(Date.parse(retention.cutoff) <= Date.now(), 'o corte não fica no futuro');
+  // Entre a listagem e a exclusão, um dos arquivos é aberto.
+  const ownerResolver = {
+    async resolve(paths) {
+      await new Promise((r) => setTimeout(r, 20));
+      const st = fs.statSync(path.join(dir, 'aberto-agora.docx'));
+      fs.utimesSync(path.join(dir, 'aberto-agora.docx'), new Date(), st.mtime);
+      return new Map(paths.map((p) => [p, null]));
+    },
+  };
+  const run = await runFiles(dir, retention, { ownerResolver });
+  const byStatus = Object.fromEntries(run.events.map((e) => [run.records.find((r) => r.id === e.recordId).name, e.status]));
+  assert.deepEqual(byStatus, { 'aberto-agora.docx': 'changed', 'parado.docx': 'deleted' });
+  assert.ok(exists('aberto-agora.docx') && !exists('parado.docx'));
 });

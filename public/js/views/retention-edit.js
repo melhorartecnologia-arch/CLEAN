@@ -6,7 +6,7 @@ import { get, post, put } from '../api.js';
 import { html, render as paint, icon, toast, fmtServerDateTime, plural } from '../ui.js';
 import { go } from '../nav.js';
 import { scheduleSection, bindSchedule, readSchedule, scheduling, keepField } from '../schedule-form.js';
-import { FILE_CRITERIA, MAIL_CRITERIA, UNITS, DEFAULT_MAX_DELETIONS, ACCESS_CRITERIA, describeRetention, cutoffPreview, periodPreview, deletionsText } from '../retention.js';
+import { FILE_CRITERIA, MAIL_CRITERIA, UNITS, DEFAULT_MAX_DELETIONS, ACCESS_CRITERIA, describeRetention, cutoffPreview, periodPreview, sinceInstant, deletionsText } from '../retention.js';
 
 const CLOUD_LABELS = { onedrive: 'OneDrive', sharepoint: 'SharePoint' };
 const TYPE_LABELS = { graph: 'Microsoft 365', gmail: 'Google Workspace', imap: 'IMAP' };
@@ -105,7 +105,9 @@ export async function render(root, { params, query, ctx }) {
     html`<div class="page-head">
         <div>
           <h1>${title}</h1>
-          <div class="sub">${mail ? 'Mensagens' : 'Arquivos (de qualquer tipo)'} mais antig${o}s que a idade máxima, sem uso desde uma data${mail ? '' : ' ou com a data do critério dentro de um período'} são listad${o}s no relatório e, se a política excluir, eliminad${o}s — cada exclusão fica no Registro de exclusões.</div>
+          <div class="sub">${mail
+            ? 'Mensagens mais antigas que a idade máxima, ou recebidas antes de uma data, são listadas no relatório e, se a política excluir, eliminadas'
+            : 'Arquivos (de qualquer tipo) mais antigos que a idade máxima, sem uso desde uma data ou com a data do critério dentro de um período são listados no relatório e, se a política excluir, eliminados'} — cada exclusão fica no Registro de exclusões.</div>
         </div>
       </div>
       <form class="card" data-form novalidate>
@@ -188,7 +190,7 @@ export async function render(root, { params, query, ctx }) {
                     <label class="field"><span>De</span><input type="date" name="periodFrom" min="1980-01-02" max="${todayIso()}" value="${r.from || ''}" /></label>
                     <label class="field"><span>Até</span><input type="date" name="periodTo" min="1980-01-02" max="${todayIso()}" value="${r.to || ''}" /></label>
                   </div>
-                  <small>Expiram os arquivos cuja data do critério está dentro do período, contando os dois dias inteiros (hora do servidor). Os mais antigos que o início e os mais recentes que o fim ficam. Com "Sem abertura nem modificação", vale a mais recente das duas datas: um arquivo aberto ou modificado depois do fim do período fica. As datas não andam: todas as execuções usam o mesmo período.</small>
+                  <small>Expiram os arquivos cuja data do critério está dentro do período, contando os dois dias inteiros (hora do servidor). Os mais antigos que o início e os mais recentes que o fim ficam. Com "Sem abertura nem modificação", vale a mais recente das duas datas: um arquivo aberto ou modificado depois do fim do período fica. As datas não andam: todas as execuções usam o mesmo período. Com a data final hoje, o período vai até o início de cada execução.</small>
                 </div>`}
             ${mail
               ? html`<label class="check"><input type="checkbox" name="includeTrash" ${chk(r.includeTrash !== false)} /><span>Incluir a Lixeira (Itens Excluídos)</span></label>
@@ -428,7 +430,8 @@ export async function render(root, { params, query, ctx }) {
     if (targetIds.length === 0) return toast(mail ? 'Selecione ao menos uma conexão de e-mail.' : 'Selecione ao menos um repositório.', 'error');
     if (!cutoffPreview(retention)) {
       if (retention.mode === 'period') {
-        form.elements[retention.from ? 'periodTo' : 'periodFrom'].focus();
+        // O campo com o problema: a data inicial inválida (ou vazia); senão a final (inválida ou antes da inicial).
+        form.elements[sinceInstant(retention.from) ? 'periodTo' : 'periodFrom'].focus();
         return toast(PERIOD_ERROR, 'error');
       }
       if (retention.mode === 'date') {

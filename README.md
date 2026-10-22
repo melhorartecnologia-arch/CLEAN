@@ -1018,7 +1018,8 @@ nada expira até essa data ficar antiga.
   *Última modificação* de 01/01/2015 a 31/12/2018 — os arquivos alterados pela última vez nesses
   quatro anos; *Sem abertura nem modificação* no mesmo período — vale a mais recente das duas datas,
   então um arquivo modificado em 2016 mas aberto em 2021 fica. As datas vão de 02/01/1980 até hoje
-  (a final não pode estar no futuro) e não andam: todas as execuções usam o mesmo período. Na hora
+  (a final não pode estar no futuro; se for hoje, o período vai até o momento em que a execução
+  começa) e não andam: todas as execuções usam o mesmo período. Na hora
   de excluir, a data é lida de novo: um arquivo cuja data saiu do período depois da listagem (foi
   aberto, ou teve a data restaurada de um backup) é mantido.
 

@@ -355,11 +355,14 @@ export function recordInScope(retention, record) {
  * pelo calendário, na hora local).
  */
 export function cutoffDate(retention, now = new Date()) {
-  // Período: até o fim do dia final (expiram as datas anteriores às 00:00 do dia seguinte).
+  // Período: até o fim do dia final (expiram as datas anteriores às 00:00 do dia seguinte, montado
+  // pelo calendário: num dia sem 00:00, no início do horário de verão, a hora não escorrega). Com o dia
+  // final hoje, o fim é o momento em que a execução começa: um arquivo aberto ou modificado durante a
+  // execução não entra no período (e a conferência na hora de excluir o mantém).
   if (retention.to) {
-    const end = sinceDate(retention.to);
-    end.setDate(end.getDate() + 1);
-    return end;
+    const [y, m, d] = String(retention.to).split('-').map(Number);
+    const end = new Date(y, m - 1, d + 1);
+    return +end > +now ? new Date(now) : end;
   }
   if (retention.since) return sinceDate(retention.since);
   const d = new Date(now);
